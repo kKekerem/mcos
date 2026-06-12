@@ -1,0 +1,121 @@
+#!/bin/sh
+# mcos-install — Install the booted MCOS live system to a target disk persistently.
+
+set -e
+
+log() { echo -e "\n>> mcos-install: $*\n"; }
+
+TARGET="$1"
+if [ -z "$TARGET" ]; then
+    echo "Kullanım: mcos-install /dev/sdX"
+    exit 1
+fi
+
+if [ ! -b "$TARGET" ]; then
+    echo "Hata: Geçersiz hedef aygıt $TARGET"
+    exit 1
+fi
+
+log "Kurulum başlıyor... Hedef disk sıfırlanıyor: $TARGET"
+# Clear the partition table
+dd if=/dev/zero of="$TARGET" bs=1M count=10 status=none
+
+log "Bölümler oluşturuluyor (Boot: 64M, Root: 4G, Data: Kalanı)..."
+parted -s "$TARGET" mklabel msdos
+parted -s "$TARGET" mkpart primary fat32 1MiB 65MiB
+parted -s "$TARGET" set 1 boot on
+parted -s "$TARGET" mkpart primary ext4 65MiB 4161MiB
+parted -s "$TARGET" mkpart primary ext4 4161MiB 100%
+
+# Allow kernel to re-read partition table
+partprobe "$TARGET" 2>/dev/null || partx -a "$TARGET" 2>/dev/null || true
+sleep 3
+
+# Determine partition names (/dev/sda1 or /dev/nvme0n1p1)
+if echo "$TARGET" | grep -q "[0-9]$"; then
+    BOOT_PART="${TARGET}p1"
+    ROOT_PART="${TARGET}p2"
+    DATA_PART="${TARGET}p3"
+else
+    BOOT_PART="${TARGET}1"
+    ROOT_PART="${TARGET}2"
+    DATA_PART="${TARGET}3"
+fi
+
+log "Dosya sistemleri oluşturuluyor..."
+mkfs.vfat -F 32 -n MCOS-BOOT "$BOOT_PART"
+mkfs.ext4 -F -L MCOS-ROOT "$ROOT_PART"
+mkfs.ext4 -F -L MCOS-DATA "$DATA_PART"
+
+# Get PARTUUID for robust booting without initrd
+ROOT_PARTUUID=$(blkid -s PARTUUID -o value "$ROOT_PART")
+log "Root PARTUUID: $ROOT_PARTUUID"
+
+log "Bölümler bağlanıyor ve dosyalar kopyalanıyor..."
+mkdir -p /mnt/target
+mount "$ROOT_PART" /mnt/target
+mkdir -p /mnt/target/boot
+mount "$BOOT_PART" /mnt/target/boot
+mkdir -p /mnt/target/data
+mount "$DATA_PART" /mnt/target/data
+
+# Kopyalama işlemi (Sanal dosya sistemleri hariç her şeyi kopyala)
+log "Sistem kopyalanıyor (bu işlem biraz sürebilir)..."
+cp -ax / /mnt/target/ || true
+
+# Eğer kurulum sırasında Java veya başka veriler indirilmişse, 
+# onları da hedef diskin DATA bölümüne taşı.
+if [ -d /run/mcos/data ]; then
+    log "İndirilen veriler (Java vb.) kopyalanıyor..."
+    cp -ax /run/mcos/data/* /mnt/target/data/ || true
+fi
+
+# Live ortamdaki mevcut konfigürasyonu (isim, ağ vb.) hedef diske taşı.
+# Bu sayede OOBE ayarları kuruluma devam ederken korunur.
+if [ -f /data/config.json ]; then
+    log "Live konfigürasyon taşınıyor..."
+    cp /data/config.json /mnt/target/data/config.json || true
+fi
+
+# Kopya sonrası kernelin geldiğinden emin ol (initramfs rootfs içinde /boot altında bulunur)
+if [ -f /boot/bzImage ]; then
+    cp /boot/bzImage /mnt/target/boot/bzImage || true
+fi
+
+# Eksik bağlama noktalarını oluştur
+mkdir -p /mnt/target/dev /mnt/target/proc /mnt/target/sys /mnt/target/tmp /mnt/target/run /mnt/target/mnt
+
+log "UEFI boot desteği ekleniyor..."
+mkdir -p /mnt/target/boot/EFI/BOOT
+if [ -f /mnt/target/boot/bzImage ]; then
+    # Use the kernel as the EFI loader (EFISTUB)
+    cp /mnt/target/boot/bzImage /mnt/target/boot/EFI/BOOT/BOOTX64.EFI
+else
+    log "Uyarı: bzImage bulunamadı, UEFI kopyalanamadı."
+fi
+
+log "BIOS (Legacy) boot desteği ekleniyor..."
+if command -v extlinux >/dev/null 2>&1; then
+    extlinux --install /mnt/target/boot
+    cat > /mnt/target/boot/syslinux.cfg <<EOF
+DEFAULT mcos
+LABEL mcos
+  KERNEL /bzImage
+  APPEND root=PARTUUID=$ROOT_PARTUUID rw rootwait rootdelay=10 console=tty1 console=ttyS0,115200
+EOF
+    if [ -f /usr/share/syslinux/mbr.bin ]; then
+        dd if=/usr/share/syslinux/mbr.bin of="$TARGET" bs=440 count=1 status=none
+    fi
+else
+    log "Uyarı: extlinux bulunamadı, BIOS boot kurulamadı."
+fi
+
+log "Temizleniyor..."
+sync
+umount /mnt/target/data || true
+umount /mnt/target/boot || true
+umount /mnt/target || true
+rm -rf /mnt/target || true
+
+log "Kurulum tamamlandı!"
+exit 0

@@ -1,0 +1,8 @@
+# /etc/network/interfaces for MCOS.
+#
+# Boot only brings up loopback (essential for local IPC). Real network adapters
+# (ethernet / Wi-Fi) are detected and connected from the OOBE / the "Donanım"
+# panel tab via the daemon (netcfg) -- nothing here may block boot, so we do NOT
+# put "auto eth0" here (that errors on Wi-Fi-only or NIC-less machines).
+auto lo
+iface lo inet loopback

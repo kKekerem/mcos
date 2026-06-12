@@ -1,0 +1,4 @@
+config BR2_PACKAGE_NERD_FONT
+	bool "nerd-font"
+	help
+	  Installs a patched Nerd Font (FiraCode) for modern TUI icons.

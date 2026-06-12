@@ -1,0 +1,80 @@
+#!/bin/sh
+# Launched by init on tty1 (see /etc/inittab). Prepares the console (UTF-8 +
+# Turkish font + Q-keyboard), then runs the MCOS panel full-screen as the system
+# UI in a loop so closing/crashing the panel always returns to it -- the screen
+# never dead-ends. Picking the shell still works (init respawns us afterwards).
+SOCK="unix:///run/mcos/mcosd.sock"
+SOCK_PATH="/run/mcos/mcosd.sock"
+
+# Wait up to ~10s for the daemon that S99mcos started in the background.
+i=0
+while [ ! -S "$SOCK_PATH" ] && [ "$i" -lt 40 ]; do
+    sleep 0.25
+    i=$((i + 1))
+done
+
+# TERM lets the TUI render correctly on the Linux framebuffer console (fallback).
+export TERM=linux
+export LANG=tr_TR.UTF-8
+export LC_ALL=tr_TR.UTF-8
+
+# Disable console blanking so the framebuffer never goes black-and-stuck on PCs
+# whose firmware doesn't wake it back up. consoleblank=0 on the kernel cmdline is
+# the primary guard; this is belt-and-braces for the running VT (9;0 = never).
+printf '\033[9;0]' 2>/dev/null || true
+
+# Reset the console (clear leftover boot text) so the panel starts clean.
+printf '\033c'
+
+# Put the console in UTF-8 mode, load a font WITH Turkish glyphs (ç ğ ı İ ö ş ü)
+# and proper box-drawing, and load the Turkish-Q keymap. The default fbcon font
+# (CP437) lacks ş/ğ/ı which is why they showed as garbage. ter-u16n ships
+# in the kbd package's data and explicitly supports Latin-5.
+kbd_mode -u 2>/dev/null || true
+printf '\033%%G'                                  # switch the VT to UTF-8
+setfont ter-u16n 2>/dev/null \
+    || setfont iso09.16 2>/dev/null \
+    || setfont ter-916n 2>/dev/null \
+    || setfont LatArCyrHeb-16 2>/dev/null \
+    || setfont Lat15-Terminus16 2>/dev/null \
+    || setfont Lat15-Terminus14 2>/dev/null \
+    || setfont Lat15-Fixed16 2>/dev/null || true
+loadkeys trq 2>/dev/null || true                  # Türkçe Q-klavye
+
+# Keep the panel alive. On exit, offer a tiny menu but default to reopening it.
+while true; do
+    if command -v fbterm >/dev/null 2>&1; then
+        # Ensure fontconfig cache is built.
+        if [ ! -f /tmp/fontconfig_done ]; then
+            fc-cache -f 2>/dev/null || true
+            touch /tmp/fontconfig_done
+        fi
+        
+        # Check if FiraCode is available, otherwise fallback to DejaVu.
+        FONT="FiraCode Nerd Font"
+        if ! fc-list | grep -iq "FiraCode"; then
+            FONT="DejaVu Sans Mono"
+        fi
+
+        # Run fbterm with modern font support.
+        TERM=fbterm fbterm --font-names="\$FONT" -s 14 -- /usr/bin/mcos-panel --connect "$SOCK"
+    else
+        /usr/bin/mcos-panel --connect "$SOCK"
+    fi
+    echo ""
+    echo "MCOS paneli kapandi."
+    echo "  [1] Paneli yeniden ac (varsayilan)"
+    echo "  [2] USB'yi kalici yap / kurulum (mcos-persist)"
+    echo "  [3] Kabuk (gelismis kullanim)"
+    printf "Secim [1] (10 sn): "
+    read -t 10 choice 2>/dev/null || choice=1
+    [ -z "$choice" ] && choice=1
+    case "$choice" in
+        2) mcos-persist || echo "kalicilik basarisiz"; sleep 2 ;;
+        3)
+            echo "Panele donmek icin kabuktan cikin (exit) ya da: mcos-panel --connect $SOCK"
+            exec /bin/sh
+            ;;
+        *) : ;;  # default: loop and reopen the panel
+    esac
+done

@@ -1,0 +1,24 @@
+# Build outputs
+/bin/
+/dist/
+*.exe
+*.iso
+
+# Dev runtime state (mcosd --data-root ./run)
+/run/
+
+# Go
+/vendor/
+
+# Rust
+/lite-panel/target/
+
+# Buildroot (large generated trees)
+/os/buildroot/dl/
+/os/buildroot/output/
+/os/buildroot/buildroot-src/
+
+# Editor / OS noise
+.DS_Store
+*.swp
+*~

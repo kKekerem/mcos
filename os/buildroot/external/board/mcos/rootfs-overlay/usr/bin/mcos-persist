@@ -1,0 +1,68 @@
+#!/bin/sh
+# mcos-persist — make the booted USB persistent (optional).
+#
+# MCOS normally runs entirely from RAM (initramfs); config + servers live under
+# /data, which S99mcos mounts from a partition labelled MCOS-DATA. This script
+# adds that partition to free space on the booted USB so /data survives reboots.
+# It is idempotent and conservative: it only ever APPENDS a new partition and
+# never touches the existing ISO partition/data.
+#
+# Usage: mcos-persist [/dev/sdX]   (no arg = auto-detect the booted USB)
+set -e
+
+log() { echo "mcos-persist: $*"; }
+
+# Already persistent? Nothing to do.
+if blkid -L MCOS-DATA >/dev/null 2>&1; then
+    log "MCOS-DATA zaten mevcut — kalıcılık aktif, değişiklik yok."
+    exit 0
+fi
+
+# Resolve the target whole-disk device.
+DEV="${1:-}"
+if [ -z "$DEV" ]; then
+    # The booted USB carries the root volume label "MCOS-ROOT".
+    BOOTPART="$(blkid -L MCOS-ROOT 2>/dev/null || true)"
+    if [ -z "$BOOTPART" ]; then
+        log "boot USB otomatik bulunamadı. Aygıtı elle verin: mcos-persist /dev/sdX"
+        exit 1
+    fi
+    # Strip the partition suffix to get the whole disk (sda2->sda, nvme0n1p2->nvme0n1).
+    DEV="$(echo "$BOOTPART" | sed -E 's,(p?)[0-9]+$,,')"
+fi
+
+[ -b "$DEV" ] || { log "geçersiz blok aygıtı: $DEV"; exit 1; }
+log "hedef disk: $DEV"
+
+# Append a new Linux partition spanning the remaining free space.
+if command -v sfdisk >/dev/null 2>&1; then
+    log "boş alana yeni bölüm ekleniyor (sfdisk)…"
+    echo ',,L' | sfdisk --append "$DEV"
+elif command -v fdisk >/dev/null 2>&1; then
+    log "boş alana yeni bölüm ekleniyor (fdisk)…"
+    # n=new, p=primary, default number, default first/last sector, w=write.
+    fdisk "$DEV" >/dev/null 2>&1 <<EOF || true
+n
+p
+
+
+w
+EOF
+else
+    log "bölümleme aracı (sfdisk/fdisk) yok — kalıcılık yapılamadı."
+    exit 1
+fi
+
+# Re-read the partition table and let device nodes appear.
+partx -a "$DEV" 2>/dev/null || partprobe "$DEV" 2>/dev/null || blockdev --rereadpt "$DEV" 2>/dev/null || true
+sleep 1
+
+# The new partition is the highest-numbered one on DEV.
+NEWPART="$(ls "${DEV}"* 2>/dev/null | grep -E "${DEV}p?[0-9]+$" | sort -V | tail -1)"
+[ -b "$NEWPART" ] || { log "yeni bölüm düğümü bulunamadı (reboot sonrası tekrar deneyin)"; exit 1; }
+
+log "biçimlendiriliyor: $NEWPART (ext4, etiket MCOS-DATA)…"
+mkfs.ext4 -F -L MCOS-DATA "$NEWPART" >/dev/null 2>&1
+
+log "tamam — bundan sonra /data kalıcı ($NEWPART). İsterseniz reboot edin."
+exit 0

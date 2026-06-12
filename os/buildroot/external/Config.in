@@ -1,0 +1,2 @@
+source "$BR2_EXTERNAL_MCOS_PATH/package/mcos/Config.in"
+source "$BR2_EXTERNAL_MCOS_PATH/package/nerd-font/Config.in"

@@ -1,0 +1,5 @@
+config BR2_PACKAGE_MCOS
+	bool "mcos"
+	help
+	  MCOS daemon and panel binaries for the Minecraft Server OS.
+	  Includes mcosd, mcosctl, mcos-panel, mcos-detect.
