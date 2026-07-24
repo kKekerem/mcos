@@ -17,19 +17,50 @@ import (
 	"mcos/internal/store"
 )
 
+// DownloadProgress holds the live download state for a Java major version.
+type DownloadProgress struct {
+	Major      int    `json:"major"`
+	Downloaded int64  `json:"downloaded"`
+	Total      int64  `json:"total"`
+	Percent    int    `json:"percent"`
+	Status     string `json:"status"`
+	Done       bool   `json:"done"`
+	Error      string `json:"error,omitempty"`
+}
+
 // Manager owns the set of installed JDKs: resolving the right major for a
 // Minecraft version, installing it from Adoptium on demand, registering it, and
 // binding a runtime + JVM flags for a server launch.
 type Manager struct {
-	store  *store.Store
-	log    *log.Logger
-	client *http.Client
-	mu     sync.Mutex // serializes installs (avoid two downloads of same major)
+	store    *store.Store
+	log      *log.Logger
+	client   *http.Client
+	mu       sync.Mutex // serializes installs (avoid two downloads of same major)
+	progMu   sync.Mutex
+	progress map[int]*DownloadProgress
 }
 
 // NewManager constructs a Java manager.
 func NewManager(st *store.Store, lg *log.Logger) *Manager {
-	return &Manager{store: st, log: lg, client: defaultHTTPClient()}
+	return &Manager{
+		store:    st,
+		log:      lg,
+		client:   defaultHTTPClient(),
+		progress: make(map[int]*DownloadProgress),
+	}
+}
+
+// ProgressMap returns a copy of active and recently completed download progresses.
+func (m *Manager) ProgressMap() map[int]DownloadProgress {
+	m.progMu.Lock()
+	defer m.progMu.Unlock()
+	res := make(map[int]DownloadProgress)
+	for k, v := range m.progress {
+		if v != nil {
+			res[k] = *v
+		}
+	}
+	return res
 }
 
 // List returns all registered runtimes, sorted by major.
@@ -90,16 +121,52 @@ func (m *Manager) Install(major int) (*model.JavaRuntime, error) {
 	if err := os.MkdirAll(m.store.Paths.JavaDir(), 0o755); err != nil {
 		return nil, err
 	}
-	archive, err := downloadFile(m.client, url, m.store.Paths.JavaDir())
+
+	prog := &DownloadProgress{
+		Major:   major,
+		Status:  "Bağlanıyor...",
+		Percent: 0,
+	}
+	m.progMu.Lock()
+	m.progress[major] = prog
+	m.progMu.Unlock()
+
+	archive, err := downloadFileWithProgress(m.client, url, m.store.Paths.JavaDir(), func(dl, tot int64) {
+		m.progMu.Lock()
+		defer m.progMu.Unlock()
+		prog.Downloaded = dl
+		prog.Total = tot
+		if tot > 0 {
+			prog.Percent = int((dl * 100) / tot)
+		} else {
+			prog.Percent = 50
+		}
+		prog.Status = fmt.Sprintf("İndiriliyor... %% %d (%d MB / %d MB)", prog.Percent, dl/(1024*1024), tot/(1024*1024))
+	})
 	if err != nil {
+		m.progMu.Lock()
+		prog.Status = "Hata"
+		prog.Done = true
+		prog.Error = err.Error()
+		m.progMu.Unlock()
 		return nil, err
 	}
 	defer os.Remove(archive)
+
+	m.progMu.Lock()
+	prog.Status = "Çıkartılıyor ve kuruluyor..."
+	prog.Percent = 95
+	m.progMu.Unlock()
 
 	dest := filepath.Join(m.store.Paths.JavaDir(), fmt.Sprintf("temurin-%d", major))
 	_ = os.RemoveAll(dest)
 	javaHome, err := extractArchive(archive, dest)
 	if err != nil {
+		m.progMu.Lock()
+		prog.Status = "Hata"
+		prog.Done = true
+		prog.Error = err.Error()
+		m.progMu.Unlock()
 		return nil, fmt.Errorf("java: extract: %w", err)
 	}
 	javaBin := filepath.Join(javaHome, "bin", javaExe())
@@ -113,9 +180,21 @@ func (m *Manager) Install(major int) (*model.JavaRuntime, error) {
 		InstalledAt: time.Now(),
 	}
 	if err := m.register(rt); err != nil {
+		m.progMu.Lock()
+		prog.Status = "Hata"
+		prog.Done = true
+		prog.Error = err.Error()
+		m.progMu.Unlock()
 		return nil, err
 	}
 	m.logf("java: installed Temurin %d (%s) at %s", major, rt.Version, javaHome)
+
+	m.progMu.Lock()
+	prog.Status = "Tamamlandı"
+	prog.Percent = 100
+	prog.Done = true
+	m.progMu.Unlock()
+
 	return &rt, nil
 }
 

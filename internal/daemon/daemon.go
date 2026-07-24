@@ -138,6 +138,7 @@ func (d *Daemon) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodJavaInstall, d.handleJavaInstall)
 	s.Handle(ipc.MethodJavaRemove, d.handleJavaRemove)
 	s.Handle(ipc.MethodJavaDetect, d.handleJavaDetect)
+	s.Handle(ipc.MethodJavaProgress, d.handleJavaProgress)
 
 	s.Handle(ipc.MethodBackupList, d.handleBackupList)
 	s.Handle(ipc.MethodBackupCreate, d.handleBackupCreate)

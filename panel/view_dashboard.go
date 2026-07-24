@@ -92,11 +92,31 @@ func (a *App) renderDashboard(w, h int) string {
 		kv(th, "Aktif görev", itoa(st.ActiveTasks)),
 	}, "\n")
 
-	rows := []string{
-		joinH(2, card(th, "Sistem", sysBody, colW), card(th, "İşlemci", cpuBody, colW)),
-		joinH(2, card(th, "Bellek", memBody, colW), card(th, "Disk", diskBody, colW)),
-		joinH(2, card(th, "Ağ", netBody, colW), card(th, "GPU", gpuBody, colW)),
-		card(th, "Servisler & Görevler", svcBody, w),
+	ready := th.Badge("SİSTEM HAZIR", th.P.Green)
+	if !st.Net.Internet {
+		ready = th.Badge("ÇEVRİMDIŞI", th.P.Yellow)
+	}
+	overview := RenderCard(th, "◆ "+st.SystemName+"  "+ready,
+		th.Muted.Render("Minecraft sunucularınızın kontrol merkezi"), w, true)
+
+	rows := []string{overview}
+	if w < 68 {
+		rows = append(rows,
+			card(th, "◆ Sistem", sysBody, w),
+			card(th, "▶ İşlemci", cpuBody, w),
+			card(th, "◈ Bellek", memBody, w),
+			card(th, "▲ Disk", diskBody, w),
+			card(th, "● Ağ", netBody, w),
+			card(th, "◇ GPU", gpuBody, w),
+			card(th, "★ Servisler & Görevler", svcBody, w),
+		)
+	} else {
+		rows = append(rows,
+			joinH(2, card(th, "◆ Sistem", sysBody, colW), card(th, "▶ İşlemci", cpuBody, colW)),
+			joinH(2, card(th, "◈ Bellek", memBody, colW), card(th, "▲ Disk", diskBody, colW)),
+			joinH(2, card(th, "● Ağ", netBody, colW), card(th, "◇ GPU", gpuBody, colW)),
+			card(th, "★ Servisler & Görevler", svcBody, w),
+		)
 	}
 	inner := lipgloss.JoinVertical(lipgloss.Left, rows...)
 	// Route through contentFrame so the grid scrolls (↑↓) and is clamped to the
@@ -107,9 +127,9 @@ func (a *App) renderDashboard(w, h int) string {
 
 func onlineBadge(t *theme.Theme, on bool) string {
 	if on {
-		return t.Badge("BAĞLI", t.P.Green)
+		return t.Badge("✓ BAĞLI", t.P.Green)
 	}
-	return t.Badge("YOK", t.P.Red)
+	return t.Badge("⚠ YOK", t.P.Red)
 }
 
 func orDash(s string) string {

@@ -1,80 +1,181 @@
 #!/bin/sh
-# Launched by init on tty1 (see /etc/inittab). Prepares the console (UTF-8 +
-# Turkish font + Q-keyboard), then runs the MCOS panel full-screen as the system
-# UI in a loop so closing/crashing the panel always returns to it -- the screen
-# never dead-ends. Picking the shell still works (init respawns us afterwards).
+# MCOS boot UI launcher.
+#
+# The raw Linux console cannot render the Turkish glyphs, rounded borders and
+# emoji needed by the panel. The visible UI therefore runs in fbterm on the
+# dedicated panel VT. If framebuffer/font support is not ready, the launcher
+# shows a small recovery menu instead of starting the panel with broken symbols.
+
 SOCK="unix:///run/mcos/mcosd.sock"
 SOCK_PATH="/run/mcos/mcosd.sock"
+LOG="/run/mcos/mcosd.log"
+PANEL_VT="2"
+PANEL_DEVICE="/dev/tty${PANEL_VT}"
+MCOS_FONT_NAMES="DejaVu Sans Mono,Liberation Mono,mono"
 
-# Wait up to ~10s for the daemon that S99mcos started in the background.
-i=0
-while [ ! -S "$SOCK_PATH" ] && [ "$i" -lt 40 ]; do
-    sleep 0.25
-    i=$((i + 1))
-done
+mkdir -p /run/mcos /data /var/log /root /root/.cache/fontconfig /var/cache/fontconfig
 
-# TERM lets the TUI render correctly on the Linux framebuffer console (fallback).
-export TERM=linux
+if [ -c "$PANEL_DEVICE" ]; then
+    exec <"$PANEL_DEVICE" >"$PANEL_DEVICE" 2>&1
+    chvt "$PANEL_VT" >/dev/null 2>&1 || true
+fi
+
+export HOME=/root
 export LANG=tr_TR.UTF-8
 export LC_ALL=tr_TR.UTF-8
 
-# Disable console blanking so the framebuffer never goes black-and-stuck on PCs
-# whose firmware doesn't wake it back up. consoleblank=0 on the kernel cmdline is
-# the primary guard; this is belt-and-braces for the running VT (9;0 = never).
-printf '\033[9;0]' 2>/dev/null || true
+prepare_console() {
+    dmesg -n 1 2>/dev/null || true
+    echo 0 > /proc/sys/kernel/printk 2>/dev/null || true
+    printf '\033[9;0]' 2>/dev/null || true
+    setterm -blank 0 -powerdown 0 >/dev/null 2>&1 || true
+    kbd_mode -u >/dev/null 2>&1 || true
+    printf '\033%%G' 2>/dev/null || true
+    setfont ter-u16n 2>/dev/null \
+        || setfont iso09.16 2>/dev/null \
+        || setfont Lat15-Terminus16 2>/dev/null \
+        || true
+    loadkeys trq >/dev/null 2>&1 || true
+}
 
-# Reset the console (clear leftover boot text) so the panel starts clean.
-printf '\033c'
-
-# Put the console in UTF-8 mode, load a font WITH Turkish glyphs (ç ğ ı İ ö ş ü)
-# and proper box-drawing, and load the Turkish-Q keymap. The default fbcon font
-# (CP437) lacks ş/ğ/ı which is why they showed as garbage. ter-u16n ships
-# in the kbd package's data and explicitly supports Latin-5.
-kbd_mode -u 2>/dev/null || true
-printf '\033%%G'                                  # switch the VT to UTF-8
-setfont ter-u16n 2>/dev/null \
-    || setfont iso09.16 2>/dev/null \
-    || setfont ter-916n 2>/dev/null \
-    || setfont LatArCyrHeb-16 2>/dev/null \
-    || setfont Lat15-Terminus16 2>/dev/null \
-    || setfont Lat15-Terminus14 2>/dev/null \
-    || setfont Lat15-Fixed16 2>/dev/null || true
-loadkeys trq 2>/dev/null || true                  # Türkçe Q-klavye
-
-# Keep the panel alive. On exit, offer a tiny menu but default to reopening it.
-while true; do
-    if command -v fbterm >/dev/null 2>&1; then
-        # Ensure fontconfig cache is built.
-        if [ ! -f /tmp/fontconfig_done ]; then
-            fc-cache -f 2>/dev/null || true
-            touch /tmp/fontconfig_done
-        fi
-        
-        # Check if FiraCode is available, otherwise fallback to DejaVu.
-        FONT="FiraCode Nerd Font"
-        if ! fc-list | grep -iq "FiraCode"; then
-            FONT="DejaVu Sans Mono"
-        fi
-
-        # Run fbterm with modern font support.
-        TERM=fbterm fbterm --font-names="\$FONT" -s 14 -- /usr/bin/mcos-panel --connect "$SOCK"
-    else
-        /usr/bin/mcos-panel --connect "$SOCK"
+start_daemon() {
+    if ! pgrep mcosd >/dev/null 2>&1; then
+        echo ">> MCOS daemon baslatiliyor..."
+        /usr/bin/mcosd --data-root /data --listen "$SOCK" >"$LOG" 2>&1 &
     fi
+}
+
+wait_daemon() {
+    i=0
+    while [ ! -S "$SOCK_PATH" ] && [ "$i" -lt 20 ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    if [ ! -S "$SOCK_PATH" ]; then
+        echo "Hata: mcosd soketi hazirlanamadi: $SOCK_PATH"
+        echo "Son daemon loglari:"
+        tail -n 20 "$LOG" 2>/dev/null || true
+        echo ""
+        echo "Devam etmek icin Enter'a basin..."
+        read _
+    fi
+}
+
+prepare_network_radios() {
+    rfkill unblock all 2>/dev/null || true
+    rfkill unblock wifi 2>/dev/null || true
+    rfkill unblock wlan 2>/dev/null || true
+    for iface in /sys/class/net/*; do
+        dev=$(basename "$iface")
+        if [ -e "$iface/phy80211" ] || [ -e "$iface/wireless" ] || echo "$dev" | grep -qE '^wlan|^wlp|^wls'; then
+            ip link set "$dev" up 2>/dev/null || true
+            ifconfig "$dev" up 2>/dev/null || true
+        fi
+    done
+}
+
+prepare_fonts() {
+    rm -rf /var/cache/fontconfig/* /root/.cache/fontconfig/* 2>/dev/null || true
+    fc-cache -f /usr/share/fonts >/dev/null 2>&1 || true
+}
+
+detect_font_size() {
+    # Read framebuffer vertical resolution from sysfs
+    FB_H=0
+    if [ -f /sys/class/graphics/fb0/virtual_size ]; then
+        FB_H=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | cut -d, -f2)
+    fi
+    if [ -z "$FB_H" ] || [ "$FB_H" = "0" ]; then
+        # fallback: try fbset
+        FB_H=$(fbset 2>/dev/null | grep geometry | awk '{print $3}')
+    fi
+    [ -z "$FB_H" ] && FB_H=768
+
+    if [ "$FB_H" -le 600 ]; then
+        echo 10
+    elif [ "$FB_H" -le 800 ]; then
+        echo 12
+    elif [ "$FB_H" -le 1080 ]; then
+        echo 14
+    elif [ "$FB_H" -le 1440 ]; then
+        echo 18
+    else
+        echo 24
+    fi
+}
+
+has_framebuffer() {
+    [ -c /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ]
+}
+
+run_panel_fbterm() {
+    # fbterm is not xterm-compatible for 256-colour SGR commands. Its own
+    # terminfo entry and the panel's ANSI palette are deliberately used here.
+    FONT_SIZE=$(detect_font_size)
+    export TERM=fbterm
+    /usr/bin/fbterm --font-names="$MCOS_FONT_NAMES" -s "$FONT_SIZE" -- sh -c \
+        "export TERM=fbterm LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 HOME=/root; exec /usr/bin/mcos-panel --connect '$SOCK'"
+}
+
+show_recovery() {
+    reason="$1"
+    printf '\033[2J\033[H'
+    echo "MCOS paneli guvenli bekleme modunda."
+    echo "Neden: $reason"
     echo ""
-    echo "MCOS paneli kapandi."
-    echo "  [1] Paneli yeniden ac (varsayilan)"
-    echo "  [2] USB'yi kalici yap / kurulum (mcos-persist)"
-    echo "  [3] Kabuk (gelismis kullanim)"
-    printf "Secim [1] (10 sn): "
-    read -t 10 choice 2>/dev/null || choice=1
+    echo "Panel ham Linux konsolunda acilmayacak; bu mod emoji ve yuvarlak kenarlari bozar."
+    echo "fbterm + framebuffer + font hatti hazir olunca modern TUI ayni ekranda acilir."
+    echo ""
+    echo "Son daemon loglari:"
+    tail -n 10 "$LOG" 2>/dev/null || echo "  log yok"
+    echo ""
+}
+
+prepare_console
+start_daemon
+wait_daemon
+prepare_network_radios
+prepare_fonts
+
+while true; do
+    printf '\033[2J\033[H'
+    echo "MCOS TUI hazirlaniyor..."
+    echo "Klavye ile kullanin: ok tuslari, Enter, Esc, Tab."
+    echo ""
+
+    panel_failed=""
+    if [ -x /usr/bin/fbterm ] && has_framebuffer; then
+        run_panel_fbterm
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            panel_failed="fbterm baslatilamadi (kod: $rc)"
+            show_recovery "$panel_failed"
+        fi
+    else
+        panel_failed="framebuffer veya fbterm bulunamadi"
+        show_recovery "$panel_failed"
+    fi
+
+    echo ""
+    if [ -n "$panel_failed" ]; then
+        echo "MCOS paneli bozuk sembollerle acilmadi; sorun giderildiğinde yeniden deneyin."
+    else
+        echo "MCOS paneli kapandi."
+    fi
+    echo "  [1] fbterm ile paneli yeniden ac (varsayilan)"
+    echo "  [2] Font cache yenile ve yeniden dene"
+    echo "  [3] USB'yi kalici yap / kurulum (mcos-persist)"
+    echo "  [4] Kabuk (gelismis kullanim)"
+    printf "Secim [1] (5 sn): "
+    read -t 5 choice 2>/dev/null || choice=1
     [ -z "$choice" ] && choice=1
     case "$choice" in
-        2) mcos-persist || echo "kalicilik basarisiz"; sleep 2 ;;
-        3)
-            echo "Panele donmek icin kabuktan cikin (exit) ya da: mcos-panel --connect $SOCK"
+        2) prepare_fonts ;;
+        3) mcos-persist || echo "kalicilik basarisiz"; sleep 2 ;;
+        4)
+            echo "Panele donmek icin kabuktan cikin (exit). Ham mcos-panel calistirmayin; fbterm gereklidir."
             exec /bin/sh
             ;;
-        *) : ;;  # default: loop and reopen the panel
+        *) : ;;
     esac
 done

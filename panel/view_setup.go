@@ -4,7 +4,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -87,9 +89,9 @@ type setupModel struct {
 	// First server (optional)
 	startServer bool
 
-	errMsg    string
-	cancelled bool
-	loading   bool
+	errMsg         string
+	cancelled      bool
+	loading        bool
 	installSuccess bool
 	rebootCounter  int
 
@@ -116,14 +118,16 @@ func newSetup(th *theme.Theme, themeName string) *setupModel {
 		return ti
 	}
 	s := &setupModel{
-		th:        theme.New(themeName),
-		pcName:    mk("mcos-pc-1"),
-		ssid:      mk("WiFi adı (boş = kablolu)"),
-		pass:      mk("parola"),
-		nodeName:  mk("mcos-1"),
-		clusterOn: true,
+		th:           theme.New(themeName),
+		pcName:       mk("mcos-pc-1"),
+		ssid:         mk("WiFi adı (boş = kablolu)"),
+		pass:         mk("parola"),
+		nodeName:     mk("mcos-1"),
+		clusterOn:    true,
 		themeIdx:     themeIndex(themeName),
 		ramIdx:       defaultRAMBudgetIdx(),
+		dlJava:       true,
+		dlPlugins:    true,
 		disksLoading: true,
 	}
 	s.pass.EchoMode = textinput.EchoPassword
@@ -573,19 +577,45 @@ func (s *setupModel) view(w, h int, peers []model.Peer) string {
 		body = s.viewConfirm()
 	}
 
-	progress := fmt.Sprintf("Adım %d / %d", int(s.step)+1, int(stepCount))
-	help := th.Muted.Render("tab/enter ileri · shift+tab geri · ↑↓ alan · ←→/space değiştir · esc iptal")
-	if s.errMsg != "" {
-		help = lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠ "+s.errMsg) + "\n" + help
+	stepTitle := "MCOS Kurulumu"
+	switch s.step {
+	case stepIntro:
+		stepTitle = "Hoş Geldiniz"
+	case stepSystem:
+		stepTitle = "Sistem Kontrolü"
+	case stepIdentity:
+		stepTitle = "Ağ ve Bağlantı"
+	case stepJava:
+		stepTitle = "Java Sürücüleri"
+	case stepInstall:
+		stepTitle = "Diske Kurulum"
+	case stepTheme:
+		stepTitle = "Görünüm ve Zaman"
+	case stepBudget:
+		stepTitle = "Kaynak Limitleri"
+	case stepCluster:
+		stepTitle = "Cihaz Eşleştirme"
+	case stepFirstServer:
+		stepTitle = "İlk Sunucu"
+	case stepConfirm:
+		stepTitle = "Kurulum Onayı"
 	}
-	cardBody := lipgloss.JoinVertical(lipgloss.Left,
-		th.CardTitle.Render("MCOS Kurulumu  ")+th.Muted.Render(progress), "", body, "", help)
 
-	boxW := 74
+	header := RenderHeader(th, int(s.step)+1, int(stepCount), stepTitle)
+	help := RenderKeyHints(th, []KeyHint{{"Enter", "ilerle"}, {"Shift+Tab", "geri"}, {"↑/↓", "gezin"}, {"Esc", "vazgeç"}}, 70)
+	if s.errMsg != "" {
+		help = lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠️  "+s.errMsg) + "\n" + help
+	}
+	cardBody := lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
+
+	boxW := int(float64(w) * 0.85)
+	if boxW < 72 {
+		boxW = 72
+	}
 	if boxW > w-4 {
 		boxW = w - 4
 	}
-	box := th.Card.Width(boxW).Padding(1, 2).Render(cardBody)
+	box := RenderCard(th, "MCOS KURULUM SİHİRBAZI", cardBody, boxW, true)
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box,
 		lipgloss.WithWhitespaceChars(" "))
 }
@@ -593,20 +623,74 @@ func (s *setupModel) view(w, h int, peers []model.Peer) string {
 func (s *setupModel) viewInstall() string {
 	th := s.th
 	if s.installSuccess {
-		return th.Accent.Render(fmt.Sprintf("🎉 KURULUM BAŞARILI!\n\nLütfen MCOS kurulum USB'sini ŞİMDİ ÇIKARIN.\nSistem %d saniye içinde yeniden başlatılacak...", s.rebootCounter))
+		return strings.Join([]string{
+			th.Accent.Bold(true).Render("[OK] KURULUM BAŞARILI!"),
+			"",
+			th.Val.Render("Lütfen MCOS kurulum USB'sini ŞİMDİ ÇIKARIN."),
+			th.Muted.Render(fmt.Sprintf("Sistem %d saniye içinde yeniden başlatılacak...", s.rebootCounter)),
+			"",
+			RenderButton(th, "Hemen Yeniden Başlat", "Enter", true),
+		}, "\n")
 	}
 	if s.loading {
-		msg := "İşletim sistemi kalıcı diske kuruluyor... Lütfen bekleyin."
-		if s.dlJava || s.dlPlugins {
-			msg = "Java ve eklentiler indiriliyor ve sistem kuruluyor... Bu işlem internet hızınıza bağlı olarak zaman alabilir."
+		pct := 50
+		logLine1 := "[3/5] Sistem dosyaları kopyalanıyor..."
+		logLine2 := "Disk kuruluyor, lütfen bekleyin..."
+
+		// Read real-time progress from status file
+		if b, err := os.ReadFile("/tmp/mcos-install.status"); err == nil {
+			parts := strings.SplitN(strings.TrimSpace(string(b)), "|", 2)
+			if len(parts) >= 1 {
+				if p, err := strconv.Atoi(parts[0]); err == nil && p > 0 {
+					pct = p
+				}
+			}
+			if len(parts) >= 2 {
+				logLine1 = parts[1]
+			}
 		}
-		return th.Muted.Render(msg)
+
+		// Read recent log line from install log file
+		if b, err := os.ReadFile("/tmp/mcos-install.log"); err == nil {
+			lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+			if len(lines) > 0 {
+				last := lines[len(lines)-1]
+				if last != "" && last != logLine1 {
+					logLine2 = last
+				}
+			}
+		}
+
+		barWidth := 36
+		filled := (pct * barWidth) / 100
+		if filled < 0 {
+			filled = 0
+		}
+		if filled > barWidth {
+			filled = barWidth
+		}
+		empty := barWidth - filled
+		fillStr := strings.Repeat("█", filled)
+		emptyStr := strings.Repeat("─", empty)
+		pBar := fmt.Sprintf("▐%s%s▌ %d%%", th.Accent.Bold(true).Render(fillStr), th.Muted.Render(emptyStr), pct)
+
+		return strings.Join([]string{
+			th.Val.Render("[>>] KURULUM DEVAM EDİYOR"),
+			"",
+			pBar,
+			"",
+			th.Muted.Render("[LOG] Canlı Kurulum Logları:"),
+			th.Val.Render("  » " + truncate(logLine1, 60)),
+			th.Muted.Render("  » " + truncate(logLine2, 60)),
+			"",
+			th.Muted.Render("Lütfen bilgisayarınızı kapatmayın veya USB'yi çıkarmayın."),
+		}, "\n")
 	}
 	if s.disksLoading {
-		return th.Muted.Render("Diskler aranıyor...")
+		return th.Muted.Render("🔍 Diskler taranıyor...")
 	}
 	lines := []string{
-		th.Val.Render("MCOS Kurulumu - Disk Seçimi"),
+		th.Val.Render("💾 MCOS Kurulumu — Disk Seçimi"),
 		th.Muted.Render("(Yenilemek için 'r' tuşuna basın)"),
 		"",
 	}
@@ -615,23 +699,23 @@ func (s *setupModel) viewInstall() string {
 		if d.HasPersist {
 			label += " [MCOS KURULU]"
 		}
-		
-		marker := "( )"
+
+		marker := "◯"
 		if s.cursor == i {
-			marker = th.Accent.Render("(*)")
+			marker = th.Accent.Render("●")
 			label = th.Val.Render(label)
 		} else {
 			label = th.Muted.Render(label)
 		}
-		
+
 		lines = append(lines, fmt.Sprintf("  %s %s", marker, label))
 	}
-	
+
 	// Add skip option
-	skipMarker := "( )"
+	skipMarker := "◯"
 	skipLabel := "Atla (Sadece RAM'de çalıştır, kalıcı veri yok)"
 	if s.cursor == len(s.disks) {
-		skipMarker = th.Accent.Render("(*)")
+		skipMarker = th.Accent.Render("●")
 		skipLabel = th.Val.Render(skipLabel)
 	} else {
 		skipLabel = th.Muted.Render(skipLabel)
@@ -640,9 +724,9 @@ func (s *setupModel) viewInstall() string {
 
 	lines = append(lines, "", th.Val.Render("Ek Seçenekler:"))
 
-	checkJava := "[ ]"
+	checkJava := "☐"
 	if s.dlJava {
-		checkJava = th.Accent.Render("[x]")
+		checkJava = th.Accent.Render("☑")
 	}
 	labelJava := "Java 17 ve 21 sürümlerini şimdi indir"
 	if s.cursor == len(s.disks)+1 {
@@ -652,9 +736,9 @@ func (s *setupModel) viewInstall() string {
 	}
 	lines = append(lines, fmt.Sprintf("  %s %s", checkJava, labelJava))
 
-	checkPlug := "[ ]"
+	checkPlug := "☐"
 	if s.dlPlugins {
-		checkPlug = th.Accent.Render("[x]")
+		checkPlug = th.Accent.Render("☑")
 	}
 	labelPlug := "Temel sunucu dosyalarını (Paper/Fabric) önceden indir"
 	if s.cursor == len(s.disks)+2 {
@@ -663,26 +747,26 @@ func (s *setupModel) viewInstall() string {
 		labelPlug = th.Muted.Render(labelPlug)
 	}
 	lines = append(lines, fmt.Sprintf("  %s %s", checkPlug, labelPlug))
-	
-	lines = append(lines, "", lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠ DİKKAT: Seçilen disk tamamen silinecektir!"))
+
+	lines = append(lines, "", lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠️  DİKKAT: Seçilen disk tamamen silinecektir!"))
 	return strings.Join(lines, "\n")
 }
 
 func (s *setupModel) viewIntro() string {
 	th := s.th
 	return strings.Join([]string{
-		th.Val.Render("MCOS'e hoş geldiniz! 🎮"),
+		th.Val.Render("◆ MCOS Kurulum Sihirbazı"),
 		"",
 		th.Muted.Render("MCOS, yalnızca Minecraft sunucuları yönetmek için tasarlanmış"),
 		th.Muted.Render("özel bir işletim sistemidir. Bu kısa kurulum:"),
 		"",
-		"  * " + th.Val.Render("Donanımınızı kontrol eder"),
-		"  * " + th.Val.Render("Ağ (WiFi) ve Java'yı hazırlar"),
-		"  * " + th.Val.Render("Tema ve kaynak limitlerini ayarlar"),
-		"  * " + th.Val.Render("Yakındaki MCOS cihazlarıyla eşleşir"),
-		"  * " + th.Val.Render("İsterseniz ilk sunucunuzu kurar"),
+		"  ✦ " + th.Val.Render("Donanımınızı kontrol eder"),
+		"  ✦ " + th.Val.Render("Ağ (WiFi) ve Java'yı hazırlar"),
+		"  ✦ " + th.Val.Render("Tema ve kaynak limitlerini ayarlar"),
+		"  ✦ " + th.Val.Render("Yakındaki MCOS cihazlarıyla eşleşir"),
+		"  ✦ " + th.Val.Render("İsterseniz ilk sunucunuzu kurar"),
 		"",
-		th.Muted.Render("Başlamak için Enter'a basın."),
+		th.Accent.Render("Başlamak için Enter'a basın."),
 	}, "\n")
 }
 
@@ -713,40 +797,36 @@ func (s *setupModel) viewSystem() string {
 		s.kv("GPU", gpu),
 		s.kv("Ağ", fmt.Sprintf("%s · %s", online, orDash(net.LocalIP))),
 	}
-	// Detected network adapters — the hardware that "comes later" (drivers/link).
-	// Read-only here; connecting happens in the next step / Donanım tab.
 	if len(net.NICs) > 0 {
 		rows = append(rows, "", th.Key.Render("  Ağ adaptörleri:"))
 		for i, n := range net.NICs {
 			if i >= 4 {
 				break
 			}
-			kind := n.Kind
-			if kind == "" {
-				kind = "?"
-			}
-			link := "—"
+			link := "yok"
 			if n.Link {
 				link = "bağlı"
 			}
 			rows = append(rows, th.Muted.Render(fmt.Sprintf("    %s (%s) sürücü=%s link=%s %s",
-				n.Name, kind, orDash(n.Driver), link, orDash(n.IPv4))))
+				n.Name, n.Kind, orDash(n.Driver), link, orDash(n.IPv4))))
 		}
 	}
-	return strings.Join(append(rows, "",
-		th.Muted.Render("Hiçbir şey zorunlu değil — enter ile iler/atla, esc ile geç."),
-		th.Muted.Render("Donanım kaydedilir; disk başka PC'ye takılırsa kurulum yeniden başlar.")), "\n")
+	return strings.Join(append([]string{
+		th.Muted.Render("Hiçbir şey zorunlu değil; Enter ile ilerleyin veya adımı atlayın."),
+		th.Muted.Render("Donanım kaydedilir; disk başka PC'ye takılırsa kurulum yeniden başlar."),
+		"",
+	}, rows...), "\n")
 }
 
 func (s *setupModel) viewIdentity() string {
 	th := s.th
 	lines := []string{
-		s.field("PC adı", s.pcName.View(), s.cursor == 0),
+		s.field("PC Adı", s.pcName.View(), s.cursor == 0),
 		"",
-		th.Key.Render("  Bir ağ seçin") + th.Muted.Render("  (r: yeniden tara · "+s.scanNote+")"),
+		th.Key.Render("  📶 Bir Kablosuz Ağ Seçin") + th.Muted.Render("  (r: yeniden tara · "+s.scanNote+")"),
 	}
 	if len(s.networks) == 0 {
-		lines = append(lines, th.Muted.Render("    ağ taranıyor / bulunamadı — kablolu için aşağıdan ‘Kablolu / Atla’"))
+		lines = append(lines, th.Muted.Render("    🔍 Kablosuz ağ taranıyor / bulunamadı — kablolu ağ için 'Kablolu / Atla'"))
 	} else {
 		for i, n := range s.networks {
 			if i >= 8 {
@@ -755,7 +835,7 @@ func (s *setupModel) viewIdentity() string {
 			lines = append(lines, s.networkRow(n, s.cursor == i+1))
 		}
 	}
-	lines = append(lines, s.field("Kablolu / Atla", "", s.isWiredRow(s.cursor)))
+	lines = append(lines, s.field("🔌 Kablolu / Atla", "", s.isWiredRow(s.cursor)))
 
 	if s.netPassPrompt {
 		name := ""
@@ -763,11 +843,11 @@ func (s *setupModel) viewIdentity() string {
 			name = net.SSID
 		}
 		lines = append(lines, "",
-			th.Accent.Render("🔒 "+name+" parolası: ")+s.pass.View(),
-			th.Muted.Render("Enter: bağlan · Esc: vazgeç"))
+			th.Accent.Render("🔒 "+name+" Parolası: ")+s.pass.View(),
+			RenderKeyHints(th, []KeyHint{{"Enter", "bağlan"}, {"Esc", "vazgeç"}}, 54))
 	} else {
 		lines = append(lines, "",
-			th.Muted.Render("↑↓ seç · Enter: bağlan/ileri · şifreli ağda parola istenir"))
+			RenderKeyHints(th, []KeyHint{{"↑/↓", "seç"}, {"Enter", "bağlan/ileri"}, {"r", "tara"}}, 64))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -781,7 +861,7 @@ func (s *setupModel) networkRow(n ipc.WiFiNetwork, sel bool) string {
 	}
 	label := fmt.Sprintf("%-22s %s %3d%%", truncate(n.SSID, 22), lock, n.Signal)
 	if sel {
-		return th.Accent.Render(" ▶ ") + th.MenuActive.Render(" "+label+" ")
+		return th.Accent.Render(" ➜ ") + th.MenuActive.Render(" "+label+" ")
 	}
 	return "   " + th.Val.Render(label)
 }
@@ -795,7 +875,7 @@ func (s *setupModel) viewJava() string {
 	if s.javaOK {
 		lines = append(lines, th.Val.Render("Kurulu Java sürümleri:"))
 		for _, rt := range s.javaInstalled {
-			lines = append(lines, fmt.Sprintf("  • Java %d — %s", rt.Major, truncate(rt.Version, 40)))
+			lines = append(lines, fmt.Sprintf("  * Java %d - %s", rt.Major, truncate(rt.Version, 40)))
 		}
 		lines = append(lines, "")
 	} else {
@@ -815,10 +895,11 @@ func (s *setupModel) viewTheme() string {
 	name := theme.Names()[s.themeIdx]
 	swatch := theme.Swatch(theme.AccentColor(name))
 	return strings.Join([]string{
-		s.field("Tema", fmt.Sprintf("‹ %s ›  %s", theme.Label(name), swatch), s.cursor == 0),
-		s.field("Saat dilimi", fmt.Sprintf("‹ %s ›", timezones[s.tzIdx]), s.cursor == 1),
+		s.field("Tema", fmt.Sprintf("< %s >  %s", theme.Label(name), swatch), s.cursor == 0),
+		s.field("Saat dilimi", fmt.Sprintf("< %s >", timezones[s.tzIdx]), s.cursor == 1),
 		"",
-		th.Muted.Render(fmt.Sprintf("%d tema mevcut — ←→ ile değiştirin, renkler anında uygulanır.", len(theme.Names()))),
+		th.Muted.Render(fmt.Sprintf("%d tema mevcut", len(theme.Names()))) + "  " +
+			RenderKeyHints(th, []KeyHint{{"←/→", "değiştir"}}, 40),
 	}, "\n")
 }
 
@@ -854,7 +935,7 @@ func (s *setupModel) viewCluster() string {
 			}
 			paired := ""
 			if p.Paired {
-				paired = " ✓"
+				paired = " [Bağlı]"
 			}
 			lines = append(lines, fmt.Sprintf("  • %s (%s) — %s%s", p.Name, p.IP, p.State, paired))
 		}
@@ -870,9 +951,10 @@ func (s *setupModel) viewFirstServer() string {
 		choice = "Şimdi ilk sunucumu kur"
 	}
 	return strings.Join([]string{
-		s.field("İlk sunucu", "‹ "+choice+" ›", s.cursor == 0),
+		s.field("İlk sunucu", "< "+choice+" >", s.cursor == 0),
 		"",
-		th.Muted.Render("Kurulum bittiğinde sunucu sihirbazı açılır (←→/space ile seç)."),
+		th.Muted.Render("Kurulum bittiğinde sunucu sihirbazı açılır.") + "  " +
+			RenderKeyHints(th, []KeyHint{{"←/→", "seç"}, {"Space", "değiştir"}}, 52),
 	}, "\n")
 }
 
@@ -910,7 +992,7 @@ func (s *setupModel) field(label, value string, active bool) string {
 	marker := "  "
 	lbl := th.Key.Render(fmt.Sprintf("%-24s", label))
 	if active {
-		marker = th.Accent.Render("▶ ")
+		marker = th.Accent.Render("➜  ")
 		lbl = th.Accent.Render(fmt.Sprintf("%-24s", label))
 	}
 	return marker + lbl + th.Val.Render(value)
@@ -929,9 +1011,9 @@ func (s *setupModel) toggle(b bool) string {
 
 func budgetLabel(v int, unit string) string {
 	if v == 0 {
-		return "‹ sınırsız ›"
+		return "< sınırsız >"
 	}
-	return fmt.Sprintf("‹ %d %s ›", v, unit)
+	return fmt.Sprintf("< %d %s >", v, unit)
 }
 
 func doSetupSave(cl *Client, cfg *model.Config, ssid, pass string) tea.Cmd {
@@ -942,7 +1024,7 @@ func doSetupSave(cl *Client, cfg *model.Config, ssid, pass string) tea.Cmd {
 		// Network was already applied in step 3 (proceedFromIdentity)
 		// Ensure changes to the USB stick persist permanently.
 		_, _ = cl.Persist("")
-		
+
 		return setupDoneMsg{}
 	}
 }

@@ -5,6 +5,7 @@ package panel
 
 import (
 	"mcos/internal/ipc"
+	"mcos/internal/java"
 	"mcos/internal/model"
 )
 
@@ -148,6 +149,12 @@ func (cl *Client) JavaDetect() ([]model.JavaRuntime, error) {
 	var res ipc.JavaListResult
 	err := cl.c.Call(ipc.MethodJavaDetect, nil, &res)
 	return res.Runtimes, err
+}
+
+func (cl *Client) JavaProgress() (map[int]java.DownloadProgress, error) {
+	var res ipc.JavaProgressResult
+	err := cl.c.Call(ipc.MethodJavaProgress, nil, &res)
+	return res.Progresses, err
 }
 
 func (cl *Client) Config() (*model.Config, error) {

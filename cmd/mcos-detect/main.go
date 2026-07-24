@@ -1,6 +1,6 @@
 // Command mcos-detect classifies host capability and launches the appropriate
 // front-end: the rich Go panel (mcos-panel) on MEDIUM/HIGH tiers, or the Rust
-// lite panel (mcos-panel-lite) on LOW tier. It runs on tty1 as the boot UI.
+// lite panel (mcos-panel-lite) on LOW tier. It runs as the boot UI.
 package main
 
 import (

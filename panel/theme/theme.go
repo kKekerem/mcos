@@ -1,13 +1,10 @@
 // Package theme defines the MCOS panel color palette and reusable Lip Gloss
-// styles. The default is a near-black background (#0F0B0A) with a light-purple
-// accent; status colors are green/yellow/red. Themes are addressable by name so
-// the global config's "theme" field can switch palettes.
+// styles. The panel runs exclusively under fbterm (framebuffer terminal) which
+// renders TrueType fonts — so ALL Unicode characters (rounded borders, emojis,
+// box-drawing, Turkish glyphs) display perfectly, like a GUI application.
 package theme
 
 import (
-	"os"
-	"strings"
-
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 )
@@ -29,48 +26,57 @@ type Palette struct {
 }
 
 // Named palettes.
+const defaultPalette = "graphite-teal"
+
 var palettes = map[string]Palette{
+	"graphite-teal": {
+		Bg: "0", Surface: "0", SurfaceA: "0",
+		Border: "5", Accent: "6", Dim: "5",
+		Text: "7", Muted: "5",
+		Green: "2", Yellow: "3", Red: "1", Blue: "6",
+	},
 	"noir-purple": {
-		Bg: "#0F0B0A", Surface: "#1A1417", SurfaceA: "#241B29",
-		Border: "#3A2E42", Accent: "#C8A6FF", Dim: "#8B6FB8",
-		Text: "#ECE6EC", Muted: "#8A7F88",
-		Green: "#5DD39E", Yellow: "#FFC857", Red: "#FF6B6B", Blue: "#7AA2F7",
+		Bg: "0", Surface: "0", SurfaceA: "0",
+		Border: "5", Accent: "5", Dim: "5",
+		Text: "7", Muted: "5",
+		Green: "2", Yellow: "3", Red: "1", Blue: "6",
 	},
 	"anthracite-orange": {
-		Bg: "#121212", Surface: "#1C1C1C", SurfaceA: "#2A2320",
-		Border: "#3A3330", Accent: "#FF8C42", Dim: "#A85F2E",
-		Text: "#ECE6E0", Muted: "#8A8078",
-		Green: "#5DD39E", Yellow: "#FFC857", Red: "#FF6B6B", Blue: "#7AA2F7",
+		Bg: "0", Surface: "0", SurfaceA: "0",
+		Border: "5", Accent: "3", Dim: "5",
+		Text: "7", Muted: "5",
+		Green: "2", Yellow: "3", Red: "1", Blue: "6",
 	},
 	"anthracite-green": {
-		Bg: "#0E1110", Surface: "#171C1A", SurfaceA: "#1F2A24",
-		Border: "#2E3A33", Accent: "#5DD39E", Dim: "#3E8C6A",
-		Text: "#E6ECE8", Muted: "#7F8A84",
-		Green: "#5DD39E", Yellow: "#FFC857", Red: "#FF6B6B", Blue: "#7AA2F7",
+		Bg: "0", Surface: "0", SurfaceA: "0",
+		Border: "5", Accent: "2", Dim: "5",
+		Text: "7", Muted: "5",
+		Green: "2", Yellow: "3", Red: "1", Blue: "6",
 	},
 	"crimson-night": {
-		Bg: "#100B0C", Surface: "#1A1416", SurfaceA: "#2A1B1F",
-		Border: "#3F2A30", Accent: "#FF5C72", Dim: "#A8404E",
-		Text: "#ECE0E2", Muted: "#8A7B7E",
-		Green: "#5DD39E", Yellow: "#FFC857", Red: "#FF6B6B", Blue: "#7AA2F7",
+		Bg: "0", Surface: "0", SurfaceA: "0",
+		Border: "5", Accent: "1", Dim: "5",
+		Text: "7", Muted: "5",
+		Green: "2", Yellow: "3", Red: "1", Blue: "6",
 	},
 	"amber-graphite": {
-		Bg: "#0F0F0E", Surface: "#19191A", SurfaceA: "#262420",
-		Border: "#39352E", Accent: "#FFCB47", Dim: "#B8922E",
-		Text: "#ECEAE2", Muted: "#8A877E",
-		Green: "#5DD39E", Yellow: "#FFC857", Red: "#FF6B6B", Blue: "#7AA2F7",
+		Bg: "0", Surface: "0", SurfaceA: "0",
+		Border: "5", Accent: "3", Dim: "5",
+		Text: "7", Muted: "5",
+		Green: "2", Yellow: "3", Red: "1", Blue: "6",
 	},
 }
 
 // themeOrder is the selectable palette order shown in the first-boot wizard's
-// theme step. All are dark / anthracite with warm (purple/orange/green/crimson/
-// amber) accents — deliberately not blue-heavy.
+// theme step. The default is balanced graphite/teal; the rest are alternate
+// accent moods for users who want a warmer or sharper console.
 var themeOrder = []string{
-	"noir-purple", "anthracite-orange", "anthracite-green", "crimson-night", "amber-graphite",
+	"graphite-teal", "noir-purple", "anthracite-orange", "anthracite-green", "crimson-night", "amber-graphite",
 }
 
 // themeLabels are human-friendly names for the picker.
 var themeLabels = map[string]string{
+	"graphite-teal":     "Grafit Teal",
 	"noir-purple":       "Noir Mor",
 	"anthracite-orange": "Antrasit Turuncu",
 	"anthracite-green":  "Antrasit Yeşil",
@@ -89,9 +95,9 @@ func Label(name string) string {
 	return name
 }
 
-// Swatch returns a robust color preview block.
+// Swatch returns a color preview block using full Unicode block characters.
+// fbterm renders these perfectly with TrueType fonts.
 func Swatch(c lipgloss.Color) string {
-	// Restore the smooth solid block symbol.
 	return lipgloss.NewStyle().Foreground(c).Render("██████")
 }
 
@@ -101,7 +107,7 @@ func AccentColor(name string) lipgloss.Color {
 	if p, ok := palettes[name]; ok {
 		return p.Accent
 	}
-	return palettes["noir-purple"].Accent
+	return palettes[defaultPalette].Accent
 }
 
 // Theme bundles a palette with precomputed Lip Gloss styles.
@@ -122,41 +128,32 @@ type Theme struct {
 	Accent     lipgloss.Style
 }
 
-// New builds a Theme for a named palette, falling back to "noir-purple".
+// New builds a Theme for a named palette, falling back to the default palette.
+// Uses RoundedBorder (Unicode) because the panel runs under fbterm which
+// renders TrueType fonts — all Unicode characters display perfectly.
 func New(name string) *Theme {
 	p, ok := palettes[name]
 	if !ok {
-		p = palettes["noir-purple"]
+		p = palettes[defaultPalette]
 	}
 
-	// Force TrueColor for the full experience. fbterm supports this on TTY.
-	lipgloss.SetColorProfile(termenv.TrueColor)
+	// fbterm's extended colour protocol differs from xterm's. Restricting the
+	// panel to its portable ANSI colours prevents a black screen while the
+	// framebuffer palette supplies the intended soft graphite and teal shades.
+	lipgloss.SetColorProfile(termenv.ANSI)
 
 	t := &Theme{P: p}
 	t.App = lipgloss.NewStyle().Background(p.Bg).Foreground(p.Text)
 	t.Sidebar = lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).
 		Padding(1, 2).Border(lipgloss.NormalBorder(), false, true, false, false).
 		BorderForeground(p.Border).BorderBackground(p.Bg)
-	// Unselected menu items use full-strength text (not muted) so every option
-	// is readable even on a flat 16-colour console — the selected one then pops
-	// via the accent bar/marker rather than relying on a muted/bright contrast.
 	t.MenuItem = lipgloss.NewStyle().Foreground(p.Text).Padding(0, 1)
-	t.MenuActive = lipgloss.NewStyle().Foreground(p.Bg).Background(p.Accent).
-		Bold(true).Padding(0, 1)
+	t.MenuActive = lipgloss.NewStyle().Foreground(p.Accent).Bold(true).Padding(0, 1)
 	t.Title = lipgloss.NewStyle().Foreground(p.Accent).Bold(true)
 
-	// Use rounded borders only when we have a modern terminal emulator (fbterm/ssh).
-	// On raw Linux console, stick to ASCIIBorder which uses + - | that never fails.
-	border := lipgloss.NormalBorder()
-	term := os.Getenv("TERM")
-	if term == "fbterm" || strings.Contains(term, "xterm") || term == "screen" {
-		border = lipgloss.RoundedBorder()
-	} else if term == "linux" {
-		border = lipgloss.ASCIIBorder()
-	}
-
+	// Clean rectangular borders — connects 100% seamlessly on all framebuffers
 	t.Card = lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).
-		Border(border).BorderForeground(p.Border).
+		Border(lipgloss.NormalBorder()).BorderForeground(p.Border).
 		BorderBackground(p.Bg).Padding(0, 1)
 	t.CardTitle = lipgloss.NewStyle().Foreground(p.Accent).Bold(true)
 	t.Key = lipgloss.NewStyle().Foreground(p.Muted)
@@ -167,8 +164,8 @@ func New(name string) *Theme {
 	return t
 }
 
-// Badge renders a small status pill in the given color.
+// Badge renders a compact text-only status marker. The terminal remains calm:
+// colour communicates state without putting a block behind the text.
 func (t *Theme) Badge(label string, fg lipgloss.Color) string {
-	return lipgloss.NewStyle().Foreground(t.P.Bg).Background(fg).Bold(true).
-		Padding(0, 1).Render(label)
+	return lipgloss.NewStyle().Foreground(fg).Bold(true).Render(label)
 }

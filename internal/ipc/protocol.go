@@ -80,11 +80,12 @@ const (
 	MethodCatalogSearch  = "catalog.search"  // Modrinth mod/plugin search
 	MethodCatalogInstall = "catalog.install" // one-click install into plugins/mods
 
-	MethodJavaList    = "java.list"
-	MethodJavaInstall = "java.install"
-	MethodJavaResolve = "java.resolve" // mcVersion -> required major
-	MethodJavaRemove  = "java.remove"
-	MethodJavaDetect  = "java.detect" // scan host for installed JDKs
+	MethodJavaList     = "java.list"
+	MethodJavaInstall  = "java.install"
+	MethodJavaResolve  = "java.resolve" // mcVersion -> required major
+	MethodJavaRemove   = "java.remove"
+	MethodJavaDetect   = "java.detect"   // scan host for installed JDKs
+	MethodJavaProgress = "java.progress" // live download progress map
 
 	MethodBackupList    = "backup.list"
 	MethodBackupCreate  = "backup.create"

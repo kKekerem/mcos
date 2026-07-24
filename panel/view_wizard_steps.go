@@ -68,7 +68,7 @@ func (w *wizardModel) applyTemplate() {
 func (w *wizardModel) viewTemplate(th *theme.Theme) string {
 	t := templates[w.templateIdx]
 	return strings.Join([]string{
-		w.row("Şablon", "‹ "+t.label+" ›", w.cursor == 0),
+		w.row("Şablon", "< "+t.label+" >", w.cursor == 0),
 		"",
 		th.Muted.Render(t.note),
 		th.Muted.Render("Şablon makul varsayılanlar doldurur; sonraki adımlarda değiştirebilirsiniz."),
@@ -78,8 +78,8 @@ func (w *wizardModel) viewTemplate(th *theme.Theme) string {
 func (w *wizardModel) viewGameplay(th *theme.Theme) string {
 	return strings.Join([]string{
 		w.row("Online mode", w.toggle(w.onlineMode), w.cursor == 0),
-		w.row("Oyun modu", "‹ "+gamemodes[w.gamemodeIdx]+" ›", w.cursor == 1),
-		w.row("Zorluk", "‹ "+difficulties[w.difficultyIdx]+" ›", w.cursor == 2),
+		w.row("Oyun modu", "< "+gamemodes[w.gamemodeIdx]+" >", w.cursor == 1),
+		w.row("Zorluk", "< "+difficulties[w.difficultyIdx]+" >", w.cursor == 2),
 		w.row("PvP", w.toggle(w.pvp), w.cursor == 3),
 		w.row("Maks oyuncu", w.maxPlayers.View(), w.cursor == 4),
 		w.row("Beyaz liste", w.toggle(w.whitelist), w.cursor == 5),
@@ -102,6 +102,7 @@ func (w *wizardModel) viewEULA(th *theme.Theme) string {
 		th.Muted.Render("Lisans Sözleşmesi'ni kabul etmeniz gerekir:"),
 		th.Accent.Render("https://aka.ms/MinecraftEULA"),
 		"",
-		th.Muted.Render(fmt.Sprintf("Kabul etmek için space/←→ — durum: %v", w.eulaAccepted)),
+		RenderKeyHints(th, []KeyHint{{"Space", "kabul/değiştir"}, {"←/→", "değiştir"}}, 56) + "  " +
+			th.Muted.Render(fmt.Sprintf("durum: %v", w.eulaAccepted)),
 	}, "\n")
 }

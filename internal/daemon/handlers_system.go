@@ -104,6 +104,34 @@ func (d *Daemon) handleSystemPersist(_ context.Context, raw json.RawMessage) (an
 	return ipc.OKResult{OK: true, Message: "USB kalıcı yapıldı — /data artık reboot'ta korunur"}, nil
 }
 
+// findBootDisk returns the whole-disk path of the booted installation media (ISO / Live USB).
+func findBootDisk() string {
+	if b, err := os.ReadFile("/proc/mounts"); err == nil {
+		lines := strings.Split(string(b), "\n")
+		for _, line := range lines {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				dev := fields[0]
+				mp := fields[1]
+				if mp == "/mnt/cdrom" || mp == "/run/mcos/boot" || strings.HasPrefix(mp, "/media/") {
+					if strings.HasPrefix(dev, "/dev/") {
+						return parentDisk(dev)
+					}
+				}
+			}
+		}
+	}
+	for _, label := range []string{"MCOS-BOOT", "MCOS", "MCOS_LIVE"} {
+		if b, err := exec.Command("blkid", "-L", label).Output(); err == nil {
+			p := strings.TrimSpace(string(b))
+			if p != "" {
+				return parentDisk(p)
+			}
+		}
+	}
+	return ""
+}
+
 // listDiskTargets enumerates real block devices from sysfs. Returns an empty
 // list off-Linux (the sysfs paths simply don't exist), so it compiles and runs
 // harmlessly on the dev host.
@@ -113,6 +141,7 @@ func listDiskTargets() []ipc.DiskTarget {
 		return nil
 	}
 	persist := disksWithLabel("MCOS-DATA")
+	bootDisk := findBootDisk()
 	var out []ipc.DiskTarget
 	for _, e := range ents {
 		name := e.Name()
@@ -124,7 +153,12 @@ func listDiskTargets() []ipc.DiskTarget {
 		}
 		base := "/sys/block/" + name
 		dev := "/dev/" + name
-		
+
+		// Exclude the currently booted installation media USB
+		if bootDisk != "" && dev == bootDisk {
+			continue
+		}
+
 		// Sysfs ağacında yukarı çıkarak (parent) cihazın USB üzerinden gelip gelmediğini bul.
 		// Bu yöntem "removable=0" olan (Windows To Go vs) USB'leri de kesin olarak tespit eder.
 		isUSB := false
@@ -145,9 +179,9 @@ func listDiskTargets() []ipc.DiskTarget {
 				isUSB = true
 			}
 		}
-		
+
 		removable := readSysfsUint(base+"/removable") == 1
-		
+
 		out = append(out, ipc.DiskTarget{
 			Device:     dev,
 			Model:      strings.TrimSpace(readSysfs(base + "/device/model")),

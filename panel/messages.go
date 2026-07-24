@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"mcos/internal/ipc"
+	"mcos/internal/java"
 	"mcos/internal/model"
 )
 
@@ -112,12 +113,26 @@ func doWiredUp(cl *Client) tea.Cmd {
 	}
 }
 
-// doJavaInstall installs a Java major and reports the refreshed runtime list.
+type javaProgressMsg struct {
+	progress map[int]java.DownloadProgress
+	err      error
+}
+
+func fetchJavaProgress(cl *Client) tea.Cmd {
+	return func() tea.Msg {
+		p, err := cl.JavaProgress()
+		return javaProgressMsg{progress: p, err: err}
+	}
+}
+
+// doJavaInstall installs a Java major asynchronously and begins progress polling.
 func doJavaInstall(cl *Client, major int) tea.Cmd {
 	return func() tea.Msg {
-		_, err := cl.JavaInstall(major)
-		rts, _ := cl.JavaList()
-		return javaSetupMsg{ok: err == nil && len(rts) > 0, runtimes: rts}
+		go func() {
+			_, _ = cl.JavaInstall(major)
+		}()
+		p, _ := cl.JavaProgress()
+		return javaProgressMsg{progress: p, err: nil}
 	}
 }
 

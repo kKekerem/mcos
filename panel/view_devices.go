@@ -77,10 +77,9 @@ func (a *App) renderDevices(w, h int) string {
 	if a.wifiConnect {
 		b.WriteString("\n" + th.CardTitle.Render("Bağlan » "+a.wifiSelectedSSID()) + "\n")
 		b.WriteString("  " + a.wifiInput.View() + "\n")
-		b.WriteString(th.Muted.Render("  Enter: bağlan · Esc: vazgeç"))
+		b.WriteString("  " + RenderKeyHints(th, []KeyHint{{"Enter", "bağlan"}, {"Esc", "vazgeç"}}, w-4))
 	} else {
-		b.WriteString("\n" + th.Muted.Render(
-			"w: tara · yukarı/aşağı: seç · Enter: bağlan · e: kabloyu bağla · r: yenile"))
+		b.WriteString("\n" + RenderKeyHints(th, []KeyHint{{"w", "tara"}, {"↑/↓", "seç"}, {"Enter", "bağlan"}, {"e", "kablo"}, {"r", "yenile"}}, w-2))
 	}
 	return a.contentFrame(w, h, "Donanım", b.String())
 }

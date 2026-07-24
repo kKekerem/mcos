@@ -28,15 +28,17 @@ var sectionNames = []string{
 	"Donanım",
 	"Ağ",
 	"Tünel (Serveo)",
-	"PC Eşleştirme",
+	"MCOS Paylaşım",
 	"Ayarlar",
 }
 
-// Decorative per-section icons were removed: the framebuffer console font can't
-// render arbitrary symbol glyphs, so they showed as garbage. Names are enough.
+// Precise 1-column section icons for 100% border alignment
+var sectionIcons = []string{
+	"◆", "▶", "◈", "▲", "●", "◈", "◇", "★", "⚙",
+}
 
 // sidebarDisabled reports whether a section is adaptively disabled given the
-// current system status (no internet -> wan; cluster off -> peers).
+// current system status (no internet -> wan).
 func (a *App) sidebarDisabled(section int) bool {
 	if a.status == nil {
 		return false
@@ -44,45 +46,33 @@ func (a *App) sidebarDisabled(section int) bool {
 	switch section {
 	case secWAN:
 		return !a.status.WANOn
-	case secPeers:
-		return !a.status.ClusterOn || a.status.PeersOnline == 0 && !a.status.ClusterOn
 	default:
 		return false
 	}
 }
 
 // renderSidebar draws the left navigation column as raw content; the focus
-// border is added by pane() in View(). The active section is a filled accent
-// bar when the sidebar has focus, or an accent "» name" when focus is in the
-// content pane — so it's always obvious where you are.
+// border is added by pane() in View(). The active section remains visible in
+// both panes, with a complete rounded pill when this navigation has focus.
 func (a *App) renderSidebar(w, h int) string {
 	th := a.th
 	var b strings.Builder
 
-	b.WriteString(th.Title.Render("MCOS") + th.Muted.Render(" v"+appVersion(a.status)) + "\n")
-	b.WriteString(th.Muted.Render("Minecraft Server OS") + "\n\n")
+	b.WriteString(th.Title.Render("◆ MCOS") + th.Muted.Render(" v"+appVersion(a.status)) + "\n")
+	b.WriteString(th.Muted.Render("Minecraft Server OS") + "\n")
+	b.WriteString(th.Muted.Render("Klavye Kontrollü TUI") + "\n\n")
 
 	for i, name := range sectionNames {
 		disabled := a.sidebarDisabled(i)
-		switch {
-		case i == a.section && a.focus == focusSidebar:
-			// Active + focused: accent side-bar + filled label — unmissable.
-			b.WriteString(th.Accent.Render("▌") + th.MenuActive.Render(" "+name+" ") + "\n")
-		case i == a.section:
-			// Active but focus is in the content pane: accent ▶ marker.
-			b.WriteString(th.Accent.Render("▶ "+name) + "\n")
-		case disabled:
-			b.WriteString(th.MenuItem.Faint(true).Render("  "+name) + th.Muted.Render(" ·") + "\n")
-		default:
-			b.WriteString(th.MenuItem.Render("  "+name) + "\n")
-		}
+		icon := sectionIcons[i]
+		b.WriteString(RenderNavItem(th, icon, name, i == a.section, a.focus == focusSidebar, disabled) + "\n")
 	}
 
 	// Footer: quick system badges.
 	b.WriteString("\n")
 	if a.status != nil {
-		b.WriteString(th.Muted.Render("Tier: ") + a.tierBadge() + "\n")
-		b.WriteString(th.Muted.Render("Sunucu: ") +
+		b.WriteString(th.Muted.Render("Tier  ") + a.tierBadge() + "\n")
+		b.WriteString(th.Muted.Render("Sunucu  ") +
 			th.Val.Render(itoa(a.status.ServersUp)+"/"+itoa(a.status.ServersTotal)) + "\n")
 	}
 	return b.String()

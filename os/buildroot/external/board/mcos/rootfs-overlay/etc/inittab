@@ -19,10 +19,9 @@
 # Start the daemon and services.
 ::sysinit:/etc/init.d/rcS
 
-# The panel owns the console. tty1 (not "console") gives it a real controlling
-# terminal -> job control works and the TUI renders correctly. mcos-launch drops
-# to a shell if the panel exits, so this entry never dies and init never panics.
-tty1::respawn:/usr/bin/mcos-launch
+# The panel gets its own foreground virtual terminal. Boot logs remain separate,
+# while mcos-launch switches to this terminal and starts the fbterm-backed TUI.
+tty2::respawn:/usr/bin/mcos-launch
 
 # Power management / shutdown.
 ::ctrlaltdel:/sbin/reboot

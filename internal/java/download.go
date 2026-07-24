@@ -42,25 +42,50 @@ func temurinURL(major int) string {
 	)
 }
 
-// downloadFile fetches url into a temp file and returns its path. The caller is
-// responsible for removing the file.
+// downloadFile fetches url into a temp file and returns its path.
 func downloadFile(client *http.Client, url, tmpDir string) (string, error) {
+	return downloadFileWithProgress(client, url, tmpDir, nil)
+}
+
+// downloadFileWithProgress fetches url into a temp file and calls onProgress(downloaded, total).
+func downloadFileWithProgress(client *http.Client, url, tmpDir string, onProgress func(downloaded, total int64)) (string, error) {
 	resp, err := client.Get(url)
 	if err != nil {
 		return "", fmt.Errorf("download: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download: unexpected status %s", resp.Status)
+		return "", fmt.Errorf("download: status %s", resp.Status)
 	}
 	f, err := os.CreateTemp(tmpDir, "jdk-*.archive")
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		os.Remove(f.Name())
-		return "", fmt.Errorf("download: copy: %w", err)
+
+	total := resp.ContentLength
+	var downloaded int64
+	buf := make([]byte, 64*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			_, werr := f.Write(buf[:n])
+			if werr != nil {
+				os.Remove(f.Name())
+				return "", fmt.Errorf("download: write: %w", werr)
+			}
+			downloaded += int64(n)
+			if onProgress != nil {
+				onProgress(downloaded, total)
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			os.Remove(f.Name())
+			return "", fmt.Errorf("download: copy: %w", rerr)
+		}
 	}
 	return f.Name(), nil
 }
@@ -81,7 +106,18 @@ func extractArchive(archivePath, dest string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return findJavaHome(dest)
+	home, err := findJavaHome(dest)
+	if err != nil {
+		return "", err
+	}
+	// Ensure all binaries in bin/ have +x executable permissions on Linux
+	_ = filepath.WalkDir(home, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && filepath.Base(filepath.Dir(path)) == "bin" {
+			_ = os.Chmod(path, 0o755)
+		}
+		return nil
+	})
+	return home, nil
 }
 
 // safeJoin joins dest+name and ensures the result stays within dest (zip-slip).

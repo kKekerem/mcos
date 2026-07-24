@@ -35,11 +35,10 @@ func (d *Daemon) handleJavaInstall(_ context.Context, raw json.RawMessage) (any,
 	if p.Major <= 0 {
 		return nil, &ipc.Error{Code: ipc.CodeInvalidParams, Message: "major must be > 0"}
 	}
-	rt, err := d.java.Install(p.Major)
-	if err != nil {
-		return nil, err
-	}
-	return ipc.JavaRuntimeResult{Runtime: *rt}, nil
+	go func() {
+		_, _ = d.java.Install(p.Major)
+	}()
+	return ipc.OKResult{OK: true, Message: "Java indirmesi başlatıldı"}, nil
 }
 
 func (d *Daemon) handleJavaRemove(_ context.Context, raw json.RawMessage) (any, error) {
@@ -59,4 +58,8 @@ func (d *Daemon) handleJavaDetect(_ context.Context, _ json.RawMessage) (any, er
 		return nil, err
 	}
 	return ipc.JavaListResult{Runtimes: rts}, nil
+}
+
+func (d *Daemon) handleJavaProgress(_ context.Context, _ json.RawMessage) (any, error) {
+	return ipc.JavaProgressResult{Progresses: d.java.ProgressMap()}, nil
 }

@@ -58,15 +58,15 @@ type ResourceBudget struct {
 // Config is the global daemon configuration, persisted as
 // <config-root>/config.json.
 type Config struct {
-	Version          string            `json:"version"`
-	Theme            string            `json:"theme"`
-	Tier             TierConfig        `json:"tier"`
-	AutostartServers bool              `json:"autostartServers"`
-	Cluster          ClusterConfig     `json:"cluster"`
-	WAN              WANGlobal         `json:"wan"`
-	Features         Features          `json:"features"`
-	Budget           ResourceBudget    `json:"budget"`
-	Timezone         string            `json:"timezone,omitempty"` // IANA tz, e.g. "Europe/Istanbul"
+	Version          string         `json:"version"`
+	Theme            string         `json:"theme"`
+	Tier             TierConfig     `json:"tier"`
+	AutostartServers bool           `json:"autostartServers"`
+	Cluster          ClusterConfig  `json:"cluster"`
+	WAN              WANGlobal      `json:"wan"`
+	Features         Features       `json:"features"`
+	Budget           ResourceBudget `json:"budget"`
+	Timezone         string         `json:"timezone,omitempty"` // IANA tz, e.g. "Europe/Istanbul"
 
 	// Turbo is a single global "use everything" switch. When true the daemon
 	// ignores the resource budget, launches servers at high priority across all
@@ -85,7 +85,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Version:          "0.1.0",
-		Theme:            "noir-purple",
+		Theme:            "graphite-teal",
 		Tier:             TierConfig{Mode: "auto"},
 		AutostartServers: true,
 		Cluster: ClusterConfig{

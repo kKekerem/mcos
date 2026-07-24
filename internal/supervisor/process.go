@@ -133,6 +133,9 @@ func (p *Process) Start() error {
 
 	if err := cmd.Start(); err != nil {
 		stdin.Close()
+		errMsg := fmt.Sprintf("[MCOS HATA] Sunucu başlatılamadı (%s): %v", p.spec.Path, err)
+		lw.Write([]byte(errMsg + "\n"))
+		lw.Flush()
 		return fmt.Errorf("supervisor: start: %w", err)
 	}
 	p.cmd = cmd

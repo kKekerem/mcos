@@ -1,6 +1,9 @@
 package ipc
 
-import "mcos/internal/model"
+import (
+	"mcos/internal/java"
+	"mcos/internal/model"
+)
 
 // This file declares the typed parameter/result payloads for each RPC method.
 // The Go front-ends import these directly; the Rust lite panel mirrors the same
@@ -240,6 +243,11 @@ type JavaInstallParams struct {
 // JavaRuntimeResult wraps a single installed runtime.
 type JavaRuntimeResult struct {
 	Runtime model.JavaRuntime `json:"runtime"`
+}
+
+// JavaProgressResult carries a map of active and finished Java download progress objects.
+type JavaProgressResult struct {
+	Progresses map[int]java.DownloadProgress `json:"progresses"`
 }
 
 // ── Backup ──────────────────────────────────────────────────────────────

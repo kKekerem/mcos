@@ -90,7 +90,7 @@ func Normalize(s string) model.Tier {
 	}
 }
 
-// PanelFor maps a tier to the frontend binary that should own tty1.
+// PanelFor maps a tier to the frontend binary that should own the boot UI.
 func PanelFor(t model.Tier) string {
 	if t == model.TierLow {
 		return LitePanel

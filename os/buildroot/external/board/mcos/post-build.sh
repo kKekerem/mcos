@@ -1,12 +1,5 @@
 #!/bin/sh
 # Post-build script for MCOS Buildroot board.
-#
-# Hardening for files authored on Windows/WSL: (1) strip CR line endings so
-# busybox init/sh don't choke on a "\r" in the shebang, (2) set the exec bit
-# (Windows/9p stages overlay files as 0644), (3) create runtime dirs. Without
-# (1)+(2) init cannot exec mcos-launch and PID 1 panics. We touch BOTH the
-# overlay source and the staged $TARGET_DIR copy so it works regardless of
-# whether this script runs before or after the overlay is applied.
 
 set -e
 
@@ -32,9 +25,7 @@ for s in etc/init.d/S99mcos usr/bin/mcos-launch usr/bin/mcos-persist; do
 done
 normalize etc/inittab
 
-# Install the Turkish-Q (trq) console keymap so `loadkeys trq` works. The kbd
-# package builds the keymaps but Buildroot does not stage them into the rootfs
-# by default, so copy it out of the kbd build tree.
+# Install keymaps and console fonts
 KEYMAP_DST="${TARGET_DIR}/usr/share/keymaps/i386/qwerty"
 FONT_DST="${TARGET_DIR}/usr/share/consolefonts"
 if [ -n "${BUILD_DIR:-}" ]; then
@@ -44,26 +35,107 @@ if [ -n "${BUILD_DIR:-}" ]; then
         cp "$KEYMAP_SRC" "$KEYMAP_DST/"
     fi
     
-    # Also grab a good console font with Turkish support (ter-u16n supports iso8859-9)
     FONT_SRC="$(ls "${BUILD_DIR}"/kbd-*/data/consolefonts/ter-u16n.psf.gz 2>/dev/null | head -1)"
     if [ -n "$FONT_SRC" ] && [ -f "$FONT_SRC" ]; then
         mkdir -p "$FONT_DST"
         cp "$FONT_SRC" "$FONT_DST/"
     fi
-
-    # Stage extlinux and MBR for the installer to use on the target machine
-    EXTLINUX_SRC="$(find "${BUILD_DIR}"/syslinux-* -name extlinux -type f -executable | grep bios | head -1)"
-    MBR_SRC="$(find "${BUILD_DIR}"/syslinux-* -name mbr.bin -type f | head -1)"
-    if [ -n "$EXTLINUX_SRC" ]; then
-        cp "$EXTLINUX_SRC" "${TARGET_DIR}/usr/sbin/"
-    fi
-    if [ -n "$MBR_SRC" ]; then
-        mkdir -p "${TARGET_DIR}/usr/share/syslinux"
-        cp "$MBR_SRC" "${TARGET_DIR}/usr/share/syslinux/"
-    fi
 fi
 
-# Create required directories.
+# Create required directories
 mkdir -p "${TARGET_DIR}/data"
 mkdir -p "${TARGET_DIR}/boot"
 mkdir -p "${TARGET_DIR}/run/mcos"
+mkdir -p "${TARGET_DIR}/usr/lib"
+mkdir -p "${TARGET_DIR}/lib"
+mkdir -p "${TARGET_DIR}/root"
+mkdir -p "${TARGET_DIR}/etc/skel"
+mkdir -p "${TARGET_DIR}/usr/share/fonts"
+mkdir -p "${TARGET_DIR}/etc/fonts"
+
+# Flatten font directory so fontconfig finds DejaVu fonts at top-level /usr/share/fonts
+if [ -d "${TARGET_DIR}/usr/share/fonts/dejavu" ]; then
+    cp -a "${TARGET_DIR}/usr/share/fonts/dejavu/"*.ttf "${TARGET_DIR}/usr/share/fonts/" 2>/dev/null || true
+fi
+
+# Stage C++ runtime libraries (libstdc++.so.6 and libgcc_s.so.1) required by fbterm
+if [ -n "${HOST_DIR:-}" ]; then
+    TC_LIB="$(find "${HOST_DIR}" -name 'libstdc++.so.6*' -type f 2>/dev/null | head -1)"
+    if [ -n "$TC_LIB" ] && [ -f "$TC_LIB" ]; then
+        LIB_DIR="$(dirname "$TC_LIB")"
+        cp -a "$LIB_DIR"/libstdc++.so* "${TARGET_DIR}/usr/lib/" 2>/dev/null || true
+        cp -a "$LIB_DIR"/libgcc_s.so* "${TARGET_DIR}/usr/lib/" 2>/dev/null || true
+        cp -a "$LIB_DIR"/libstdc++.so* "${TARGET_DIR}/lib/" 2>/dev/null || true
+        cp -a "$LIB_DIR"/libgcc_s.so* "${TARGET_DIR}/lib/" 2>/dev/null || true
+    fi
+fi
+
+# Purge any host fontconfig cache files so target regenerates clean target paths on first boot
+rm -rf "${TARGET_DIR}/var/cache/fontconfig" "${TARGET_DIR}/var/lib/fontconfig"
+mkdir -p "${TARGET_DIR}/var/cache/fontconfig"
+
+# Prefer a stable mono face for seamless box-drawing. Noto Emoji remains the
+# fallback for emoji, followed by Liberation Mono for broad text coverage.
+cat > "${TARGET_DIR}/etc/fonts/local.conf" << 'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <alias>
+    <family>monospace</family>
+    <prefer>
+      <family>DejaVu Sans Mono</family>
+      <family>Liberation Mono</family>
+      <family>FontAwesome</family>
+    </prefer>
+  </alias>
+  <match target="font">
+    <edit name="rgba" mode="assign"><const>none</const></edit>
+    <edit name="hinting" mode="assign"><bool>true</bool></edit>
+    <edit name="autohint" mode="assign"><bool>false</bool></edit>
+    <edit name="hintstyle" mode="assign"><const>hintslight</const></edit>
+    <edit name="antialias" mode="assign"><bool>true</bool></edit>
+  </match>
+</fontconfig>
+EOF
+
+# Generate fbterm configuration (.fbtermrc) with font fallback and correct color palette
+cat > "${TARGET_DIR}/root/.fbtermrc" << 'EOF'
+font-names=DejaVu Sans Mono,Liberation Mono,FontAwesome,mono
+font-size=14
+font-height=0
+font-width=0
+font-space=0
+font-space-adjust=0
+font-color=7
+color-0=0B0D10
+color-1=FF6B7A
+color-2=75E0A3
+color-3=FFD166
+color-4=15191F
+color-5=8A98A5
+color-6=7EE7D0
+color-7=EFF3F0
+color-8=8A7F88
+color-9=FF6B6B
+color-10=5DD39E
+color-11=FFC857
+color-12=7AA2F7
+color-13=C8A6FF
+color-14=5DD39E
+color-15=FFFFFF
+ambiguous-wide=0
+screen-rotate=0
+vesa-mode=0
+cursor-shape=0
+cursor-interval=500
+input-method=
+EOF
+cp "${TARGET_DIR}/root/.fbtermrc" "${TARGET_DIR}/etc/skel/.fbtermrc" 2>/dev/null || true
+
+# Clean up any leftover boot binaries in target rootfs so initrd doesn't recursively pack itself!
+rm -f "${TARGET_DIR}/boot/initrd.img" "${TARGET_DIR}/boot/rootfs.cpio.gz" 2>/dev/null || true
+
+# Copy bzImage into target boot directory for installed systems to use
+if [ -n "${BINARIES_DIR:-}" ]; then
+    [ -f "${BINARIES_DIR}/bzImage" ] && cp "${BINARIES_DIR}/bzImage" "${TARGET_DIR}/boot/bzImage" || true
+fi

@@ -1,6 +1,7 @@
 # <file system> <mount pt>    <type>   <options>          <dump> <pass>
 proc            /proc         proc     nosuid,noexec,nodev 0     0
 tmpfs           /dev          devtmpfs mode=0755,nosuid    0     0
+devpts          /dev/pts      devpts   mode=0620,gid=5,nosuid,noexec 0 0
 tmpfs           /tmp          tmpfs    mode=1777            0     0
 tmpfs           /run          tmpfs    mode=0755,nosuid     0     0
 sysfs           /sys          sysfs    nosuid,noexec,nodev 0     0

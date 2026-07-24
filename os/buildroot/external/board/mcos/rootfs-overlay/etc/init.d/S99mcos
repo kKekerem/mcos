@@ -73,13 +73,13 @@ start() {
     mkdir -p /run/mcos
 
     # Start the daemon in the BACKGROUND only. The panel is launched separately
-    # by init on the system console (see /etc/inittab -> /usr/bin/mcos-launch).
+    # by init on the dedicated panel terminal (see /etc/inittab -> mcos-launch).
     # This script must NOT block on the panel: if it did, rcS would never finish,
     # init's console respawn entry would never run, and when the panel exited PID
     # 1 would panic ("Attempted to kill init"). Daemon applies wifi/timezone/
     # budget; the panel decides setup-vs-main from config.setupComplete.
     #
-    # Send daemon output to a log file, NOT the console: the panel owns tty1 as a
+    # Send daemon output to a log file, NOT the console: the panel owns its own
     # full-screen TUI, and daemon log lines on the same tty would scribble over
     # the OOBE so it never appears. Logs live in /run/mcos/mcosd.log for debug.
     "$MCOSD" --data-root "$MCOS_DATA" --listen "$SOCK" >/run/mcos/mcosd.log 2>&1 &

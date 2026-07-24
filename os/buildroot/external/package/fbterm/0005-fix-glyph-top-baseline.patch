@@ -1,0 +1,21 @@
+Fix Turkish character baseline alignment in fbterm
+
+The original glyph->top calculation used mHeight + descender - horiBearingY
+which caused characters without tall ascenders (like Turkish dotless ı) to
+render several pixels below the baseline. Using ascender - horiBearingY
+instead correctly positions all glyphs relative to the font baseline.
+
+--- a/src/font.cpp
++++ b/src/font.cpp
+@@ -308,7 +308,10 @@
+ 		glyph->width = ROUND26(face->glyph->metrics.width);
+ 		glyph->height = ROUND26(face->glyph->metrics.height);
+ 		glyph->pitch = (glyph->width + 7) >> 3;
+-		glyph->top = mHeight - 1 + (face->size->metrics.descender >> 6) - (face->glyph->metrics.horiBearingY >> 6);
++		s32 ascender = face->size->metrics.ascender >> 6;
++		s32 bearingY = face->glyph->metrics.horiBearingY >> 6;
++		s32 top = ascender - bearingY;
++		glyph->top = (top < 0) ? 0 : top;
+ 	}
+ 
+ 	return glyph;

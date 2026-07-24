@@ -86,10 +86,10 @@ type wizardModel struct {
 	clusterShare bool
 
 	// Step 7: Location + flags
-	dataDir     textinput.Model
-	autostart   bool
-	autoBackup  bool
-	wan         bool
+	dataDir    textinput.Model
+	autostart  bool
+	autoBackup bool
+	wan        bool
 
 	// Step 8: EULA
 	eulaAccepted bool
@@ -587,33 +587,56 @@ func (w *wizardModel) view(termW, termH int) string {
 		body = w.viewConfirm(th)
 	}
 
-	progress := fmt.Sprintf("Adım %d / %d", w.step+1, wsCount)
-	cardBody := lipgloss.JoinVertical(lipgloss.Left,
-		th.CardTitle.Render("Yeni Sunucu Kurulumu  "+th.Muted.Render(progress)),
-		"", body, "",
-		th.Muted.Render("↑↓ alan · ←→/space değiştir · tab ileri · shift+tab geri · enter onay · esc iptal"))
-	if w.errMsg != "" {
-		cardBody = lipgloss.JoinVertical(lipgloss.Left, cardBody, "",
-			lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠ "+w.errMsg))
+	stepTitle := "Yeni Sunucu"
+	switch w.step {
+	case wsTemplate:
+		stepTitle = "Şablon Seçimi"
+	case wsIdentity:
+		stepTitle = "Sunucu Kimliği"
+	case wsVersion:
+		stepTitle = "Minecraft Sürümü"
+	case wsSoftware:
+		stepTitle = "Yazılım Altyapısı"
+	case wsNetwork:
+		stepTitle = "Ağ ve Erişim"
+	case wsGameplay:
+		stepTitle = "Oyun Ayarları"
+	case wsResources:
+		stepTitle = "Kaynak Limitleri"
+	case wsLocation:
+		stepTitle = "Kurulum Konumu"
+	case wsEULA:
+		stepTitle = "Mojang EULA"
+	case wsConfirm:
+		stepTitle = "Kurulum Onayı"
 	}
 
-	boxW := 66
+	header := RenderHeader(th, int(w.step)+1, int(wsCount), stepTitle)
+	help := RenderKeyHints(th, []KeyHint{{"Enter", "ilerle"}, {"↑/↓", "gezin"}, {"Shift+Tab", "geri"}, {"Esc", "iptal"}}, 66)
+	cardBody := lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
+	if w.errMsg != "" {
+		cardBody = lipgloss.JoinVertical(lipgloss.Left, cardBody, "",
+			lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠️  "+w.errMsg))
+	}
+
+	boxW := 72
 	if boxW > termW-4 {
 		boxW = termW - 4
 	}
-	box := th.Card.Width(boxW).Padding(1, 2).Render(cardBody)
+	box := RenderCard(th, "🎮 YENİ MINECRAFT SUNUCUSU", cardBody, boxW, true)
 	return lipgloss.Place(termW, termH, lipgloss.Center, lipgloss.Center, box,
 		lipgloss.WithWhitespaceChars(" "))
 }
 
 func (w *wizardModel) row(label, value string, active bool) string {
 	th := w.th
-	marker := "  "
+	marker := "   "
 	lbl := th.Key.Render(fmt.Sprintf("%-22s", label))
 	val := th.Val.Render(value)
 	if active {
-		marker = th.Accent.Render("▶ ")
-		lbl = th.Accent.Render(fmt.Sprintf("%-22s", label))
+		marker = th.Accent.Render(" ➜ ")
+		lbl = th.Accent.Bold(true).Render(fmt.Sprintf("%-22s", label))
+		val = th.Val.Bold(true).Render(value)
 	}
 	return marker + lbl + val
 }
@@ -642,14 +665,14 @@ func (w *wizardModel) viewVersion(th *theme.Theme) string {
 			picked = "yükleniyor…"
 		}
 	}
-	src := th.Muted.Render("Canlı liste (Mojang) — ←→ ile gezin.")
+	src := RenderKeyHints(th, []KeyHint{{"←/→", "sürüm seç"}}, 40)
 	if !w.verLoaded {
 		src = th.Muted.Render("Sürüm listesi alınıyor…")
 	} else if len(w.versions) == 0 {
 		src = th.Muted.Render("Liste alınamadı; sürümü elle yazın.")
 	}
 	return strings.Join([]string{
-		w.row("Sürüm (liste)", "‹ "+picked+" ›", w.cursor == 0),
+		w.row("Sürüm (liste)", "< "+picked+" >", w.cursor == 0),
 		w.row("Elle sürüm (ops.)", w.version.View(), w.cursor == 1),
 		w.row("ViaVersion (eski giriş)", w.toggle(w.viaVersion), w.cursor == 2),
 		"",
@@ -668,7 +691,7 @@ func (w *wizardModel) viewSoftware(th *theme.Theme) string {
 		note = "Mod destekli (mod loader)"
 	}
 	return strings.Join([]string{
-		w.row("Altyapı", "‹ "+string(sw)+" ›", w.cursor == 0),
+		w.row("Altyapı", "< "+string(sw)+" >", w.cursor == 0),
 		"",
 		th.Muted.Render(note),
 	}, "\n")
@@ -677,18 +700,17 @@ func (w *wizardModel) viewSoftware(th *theme.Theme) string {
 func (w *wizardModel) viewNetwork(th *theme.Theme) string {
 	return strings.Join([]string{
 		w.row("Port", w.port.View(), w.cursor == 0),
-		w.row("Render distance", w.renderDistance.View(), w.cursor == 1),
-		w.row("Simulation distance", w.simDistance.View(), w.cursor == 2),
+		w.row("Görüş uzaklığı", w.renderDistance.View(), w.cursor == 1),
+		w.row("Simülasyon uzaklığı", w.simDistance.View(), w.cursor == 2),
 	}, "\n")
 }
 
 func (w *wizardModel) viewResources(th *theme.Theme) string {
 	return strings.Join([]string{
-		w.row("RAM (MB)", fmt.Sprintf("‹ %d ›", ramChoices[w.ramIdx]), w.cursor == 0),
+		w.row("RAM (MB)", fmt.Sprintf("< %d >", ramChoices[w.ramIdx]), w.cursor == 0),
 		w.row("CPU kota (%)", w.cpuQuota.View(), w.cursor == 1),
 		w.row("PC paylaşım", w.toggle(w.clusterShare), w.cursor == 2),
 		"",
-		th.Muted.Render("GPU: " + w.gpuInfo),
 		th.Muted.Render("PC paylaşım: yedek/optimize işleri eşleşmiş PC'ye devredilir."),
 	}, "\n")
 }

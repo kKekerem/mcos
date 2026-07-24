@@ -10,11 +10,11 @@ import (
 // renderServers draws the server cards list with the selected card highlighted.
 func (a *App) renderServers(w, h int) string {
 	th := a.th
-	header := th.Title.Render("Sunucular")
-	newBtn := th.Badge(" + Yeni Sunucu ", th.P.Accent) + th.Muted.Render("  (n)")
+	header := th.Title.Render("🎮 Sunucular")
+	newBtn := RenderButton(th, "Yeni Sunucu", "n", true)
 
 	if len(a.servers) == 0 {
-		return header + "\n\n" + newBtn + "\n\n" + a.emptyServers()
+		return header + "\n\n" + newBtn + "\n\n" + a.emptyServers(w)
 	}
 
 	// Window the cards around the cursor so the selection is always visible and
@@ -50,14 +50,18 @@ func (a *App) renderServers(w, h int) string {
 	return header + "\n\n" + newBtn + "\n\n" + body
 }
 
-func (a *App) emptyServers() string {
+func (a *App) emptyServers(w int) string {
 	th := a.th
-	box := th.Card.Width(46).Padding(1, 2).Render(strings.Join([]string{
-		th.CardTitle.Render("Henüz sunucu yok"),
+	boxW := 56
+	if boxW > w {
+		boxW = w
+	}
+	box := RenderCard(th, "🎮 Henüz sunucu yok", strings.Join([]string{
+		th.Val.Render("İlk Minecraft sunucunuzu oluşturmak için"),
+		th.Val.Render("yeni sunucu sihirbazını başlatın."),
 		"",
-		th.Val.Render("Bir Minecraft sunucusu kurmak için"),
-		th.Accent.Render("  n") + th.Val.Render(" tuşuna basın — kurulum sihirbazı açılır."),
-	}, "\n"))
+		RenderKeyHints(th, []KeyHint{{"n", "yeni sunucu"}, {"Esc", "menü"}}, boxW-6),
+	}, "\n"), boxW, true)
 	return box
 }
 
@@ -67,37 +71,41 @@ func (a *App) emptyServers() string {
 // one pops even on a flat console.
 func (a *App) serverCard(s *serverInfo, selected, focused bool, w int) string {
 	th := a.th
-	inner := w - 4
-	if inner < 20 {
-		inner = 20
+	frameW := w - 2
+	contentW := w - 4
+	if frameW < 22 {
+		frameW = 22
+	}
+	if contentW < 18 {
+		contentW = 18
 	}
 
 	name := s.Name
 	if selected {
-		name = "▶ " + s.Name
+		name = "➜ " + s.Name
 	}
 	title := th.Val.Bold(true).Render(name)
 	line1 := title + "  " + stateBadge(th, s.State)
 	if selected {
-		line1 += "  " + th.Badge("● SEÇİLİ", th.P.Accent)
+		line1 += "  " + th.Badge(" SEÇİLİ ", th.P.Accent)
 	}
 	if s.WAN.Enabled {
-		line1 += "  " + th.Badge("WAN", th.P.Blue)
+		line1 += "  " + th.Badge(" WAN ", th.P.Blue)
 	}
 
 	line2 := th.Key.Render(fmt.Sprintf("%s · MC %s · Java %d", s.Software, s.MCVersion, s.JavaMajor))
-	line3 := th.Key.Render(fmt.Sprintf("RAM %dMB · Port %d · Oyuncu %d/%d · %s",
+	line3 := th.Key.Render(fmt.Sprintf("RAM %d MB · Port %d · Oyuncu %d/%d · %s",
 		s.RAMMB, s.Port, s.Players, orZero(s.MaxPlayers, 20), fmtUptime(s.UptimeSec)))
 
 	lastLog := s.LastLog
 	if lastLog == "" {
-		lastLog = "—"
+		lastLog = "Log henüz yok"
 	}
-	line4 := th.Muted.Render("» " + truncate(lastLog, inner-2))
+	line4 := th.Muted.Render("  📋 " + truncate(lastLog, contentW-4))
 
 	bodyText := strings.Join([]string{line1, line2, line3, line4}, "\n")
 
-	style := th.Card.Width(inner)
+	style := th.Card.Width(frameW)
 	switch {
 	case selected && focused:
 		style = style.BorderForeground(th.P.Accent).Bold(true)

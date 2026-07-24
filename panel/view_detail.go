@@ -21,6 +21,10 @@ var detailTabs = []string{
 	"Dosyalar", "Dünyalar", "Yedekler", "Erişim", "İnternete Aç", "Performans", "Ağ",
 }
 
+var detailTabIcons = []string{
+	"ℹ", "⌁", "⚙", "👥", "🧩", "🗂", "🌍", "💾", "🔐", "🌐", "📊", "📡",
+}
+
 const (
 	tabGeneral = iota
 	tabConsole
@@ -67,7 +71,7 @@ type detailModel struct {
 	// Settings edit mode
 	settingCursor int
 	settingMode   string // e.g. "ram", "view", "sim"
-	settingInput textinput.Model
+	settingInput  textinput.Model
 }
 
 func newDetail(th *theme.Theme, id string) *detailModel {
@@ -148,13 +152,21 @@ func (d *detailModel) handleKey(m tea.KeyMsg, cl *Client) (bool, tea.Cmd) {
 			return false, func() tea.Msg {
 				p := ipc.ServerUpdateParams{ID: d.id}
 				if mode == "ram" {
-					if v, _ := strconv.Atoi(val); v > 0 { p.RAMMB = v }
+					if v, _ := strconv.Atoi(val); v > 0 {
+						p.RAMMB = v
+					}
 				} else if mode == "view" {
-					if v, _ := strconv.Atoi(val); v > 0 { p.ViewDistance = v }
+					if v, _ := strconv.Atoi(val); v > 0 {
+						p.ViewDistance = v
+					}
 				} else if mode == "sim" {
-					if v, _ := strconv.Atoi(val); v > 0 { p.SimDistance = v }
+					if v, _ := strconv.Atoi(val); v > 0 {
+						p.SimDistance = v
+					}
 				} else if mode == "maxplayers" {
-					if v, _ := strconv.Atoi(val); v > 0 { p.MaxPlayers = v }
+					if v, _ := strconv.Atoi(val); v > 0 {
+						p.MaxPlayers = v
+					}
 				}
 				if _, err := cl.UpdateServer(p); err != nil {
 					return errMsg{err}
@@ -411,9 +423,9 @@ func (d *detailModel) update(msg tea.Msg, cl *Client) tea.Cmd {
 			d.catalogResults = m.items
 			d.catalogCursor = 0
 			if m.err != nil {
-				d.catalogNote = "⚠ " + m.err.Error()
+				d.catalogNote = "[!] " + m.err.Error()
 			} else {
-				d.catalogNote = fmt.Sprintf("%d sonuç (↑↓ seç · enter kur)", len(m.items))
+				d.catalogNote = fmt.Sprintf("%d sonuç (↑/↓ seç · Enter kur)", len(m.items))
 			}
 		}
 		return nil
@@ -429,7 +441,7 @@ func (d *detailModel) view(w, h int) string {
 	s := d.server
 
 	// Header: name + state + meta.
-	header := th.Title.Render(s.Name) + "  " + stateBadge(th, s.State) +
+	header := th.Title.Render("🎮 "+s.Name) + "  " + stateBadge(th, s.State) +
 		th.Muted.Render(fmt.Sprintf("   %s · MC %s · :%d", s.Software, s.MCVersion, s.Port))
 
 	tabBar := d.renderTabBar(w)
@@ -440,7 +452,7 @@ func (d *detailModel) view(w, h int) string {
 	}
 	body := d.tabBody(w, bodyH)
 
-	footer := th.Muted.Render("sol/sağ: sekme · s başlat · x durdur · r yeniden · Esc geri")
+	footer := RenderKeyHints(th, []KeyHint{{"←/→", "sekme"}, {"s", "başlat"}, {"x", "durdur"}, {"r", "yeniden"}, {"Esc", "geri"}}, w)
 	inner := lipgloss.JoinVertical(lipgloss.Left, header, "", tabBar, "", body, "", footer)
 	return clampLines(inner, h)
 }
@@ -451,17 +463,18 @@ func (d *detailModel) renderTabBar(w int) string {
 	th := d.th
 	parts := make([]string, len(detailTabs))
 	for i, name := range detailTabs {
+		label := detailTabIcons[i] + " " + name
 		if i == d.tab {
-			parts[i] = th.MenuActive.Render(" " + name + " ")
+			parts[i] = RenderButton(th, label, "", true)
 		} else {
-			parts[i] = th.MenuItem.Render(name)
+			parts[i] = th.MenuItem.Render(label)
 		}
 	}
 	joined := strings.Join(parts, " ")
 	if lipgloss.Width(joined) <= w {
 		return joined
 	}
-	return th.MenuActive.Render(" "+detailTabs[d.tab]+" ") + " " +
+	return RenderButton(th, detailTabIcons[d.tab]+" "+detailTabs[d.tab], "", true) + " " +
 		th.Muted.Render(fmt.Sprintf("(%d/%d · sol/sağ)", d.tab+1, len(detailTabs)))
 }
 
@@ -477,7 +490,7 @@ func (d *detailModel) tabContent(w, h int) string {
 	switch d.tab {
 	case tabGeneral:
 		return strings.Join([]string{
-			kv(th, "Durum", string(s.State)),
+			kv(th, "Durum", stateBadge(th, s.State)),
 			kv(th, "Yazılım", string(s.Software)),
 			kv(th, "Sürüm", s.MCVersion),
 			kv(th, "Java", itoa(s.JavaMajor)),
@@ -494,10 +507,10 @@ func (d *detailModel) tabContent(w, h int) string {
 		return d.consoleView(w, h)
 	case tabSettings:
 		var out []string
-		
+
 		mkField := func(idx int, label, val string) string {
 			if idx == d.settingCursor {
-				return th.Accent.Render(" ▶ ") + th.MenuActive.Render(fmt.Sprintf(" %-20s : %s ", label, val))
+				return RenderOptionRow(th, fmt.Sprintf("%-20s  %s", label, val), "Enter ile düzenle", true)
 			}
 			return "   " + th.Val.Render(fmt.Sprintf("%-20s", label)) + th.Muted.Render(" : ") + th.Key.Render(val)
 		}
@@ -515,7 +528,7 @@ func (d *detailModel) tabContent(w, h int) string {
 		if d.settingMode != "" {
 			out = append(out, d.settingInput.View())
 		} else {
-			out = append(out, th.Muted.Render("↑/↓: Gezin  ·  Enter: Düzenle / Değiştir"))
+			out = append(out, RenderKeyHints(th, []KeyHint{{"↑/↓", "gezin"}, {"Enter", "düzenle"}, {"Esc", "geri"}}, w))
 		}
 		return strings.Join(out, "\n")
 	case tabSoftware:
@@ -545,7 +558,7 @@ func (d *detailModel) tabContent(w, h int) string {
 			th.Muted.Render("WAN açıkken sunucu, ssh ile serveo.net üzerinden internete açılır."),
 			th.Muted.Render("Adres sunucu başlayınca burada belirir."),
 			"",
-			th.Muted.Render("[t] Aç/Kapat"),
+			RenderKeyHints(th, []KeyHint{{"t", "aç/kapat"}, {"Esc", "geri"}}, w),
 		)
 		return strings.Join(lines, "\n")
 	case tabPlayers:
@@ -620,7 +633,7 @@ func (d *detailModel) playersView(w, h int) string {
 	}
 	p := d.players
 	head := kv(th, "Online", fmt.Sprintf("%d / %d", p.Online, p.Max))
-	help := th.Muted.Render("yukarı/aşağı seç · o op · d deop · K at · B yasakla · u affet · w/W whitelist +/-")
+	help := RenderKeyHints(th, []KeyHint{{"↑/↓", "seç"}, {"o", "op"}, {"d", "deop"}, {"K", "at"}, {"B", "yasakla"}, {"u", "affet"}, {"w/W", "whitelist"}}, w)
 	if len(p.Players) == 0 {
 		return head + "\n\n" + th.Muted.Render("(çevrimiçi oyuncu yok — sunucu çalışıyor olmalı)") + "\n\n" + help
 	}
@@ -654,7 +667,7 @@ func (d *detailModel) softwareView(w, h int) string {
 	if d.catalogFocused {
 		out = append(out, d.catalogInput.View())
 	} else {
-		out = append(out, th.Muted.Render("'/' ile mod/plugin ara (Modrinth)"))
+		out = append(out, KeyCap(th, "/")+" "+th.Muted.Render("mod/plugin ara (Modrinth)"))
 	}
 	if d.catalogNote != "" {
 		out = append(out, th.Muted.Render(d.catalogNote))
@@ -687,10 +700,10 @@ func (d *detailModel) filesView(w, h int) string {
 		return th.Muted.Render("! " + d.m6Err)
 	}
 	if len(d.files) == 0 {
-		return th.Muted.Render("(no files)")
+		return th.Muted.Render("(dosya yok)")
 	}
 	var out []string
-	out = append(out, th.Muted.Render(fmt.Sprintf("%-30s %8s  %s", "Name", "Size", "Dir")))
+	out = append(out, th.Muted.Render(fmt.Sprintf("%-30s %8s  %s", "Ad", "Boyut", "Tür")))
 	for _, f := range d.files {
 		mark := " "
 		if f.IsDir {
@@ -707,7 +720,7 @@ func (d *detailModel) worldsView(w, h int) string {
 		return th.Muted.Render("! " + d.m6Err)
 	}
 	if len(d.worlds) == 0 {
-		return th.Muted.Render("(no worlds found)")
+		return th.Muted.Render("(dünya bulunamadı)")
 	}
 	var out []string
 	for _, w := range d.worlds {
@@ -722,7 +735,7 @@ func (d *detailModel) backupsView(w, h int) string {
 		return th.Muted.Render("! " + d.m6Err)
 	}
 	if len(d.backups) == 0 {
-		return th.Muted.Render("(no backups — press 'c' to create one)")
+		return th.Muted.Render("(yedek yok)") + "\n" + RenderKeyHints(th, []KeyHint{{"c", "yedek oluştur"}}, w)
 	}
 	var out []string
 	for _, b := range d.backups {

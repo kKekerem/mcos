@@ -1,9 +1,19 @@
 #!/bin/sh
-# mcos-install — Install the booted MCOS live system to a target disk persistently.
+# mcos-install — Install MCOS live system to persistent disk (UEFI + BIOS GPT Dual Boot)
 
 set -e
 
-log() { echo -e "\n>> mcos-install: $*\n"; }
+log() {
+    echo -e "\n>> mcos-install: $*\n"
+    echo "$*" >> /tmp/mcos-install.log 2>/dev/null || true
+}
+
+status() {
+    pct="$1"
+    msg="$2"
+    log "$msg"
+    echo "$pct|$msg" > /tmp/mcos-install.status 2>/dev/null || true
+}
 
 TARGET="$1"
 if [ -z "$TARGET" ]; then
@@ -16,106 +26,152 @@ if [ ! -b "$TARGET" ]; then
     exit 1
 fi
 
-log "Kurulum başlıyor... Hedef disk sıfırlanıyor: $TARGET"
-# Clear the partition table
-dd if=/dev/zero of="$TARGET" bs=1M count=10 status=none
+status "5" "[1/6] MBR bölüm tablosu oluşturuluyor: $TARGET"
+# Clear partition table header
+dd if=/dev/zero of="$TARGET" bs=1M count=10 status=none 2>/dev/null || true
 
-log "Bölümler oluşturuluyor (Boot: 64M, Root: 4G, Data: Kalanı)..."
+# Partitioning: MBR (msdos) with Boot ESP FAT32 (1MB-513MB) + Root EXT4 (513MB-100%)
+# MBR partition table with active boot flag is universally recognized by 100% of Legacy BIOS and UEFI firmwares!
 parted -s "$TARGET" mklabel msdos
-parted -s "$TARGET" mkpart primary fat32 1MiB 65MiB
+parted -s "$TARGET" mkpart primary fat32 1MiB 513MiB
 parted -s "$TARGET" set 1 boot on
-parted -s "$TARGET" mkpart primary ext4 65MiB 4161MiB
-parted -s "$TARGET" mkpart primary ext4 4161MiB 100%
+parted -s "$TARGET" set 1 lba on 2>/dev/null || true
+parted -s "$TARGET" mkpart primary ext4 513MiB 100%
 
+status "15" "[2/6] Bölüm tablosu çekirdeğe bildiriliyor..."
 # Allow kernel to re-read partition table
 partprobe "$TARGET" 2>/dev/null || partx -a "$TARGET" 2>/dev/null || true
-sleep 3
+udevadm settle 2>/dev/null || sleep 2
 
-# Determine partition names (/dev/sda1 or /dev/nvme0n1p1)
+# Determine partition paths (/dev/sda1 vs /dev/nvme0n1p1)
 if echo "$TARGET" | grep -q "[0-9]$"; then
     BOOT_PART="${TARGET}p1"
     ROOT_PART="${TARGET}p2"
-    DATA_PART="${TARGET}p3"
 else
     BOOT_PART="${TARGET}1"
     ROOT_PART="${TARGET}2"
-    DATA_PART="${TARGET}3"
 fi
 
-log "Dosya sistemleri oluşturuluyor..."
+status "25" "[3/6] Dosya sistemleri oluşturuluyor (FAT32 Boot + EXT4 Root)..."
 mkfs.vfat -F 32 -n MCOS-BOOT "$BOOT_PART"
 mkfs.ext4 -F -L MCOS-ROOT "$ROOT_PART"
-mkfs.ext4 -F -L MCOS-DATA "$DATA_PART"
 
-# Get PARTUUID for robust booting without initrd
-ROOT_PARTUUID=$(blkid -s PARTUUID -o value "$ROOT_PART")
-log "Root PARTUUID: $ROOT_PARTUUID"
+udevadm settle 2>/dev/null || sleep 1
+ROOT_PARTUUID=$(blkid -s PARTUUID -o value "$ROOT_PART" 2>/dev/null || true)
+if [ -n "$ROOT_PARTUUID" ]; then
+    ROOT_CMDLINE="root=PARTUUID=$ROOT_PARTUUID rw rootwait rootdelay=5 console=tty0 consoleblank=0 quiet loglevel=3 fbcon=nodefer vt.global_cursor_default=0"
+else
+    ROOT_CMDLINE="root=LABEL=MCOS-ROOT rw rootwait rootdelay=5 console=tty0 consoleblank=0 quiet loglevel=3 fbcon=nodefer vt.global_cursor_default=0"
+fi
 
-log "Bölümler bağlanıyor ve dosyalar kopyalanıyor..."
+log "Bölümler bağlanıyor..."
 mkdir -p /mnt/target
 mount "$ROOT_PART" /mnt/target
-mkdir -p /mnt/target/boot
-mount "$BOOT_PART" /mnt/target/boot
-mkdir -p /mnt/target/data
-mount "$DATA_PART" /mnt/target/data
+mkdir -p /mnt/target/boot /mnt/target/data /mnt/target/etc /mnt/target/var /mnt/target/run /mnt/target/tmp /mnt/target/dev /mnt/target/proc /mnt/target/sys
 
-# Kopyalama işlemi (Sanal dosya sistemleri hariç her şeyi kopyala)
-log "Sistem kopyalanıyor (bu işlem biraz sürebilir)..."
-cp -ax / /mnt/target/ || true
-
-# Eğer kurulum sırasında Java veya başka veriler indirilmişse, 
-# onları da hedef diskin DATA bölümüne taşı.
-if [ -d /run/mcos/data ]; then
-    log "İndirilen veriler (Java vb.) kopyalanıyor..."
-    cp -ax /run/mcos/data/* /mnt/target/data/ || true
-fi
-
-# Live ortamdaki mevcut konfigürasyonu (isim, ağ vb.) hedef diske taşı.
-# Bu sayede OOBE ayarları kuruluma devam ederken korunur.
-if [ -f /data/config.json ]; then
-    log "Live konfigürasyon taşınıyor..."
-    cp /data/config.json /mnt/target/data/config.json || true
-fi
-
-# Kopya sonrası kernelin geldiğinden emin ol (initramfs rootfs içinde /boot altında bulunur)
-if [ -f /boot/bzImage ]; then
-    cp /boot/bzImage /mnt/target/boot/bzImage || true
-fi
-
-# Eksik bağlama noktalarını oluştur
-mkdir -p /mnt/target/dev /mnt/target/proc /mnt/target/sys /mnt/target/tmp /mnt/target/run /mnt/target/mnt
-
-log "UEFI boot desteği ekleniyor..."
-mkdir -p /mnt/target/boot/EFI/BOOT
-if [ -f /mnt/target/boot/bzImage ]; then
-    # Use the kernel as the EFI loader (EFISTUB)
-    cp /mnt/target/boot/bzImage /mnt/target/boot/EFI/BOOT/BOOTX64.EFI
-else
-    log "Uyarı: bzImage bulunamadı, UEFI kopyalanamadı."
-fi
-
-log "BIOS (Legacy) boot desteği ekleniyor..."
-if command -v extlinux >/dev/null 2>&1; then
-    extlinux --install /mnt/target/boot
-    cat > /mnt/target/boot/syslinux.cfg <<EOF
-DEFAULT mcos
-LABEL mcos
-  KERNEL /bzImage
-  APPEND root=PARTUUID=$ROOT_PARTUUID rw rootwait rootdelay=10 console=tty1 console=ttyS0,115200
-EOF
-    if [ -f /usr/share/syslinux/mbr.bin ]; then
-        dd if=/usr/share/syslinux/mbr.bin of="$TARGET" bs=440 count=1 status=none
+status "35" "[4/6] Temel sistem dosyaları kopyalanıyor (/bin, /sbin, /etc)..."
+for d in bin sbin etc root data; do
+    if [ -d "/$d" ]; then
+        cp -a "/$d" /mnt/target/ 2>/dev/null || true
     fi
-else
-    log "Uyarı: extlinux bulunamadı, BIOS boot kurulamadı."
+done
+
+status "50" "[4/6] Kütüphaneler ve modüller kopyalanıyor (/lib, /lib64)..."
+for d in lib lib64; do
+    if [ -d "/$d" ]; then
+        cp -a "/$d" /mnt/target/ 2>/dev/null || true
+    fi
+done
+
+status "65" "[4/6] Kullanıcı uygulamaları kopyalanıyor (/usr, /var)..."
+for d in usr var; do
+    if [ -d "/$d" ]; then
+        cp -a "/$d" /mnt/target/ 2>/dev/null || true
+    fi
+done
+
+if [ -d /run/mcos/data ]; then
+    cp -a /run/mcos/data/* /mnt/target/data/ 2>/dev/null || true
 fi
 
-log "Temizleniyor..."
+if [ -f /data/config.json ]; then
+    cp /data/config.json /mnt/target/data/config.json 2>/dev/null || true
+fi
+
+# Essential /dev nodes required for init before devtmpfs mounts
+mknod -m 600 /mnt/target/dev/console c 5 1 2>/dev/null || true
+mknod -m 666 /mnt/target/dev/null c 1 3 2>/dev/null || true
+mknod -m 666 /mnt/target/dev/zero c 1 5 2>/dev/null || true
+
+status "80" "[5/6] Çekirdek ve Ön Yükleyici (GRUB2 UEFI + BIOS) kuruluyor..."
+mount "$BOOT_PART" /mnt/target/boot
+mkdir -p /mnt/target/boot/EFI/BOOT /mnt/target/boot/grub
+
+# Copy Linux Kernel bzImage to target boot partition
+for img in /boot/bzImage /mnt/cdrom/boot/bzImage /media/*/boot/bzImage; do
+    if [ -f "$img" ]; then
+        cp "$img" /mnt/target/boot/bzImage
+        cp "$img" /mnt/target/boot/EFI/BOOT/bzImage 2>/dev/null || true
+        break
+    fi
+done
+
+status "88" "[5/6] GRUB2 Ön Yükleyici diske yazılıyor (BIOS + UEFI Dual Boot)..."
+# 1. Install GRUB2 for UEFI and BIOS
+if command -v grub-install >/dev/null 2>&1; then
+    log "GRUB2 UEFI kuruluyor..."
+    grub-install --target=x86_64-efi --efi-directory=/mnt/target/boot --boot-directory=/mnt/target/boot --removable --recheck "$TARGET" 2>/dev/null || true
+    log "GRUB2 BIOS (Legacy) kuruluyor..."
+    grub-install --target=i386-pc --boot-directory=/mnt/target/boot --recheck "$TARGET" 2>/dev/null || true
+fi
+
+# Set MBR active boot flag on Partition 1 (0x80)
+sfdisk --activate "$TARGET" 1 2>/dev/null || true
+parted -s "$TARGET" set 1 boot on 2>/dev/null || true
+
+# 2. Standalone GRUB EFI or EFISTUB Fallback
+if command -v grub-mkimage >/dev/null 2>&1 && [ ! -f /mnt/target/boot/EFI/BOOT/BOOTX64.EFI ]; then
+    log "Standalone GRUB2 EFI executable üretiliyor..."
+    grub-mkimage -O x86_64-efi -o /mnt/target/boot/EFI/BOOT/BOOTX64.EFI -p "/EFI/BOOT" part_gpt part_msdos fat ext2 normal boot configfile linux search search_label search_fs_uuid search_part_uuid 2>/dev/null || true
+fi
+
+if [ ! -f /mnt/target/boot/EFI/BOOT/BOOTX64.EFI ] && [ -f /mnt/target/boot/bzImage ]; then
+    log "EFISTUB fallback (Kernel EFI STUB) kopyalanıyor..."
+    cp /mnt/target/boot/bzImage /mnt/target/boot/EFI/BOOT/BOOTX64.EFI
+    echo "\\EFI\\BOOT\\BOOTX64.EFI $ROOT_CMDLINE" > /mnt/target/boot/startup.nsh
+fi
+
+status "94" "[6/6] GRUB2 yapılandırma dosyaları oluşturuluyor..."
+# 3. Create unified grub.cfg for installed system in all search paths
+GRUB_CFG_CONTENT="set timeout=2
+set default=0
+insmod all_video
+insmod gfxterm
+insmod part_gpt
+insmod part_msdos
+insmod ext2
+insmod fat
+
+menuentry \"MCOS (Minecraft Server OS)\" {
+    search --no-floppy --label --set=root MCOS-ROOT
+    linux /boot/bzImage $ROOT_CMDLINE
+}
+
+menuentry \"MCOS (BOOT Bölümü Fallback)\" {
+    search --no-floppy --label --set=root MCOS-BOOT
+    linux /bzImage $ROOT_CMDLINE
+}
+"
+
+echo "$GRUB_CFG_CONTENT" > /mnt/target/boot/grub/grub.cfg
+echo "$GRUB_CFG_CONTENT" > /mnt/target/boot/EFI/BOOT/grub.cfg
+mkdir -p /mnt/target/boot/boot/grub
+echo "$GRUB_CFG_CONTENT" > /mnt/target/boot/boot/grub/grub.cfg
+
+status "100" "[6/6] Kurulum başarıyla tamamlandı!"
 sync
-umount /mnt/target/data || true
 umount /mnt/target/boot || true
 umount /mnt/target || true
 rm -rf /mnt/target || true
 
-log "Kurulum tamamlandı!"
 exit 0

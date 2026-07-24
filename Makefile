@@ -129,25 +129,33 @@ iso: os
 	command -v xorriso >/dev/null 2>&1 || { echo "iso: need xorriso"; exit 1; }; \
 	D=dist/iso; \
 	rm -rf "$$D" dist/mcos-x86_64.iso; \
-	mkdir -p "$$D/boot/grub"; \
+	mkdir -p "$$D/boot/grub" "$$D/EFI/BOOT"; \
 	cp "$(BR_OUTPUT)/images/bzImage"        "$$D/boot/bzImage"; \
+	cp "$(BR_OUTPUT)/images/bzImage"        "$$D/EFI/BOOT/BOOTX64.EFI"; \
 	cp "$(BR_OUTPUT)/images/rootfs.cpio.gz" "$$D/boot/initrd.img"; \
+	printf '%s\r\n' 'fs0:' '\EFI\BOOT\BOOTX64.EFI root=LABEL=MCOS-ROOT rw rootwait rootdelay=10 console=tty0 consoleblank=0 fbcon=nodefer vt.global_cursor_default=0' > "$$D/startup.nsh"; \
 	printf '%s\n' \
-		'set timeout=5' \
+		'set timeout=3' \
 		'set default=0' \
 		'insmod all_video' \
 		'insmod vbe' \
 		'insmod vga' \
 		'insmod gfxterm' \
+		'insmod part_msdos' \
+		'insmod part_gpt' \
+		'insmod fat' \
+		'insmod iso9660' \
 		'set gfxmode=auto' \
-		'terminal_output gfxterm' \
+		'terminal_input console' \
+		'terminal_output console gfxterm' \
 		'menuentry "MCOS Live Installer" {' \
 		'  set gfxpayload=keep' \
-		'  linux /boot/bzImage console=tty0 console=ttyS0,115200 consoleblank=0 video=1024x768' \
+		'  linux /boot/bzImage console=tty0 consoleblank=0 loglevel=3 fbcon=nodefer vt.global_cursor_default=0' \
 		'  initrd /boot/initrd.img' \
 		'}' \
-		'menuentry "MCOS Live Installer (safe / nomodeset)" {' \
-		'  linux /boot/bzImage console=tty0 consoleblank=0 nomodeset' \
+		'menuentry "MCOS Live Installer (safe / text mode)" {' \
+		'  set gfxpayload=text' \
+		'  linux /boot/bzImage console=tty0 consoleblank=0 nomodeset loglevel=3 vt.global_cursor_default=0' \
 		'  initrd /boot/initrd.img' \
 		'}' \
 		> "$$D/boot/grub/grub.cfg"; \

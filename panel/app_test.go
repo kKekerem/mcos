@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -15,13 +16,14 @@ func testApp() *App {
 		th:     theme.New("noir-purple"),
 		width:  120,
 		height: 40,
+		config: model.DefaultConfig(),
 		status: &model.SystemStatus{
 			SystemName: "MCOS", Version: "0.1.0", Tier: model.TierHigh,
 			CPU:          model.CPUInfo{Model: "Test CPU", Cores: 8, Threads: 16, UsagePct: 42},
 			Memory:       model.MemInfo{TotalBytes: 16 << 30, AvailableBytes: 8 << 30, UsagePct: 50},
 			Net:          model.NetStatus{LocalIP: "192.168.1.10", Internet: true},
 			ServersTotal: 2, ServersUp: 1, JavaVersions: []int{17, 21},
-			Cloudflared: "stopped", ClusterOn: true, CloudflaredOn: true,
+			WAN: "stopped", ClusterOn: true, WANOn: true,
 		},
 		servers: []*serverInfo{
 			{ID: "srv_a", Name: "Survival", Software: model.SoftwarePaper, MCVersion: "1.21.1",
@@ -117,6 +119,46 @@ func TestDetailView(t *testing.T) {
 	out := d.view(90, 38)
 	if !strings.Contains(out, "Survival") || !strings.Contains(out, "Genel") {
 		t.Fatal("detail view missing expected content")
+	}
+}
+
+// TestFramesFitTerminal keeps the polished panel honest on the terminal sizes
+// commonly produced by fbterm. A single over-wide row can make the framebuffer
+// appear to jump or leave a dark strip at the edge.
+func TestFramesFitTerminal(t *testing.T) {
+	for _, width := range []int{80, 100, 120} {
+		for section := 0; section < secCount; section++ {
+			t.Run(fmt.Sprintf("section-%d-width-%d", section, width), func(t *testing.T) {
+				a := testApp()
+				a.width, a.height = width, 36
+				a.section = section
+				a.focus = focusContent
+				assertFrameFits(t, a.View(), width, a.height)
+			})
+		}
+
+		a := testApp()
+		a.width, a.height = width, 36
+		a.powerMenu = true
+		assertFrameFits(t, a.View(), width, a.height)
+
+		a = testApp()
+		a.width, a.height = width, 36
+		a.openWizard()
+		assertFrameFits(t, a.View(), width, a.height)
+	}
+}
+
+func assertFrameFits(t *testing.T, out string, width, height int) {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	if len(lines) > height {
+		t.Fatalf("frame overflows height %d (got %d lines)", height, len(lines))
+	}
+	for _, line := range lines {
+		if got := lipgloss.Width(line); got > width {
+			t.Fatalf("frame overflows width %d (got %d): %q", width, got, line)
+		}
 	}
 }
 

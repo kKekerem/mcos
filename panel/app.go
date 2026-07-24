@@ -10,11 +10,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"mcos/internal/ipc"
+	"mcos/internal/java"
 	"mcos/internal/model"
 	"mcos/panel/theme"
 )
 
-const sidebarWidth = 26
+const sidebarWidth = 30
 
 // focus targets.
 const (
@@ -35,6 +36,7 @@ type App struct {
 	status    *systemStatus
 	servers   []*serverInfo
 	java      []javaRuntime
+	javaProgress map[int]java.DownloadProgress
 	peers     []model.Peer
 	tasks     []model.Task
 	tunnels   []model.TunnelStatus
@@ -47,6 +49,7 @@ type App struct {
 	serverCursor  int
 	contentScroll int // generic scroll offset for sections without a row cursor
 	wifiCursor    int // selected Wi-Fi network in the Donanım/Ağ list
+	rowCursor     int // interactive selection row for Software, Settings, Share
 	wifiInput     textinput.Model
 	wifiConnect   bool // password prompt is open
 	detail        *detailModel
@@ -73,6 +76,10 @@ func NewApp(cl *Client, themeName string) *App {
 		cl:        cl,
 		th:        theme.New(themeName),
 		themeName: themeName,
+		// fbterm normally emits WindowSizeMsg immediately. Keep a useful first
+		// frame for framebuffer combinations that do not.
+		width:     120,
+		height:    36,
 		section:   secServers,
 		focus:     focusSidebar,
 		wifiInput: wi,
@@ -80,7 +87,7 @@ func NewApp(cl *Client, themeName string) *App {
 }
 
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(fetchConfig(a.cl), fetchStatus(a.cl), fetchServers(a.cl), fetchJava(a.cl), fetchPeers(a.cl), fetchTasks(a.cl), fetchTunnels(a.cl), tick())
+	return tea.Batch(fetchConfig(a.cl), fetchStatus(a.cl), fetchServers(a.cl), fetchJava(a.cl), fetchJavaProgress(a.cl), fetchPeers(a.cl), fetchTasks(a.cl), fetchTunnels(a.cl), tick())
 }
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -90,11 +97,28 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tickMsg:
-		cmds := []tea.Cmd{fetchStatus(a.cl), fetchServers(a.cl), fetchPeers(a.cl), fetchTasks(a.cl), fetchTunnels(a.cl), tick()}
+		cmds := []tea.Cmd{fetchStatus(a.cl), fetchServers(a.cl), fetchPeers(a.cl), fetchTasks(a.cl), fetchTunnels(a.cl), fetchJavaProgress(a.cl), tick()}
 		if a.detail != nil {
 			cmds = append(cmds, fetchServer(a.cl, a.detail.id))
 		}
 		return a, tea.Batch(cmds...)
+
+	case javaProgressMsg:
+		if m.err == nil && m.progress != nil {
+			for major, p := range m.progress {
+				oldP, hadOld := a.javaProgress[major]
+				if p.Done && (!hadOld || !oldP.Done) {
+					if p.Error != "" {
+						a.flash = fmt.Sprintf("⚠️ Java %d hatası: %s", major, p.Error)
+					} else {
+						a.flash = fmt.Sprintf("✓ Java %d (Temurin JDK) başarıyla kuruldu!", major)
+					}
+					return a, fetchJava(a.cl)
+				}
+			}
+			a.javaProgress = m.progress
+		}
+		return a, nil
 
 	case statusMsg:
 		a.status = m.status
@@ -339,10 +363,41 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, doTurbo(a.cl, !a.status.TurboOn)
 		}
 
+	case "1":
+		if a.section == secSoftware {
+			a.flash = "Java 17 (Temurin JDK) indirmesi başlatıldı…"
+			return a, doJavaInstall(a.cl, 17)
+		}
+
+	case "2":
+		if a.section == secSoftware {
+			a.flash = "Java 21 (Temurin JDK) indirmesi başlatıldı…"
+			return a, doJavaInstall(a.cl, 21)
+		}
+
+	case "3":
+		if a.section == secSoftware {
+			a.flash = "Java 11 (Temurin JDK) indirmesi başlatıldı…"
+			return a, doJavaInstall(a.cl, 11)
+		}
+
+	case "4":
+		if a.section == secSoftware {
+			a.flash = "Java 8 (Temurin JDK) indirmesi başlatıldı…"
+			return a, doJavaInstall(a.cl, 8)
+		}
+
 	case "p":
 		if a.section == secSettings {
 			a.flash = "USB kalıcı yapılıyor…"
 			return a, doPersist(a.cl)
+		}
+
+	case "i":
+		if a.section == secSettings {
+			a.flash = "MCOS Kurulum Sihirbazı başlatılıyor…"
+			a.setup = newSetup(a.th, a.themeName)
+			return a, doFetchDisks(a.cl)
 		}
 
 	case "tab", "shift+tab":
@@ -410,14 +465,22 @@ func (a *App) toggleFocus() {
 func (a *App) moveCursor(d int) {
 	if a.focus == focusSidebar {
 		a.section = (a.section + d + secCount) % secCount
-		a.serverCursor, a.wifiCursor, a.contentScroll = 0, 0, 0
+		a.serverCursor, a.wifiCursor, a.rowCursor, a.contentScroll = 0, 0, 0, 0
 		return
 	}
-	switch {
-	case a.section == secServers:
+	switch a.section {
+	case secServers:
 		a.serverCursor = clampInt(a.serverCursor+d, 0, len(a.servers)-1)
-	case a.section == secDevices && len(a.wifiNets) > 0:
-		a.wifiCursor = clampInt(a.wifiCursor+d, 0, len(a.wifiNets)-1)
+	case secSoftware:
+		a.rowCursor = clampInt(a.rowCursor+d, 0, 3)
+	case secDevices:
+		if len(a.wifiNets) > 0 {
+			a.wifiCursor = clampInt(a.wifiCursor+d, 0, len(a.wifiNets)-1)
+		}
+	case secSettings:
+		a.rowCursor = clampInt(a.rowCursor+d, 0, 4)
+	case secPeers:
+		a.rowCursor = clampInt(a.rowCursor+d, 0, maxInt(0, len(a.peers)-1))
 	default:
 		if a.contentScroll+d >= 0 {
 			a.contentScroll += d
@@ -430,20 +493,82 @@ func (a *App) moveCursor(d int) {
 func (a *App) activate() (tea.Model, tea.Cmd) {
 	if a.focus == focusSidebar {
 		a.focus = focusContent
-		a.serverCursor, a.wifiCursor, a.contentScroll = 0, 0, 0
+		a.serverCursor, a.wifiCursor, a.rowCursor, a.contentScroll = 0, 0, 0, 0
 		return a, nil
 	}
-	switch {
-	case a.section == secServers && len(a.servers) > 0:
-		id := a.servers[a.serverCursor].ID
-		a.openDetail(id)
-		return a, fetchServer(a.cl, id)
-	case a.section == secDevices && len(a.wifiNets) > 0:
-		a.wifiConnect = true
-		a.wifiInput.SetValue("")
-		return a, a.wifiInput.Focus()
+	switch a.section {
+	case secServers:
+		if len(a.servers) > 0 {
+			id := a.servers[a.serverCursor].ID
+			a.openDetail(id)
+			return a, fetchServer(a.cl, id)
+		}
+	case secSoftware:
+		majors := []int{17, 21, 11, 8}
+		if a.rowCursor >= 0 && a.rowCursor < len(majors) {
+			m := majors[a.rowCursor]
+			a.flash = fmt.Sprintf("Java %d indirmesi başlatılıyor...", m)
+			return a, doJavaInstall(a.cl, m)
+		}
+	case secDevices:
+		if len(a.wifiNets) > 0 {
+			a.wifiConnect = true
+			a.wifiInput.SetValue("")
+			return a, a.wifiInput.Focus()
+		}
+	case secSettings:
+		switch a.rowCursor {
+		case 0:
+			// Cycle theme
+			nextTh := "graphite-teal"
+			switch a.themeName {
+			case "graphite-teal":
+				nextTh = "noir-purple"
+			case "noir-purple":
+				nextTh = "anthracite-orange"
+			case "anthracite-orange":
+				nextTh = "anthracite-green"
+			case "anthracite-green":
+				nextTh = "crimson-night"
+			case "crimson-night":
+				nextTh = "amber-graphite"
+			}
+			a.themeName = nextTh
+			a.th = theme.New(nextTh)
+			a.flash = "Tema değiştirildi: " + nextTh
+		case 1:
+			// Toggle Turbo
+			if a.config != nil {
+				a.config.Turbo = !a.config.Turbo
+				a.flash = fmt.Sprintf("Turbo modu %v yapıldı", a.config.Turbo)
+			}
+		case 2:
+			a.flash = "USB kalıcı yapılıyor…"
+			return a, doPersist(a.cl)
+		case 3:
+			a.flash = "MCOS Kurulum Sihirbazı başlatılıyor…"
+			a.setup = newSetup(a.th, a.themeName)
+			return a, doFetchDisks(a.cl)
+		case 4:
+			if a.config != nil {
+				a.config.AutostartServers = !a.config.AutostartServers
+				a.flash = fmt.Sprintf("Oto-başlatma %v yapıldı", a.config.AutostartServers)
+			}
+		}
+	case secPeers:
+		if len(a.peers) > 0 && a.rowCursor < len(a.peers) {
+			p := a.peers[a.rowCursor]
+			a.flash = fmt.Sprintf("PC %s ile eşleşiliyor...", p.Name)
+		}
 	}
 	return a, nil
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // wifiSelectedSSID returns the SSID under the Wi-Fi cursor, or "".
@@ -530,40 +655,42 @@ func (a *App) pane(content string, outerW, outerH int, focused bool) string {
 	if focused {
 		bc = th.P.Accent
 	}
-	innerW, innerH := outerW-4, outerH-2 // border(2) + horizontal padding(2)
-	if innerW < 1 {
-		innerW = 1
+	frameW, frameH := outerW-2, outerH-2 // border is outside Lip Gloss Width/Height.
+	if frameW < 1 {
+		frameW = 1
 	}
-	if innerH < 1 {
-		innerH = 1
+	if frameH < 1 {
+		frameH = 1
 	}
 	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
+		Border(lipgloss.NormalBorder()).
 		BorderForeground(bc).BorderBackground(th.P.Bg).
 		Background(th.P.Bg).Foreground(th.P.Text).
-		Width(innerW).Height(innerH).Padding(0, 1).
-		Render(clampLines(content, innerH))
+		Width(frameW).Height(frameH).Padding(0, 1).
+		Render(clampLines(content, frameH))
 }
 
 // renderPowerModal draws the centered Kapat / Yeniden Başlat / Vazgeç dialog.
 func (a *App) renderPowerModal() string {
 	th := a.th
-	opts := []struct{ label, desc string }{
-		{"Kapat", "sistemi güvenle kapat"},
-		{"Yeniden Başlat", "sistemi yeniden başlat"},
-		{"Vazgeç", "geri dön"},
+	opts := []struct{ icon, label, desc string }{
+		{"●", "Kapat", "sistemi güvenle kapat"},
+		{"↻", "Yeniden Başlat", "sistemi yeniden başlat"},
+		{"↩", "Vazgeç", "geri dön"},
 	}
 	var b strings.Builder
-	b.WriteString(th.CardTitle.Render("Güç") + "\n\n")
+	b.WriteString(th.CardTitle.Render("◆ Güç Menüsü") + "\n")
+	b.WriteString(th.Muted.Render("Yalnızca klavye: seçim için yön tuşları, onay için Enter.") + "\n\n")
 	for i, o := range opts {
+		label := o.icon + " " + o.label
 		if i == a.powerCursor {
-			b.WriteString(th.MenuActive.Render(" ▶ "+o.label+" ") + "  " + th.Muted.Render(o.desc) + "\n")
+			b.WriteString(RenderOptionRow(th, label, o.desc, true) + "\n")
 		} else {
-			b.WriteString(th.MenuItem.Render("   "+o.label) + "  " + th.Muted.Render(o.desc) + "\n")
+			b.WriteString(RenderOptionRow(th, label, o.desc, false) + "\n")
 		}
 	}
-	b.WriteString("\n" + th.Muted.Render("↑↓ seç · Enter onayla · Esc vazgeç"))
-	return th.Card.Width(48).Padding(1, 2).Render(b.String())
+	b.WriteString("\n" + RenderKeyHints(th, []KeyHint{{"↑↓", "seç"}, {"Enter", "onayla"}, {"Esc", "vazgeç"}}, 44))
+	return th.Card.Width(50).Padding(1, 2).Render(b.String())
 }
 
 // renderTopBar draws the breadcrumb header: MCOS > MENÜ/<bölüm> [> <öğe>],
@@ -571,7 +698,7 @@ func (a *App) renderPowerModal() string {
 func (a *App) renderTopBar() string {
 	th := a.th
 	sep := th.Muted.Render(" > ")
-	crumb := th.Accent.Bold(true).Render("MCOS")
+	crumb := th.Accent.Bold(true).Render("◆ MCOS")
 	sect := sectionNames[a.section]
 	if a.focus == focusSidebar {
 		crumb += sep + th.Title.Render("MENÜ") + sep + th.Muted.Render(sect)
@@ -624,34 +751,71 @@ func (a *App) renderContent(w, h int) string {
 // a.contentScroll so long text sections never overflow.
 func (a *App) contentFrame(w, h int, title, body string) string {
 	th := a.th
-	header := th.Title.Render(title)
 	avail := h - 2
 	if avail < 1 {
 		avail = 1
 	}
-	return header + "\n\n" + sliceScroll(body, a.contentScroll, avail)
+
+	lines := strings.Split(body, "\n")
+	total := len(lines)
+	start := a.contentScroll
+	if start < 0 {
+		start = 0
+	}
+	if total > 0 && start > total-1 {
+		start = total - 1
+	}
+	end := start + avail
+	if end > total {
+		end = total
+	}
+
+	header := th.Title.Render(title)
+	if total > avail {
+		position := th.Muted.Render(fmt.Sprintf("↑↓  %d-%d / %d", start+1, end, total))
+		gap := w - lipgloss.Width(header) - lipgloss.Width(position)
+		if gap < 1 {
+			gap = 1
+		}
+		header += spaces(gap) + position
+	}
+
+	dividerW := w
+	if dividerW < 1 {
+		dividerW = 1
+	}
+	divider := th.Muted.Render(strings.Repeat("─", dividerW))
+	return header + "\n" + divider + "\n" + sliceScroll(body, start, avail)
 }
 
 func (a *App) renderHelp() string {
 	th := a.th
-	var keys string
-	switch {
-	case a.wifiConnect:
-		keys = "WiFi şifresini yaz · Enter: bağlan · Esc: vazgeç"
-	case a.detail != nil:
-		keys = "sol/sağ: sekme · s/x/r: başlat/durdur/yenile · Esc: geri · q: çıkış"
-	case a.focus == focusSidebar:
-		keys = "↑↓ menü · Enter/→ gir · Tab pano · n yeni · t turbo · g güç · q çık"
-	default:
-		keys = "↑↓ seç · Enter aç · Esc/← menü · n yeni · t turbo · g güç · q çık"
-	}
-	left := th.Help.Render(" " + keys)
 	right := ""
 	if a.flash != "" {
 		right = th.Accent.Render(a.flash + " ")
 	} else if a.statusErr != "" {
-		right = lipgloss.NewStyle().Foreground(th.P.Red).Render("! " + a.statusErr + " ")
+		right = lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠ " + a.statusErr + " ")
 	}
+
+	var hints []KeyHint
+	switch {
+	case a.wifiConnect:
+		hints = []KeyHint{{"type", "WiFi şifresi"}, {"Enter", "bağlan"}, {"Esc", "vazgeç"}}
+	case a.detail != nil:
+		hints = []KeyHint{{"←/→", "sekme"}, {"s", "başlat"}, {"x", "durdur"}, {"r", "yenile"}, {"Esc", "geri"}, {"q", "çıkış"}}
+	default:
+		if a.focus == focusSidebar {
+			hints = []KeyHint{{"↑/↓", "menü"}, {"Enter", "seç"}, {"Tab", "pano"}, {"n", "yeni"}, {"t", "turbo"}, {"g", "güç"}, {"q", "çıkış"}}
+		} else {
+			hints = []KeyHint{{"↑/↓", "gezin"}, {"Enter", "aç"}, {"Esc", "menü"}, {"n", "yeni"}, {"t", "turbo"}, {"g", "güç"}, {"q", "çıkış"}}
+		}
+	}
+
+	maxLeft := a.width - lipgloss.Width(right) - 2
+	if maxLeft < 12 {
+		maxLeft = 12
+	}
+	left := " " + RenderKeyHints(th, hints, maxLeft)
 	gap := a.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if gap < 1 {
 		gap = 1
