@@ -1,6 +1,7 @@
 package supervisor
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -138,7 +139,20 @@ func (s *Supervisor) handleExit(name string, code int, err error) {
 	if shouldRestart {
 		e.restarts++
 	}
+	restarts := e.restarts
 	backoff := policy.Backoff
+	if backoff <= 0 {
+		backoff = 1 * time.Second
+	}
+	if shouldRestart {
+		for i := 1; i < restarts; i++ {
+			backoff *= 2
+			if backoff > 60*time.Second {
+				backoff = 60 * time.Second
+				break
+			}
+		}
+	}
 	proc := e.proc
 	s.mu.Unlock()
 
@@ -146,9 +160,20 @@ func (s *Supervisor) handleExit(name string, code int, err error) {
 		if requested || stopped {
 			s.log.Infof("supervisor: %q exited (code=%d)", name, code)
 		} else {
-			s.log.Warnf("supervisor: %q crashed (code=%d err=%v) restart=%v", name, code, err, shouldRestart)
+			s.log.Warnf("supervisor: %q crashed (code=%d err=%v) restart=%v backoff=%v (retry %d/%d)", name, code, err, shouldRestart, backoff, restarts, policy.MaxRestarts)
 		}
 	}
+
+	if !requested && !stopped {
+		if shouldRestart {
+			if proc.spec.OnLine != nil {
+				proc.spec.OnLine(fmt.Sprintf("[MCOS VARDİYA] Sunucu çöktü (Çıkış kodu: %d, Hata: %v). %v sonra yeniden başlatılıyor (Deneme %d/%d)...", code, err, backoff, restarts, policy.MaxRestarts))
+			}
+		} else if policy.OnCrash && proc.spec.OnLine != nil {
+			proc.spec.OnLine(fmt.Sprintf("[MCOS VARDİYA] Sunucu çöktü (Çıkış kodu: %d). Maksimum yeniden başlatma sınırına ulaşıldı (%d deneme).", code, policy.MaxRestarts))
+		}
+	}
+
 	if shouldRestart {
 		if backoff > 0 {
 			time.Sleep(backoff)

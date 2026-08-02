@@ -24,6 +24,9 @@ const (
 // community, with the large-heap variant kicking in at >=12 GB. Java 8 omits a
 // couple of options it doesn't understand. "default" is a minimal heap-only set.
 func JVMArgs(profile string, ramMB, major int) []string {
+	if ramMB <= 0 {
+		ramMB = 1024
+	}
 	heap := fmt.Sprintf("%dM", ramMB)
 	base := []string{"-Xms" + heap, "-Xmx" + heap}
 

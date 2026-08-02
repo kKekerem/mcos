@@ -121,25 +121,33 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 		return fmt.Errorf("server already %s", s)
 	}
 
+	failStart := func(err error) error {
+		r.setState(model.StateError)
+		m.sup.Remove(srv.ID)
+		m.onConsoleLine(srv.ID, fmt.Sprintf("[MCOS HATA] Sunucu başlatılamadı: %v", err))
+		if m.log != nil {
+			m.log.Errorf("server: %s (%s) start error: %v", srv.Name, srv.ID, err)
+		}
+		return err
+	}
+
 	r.setState(model.StateStarting)
 	if err := m.EnsureInstalled(ctx, srv); err != nil {
-		r.setState(model.StateError)
-		return fmt.Errorf("install: %w", err)
+		return failStart(fmt.Errorf("install: %w", err))
 	}
 	li, err := m.loadLaunch(srv.ID)
 	if err != nil {
-		return fmt.Errorf("load launch info: %w", err)
+		return failStart(fmt.Errorf("load launch info: %w", err))
 	}
 
 	javaBin, jvmArgs, err := m.java.BindForServer(srv)
 	if err != nil {
-		r.setState(model.StateError)
-		return fmt.Errorf("java bind: %w", err)
+		return failStart(fmt.Errorf("java bind: %w", err))
 	}
 
 	args, err := buildLaunchArgs(jvmArgs, li)
 	if err != nil {
-		return err
+		return failStart(err)
 	}
 
 	dataDir := m.store.Paths.ServerData(srv.ID)
@@ -170,8 +178,7 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 
 	m.logf("server: starting %q (%s, java=%s)", srv.Name, srv.Software, javaBin)
 	if err := m.sup.Start(srv.ID); err != nil {
-		r.setState(model.StateError)
-		return err
+		return failStart(err)
 	}
 	return nil
 }
@@ -307,7 +314,7 @@ func (m *Manager) onExit(id string, code int, err error) {
 	if requested {
 		r.setState(model.StateStopped)
 	} else {
-		// Crash: supervisor may restart; reflect that as starting, else error.
 		r.setState(model.StateError)
+		m.onConsoleLine(id, fmt.Sprintf("[MCOS HATA] Sunucu süreci beklenmeyen bir şekilde durdu (Çıkış kodu: %d, Hata: %v)", code, err))
 	}
 }

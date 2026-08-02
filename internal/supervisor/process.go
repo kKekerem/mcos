@@ -155,7 +155,6 @@ func (p *Process) Start() error {
 
 func (p *Process) wait(lw *lineWriter) {
 	err := p.cmd.Wait()
-	lw.Flush()
 
 	p.mu.Lock()
 	code := 0
@@ -166,9 +165,16 @@ func (p *Process) wait(lw *lineWriter) {
 	p.exitErr = err
 	p.state = StateExited
 	p.pid = 0
+	requested := p.requested
 	onExit := p.spec.OnExit
 	done := p.done
 	p.mu.Unlock()
+
+	if (err != nil || code != 0) && !requested {
+		errMsg := fmt.Sprintf("[MCOS HATA] Süreç beklenmeyen bir şekilde sonlandı (Çıkış kodu: %d, Hata: %v)", code, err)
+		lw.Write([]byte(errMsg + "\n"))
+	}
+	lw.Flush()
 
 	if onExit != nil {
 		onExit(code, err)
