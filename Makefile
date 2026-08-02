@@ -45,7 +45,7 @@ lite:
 	else echo "lite-panel not present yet (M5)"; fi
 
 test:
-	"$(GO)" test ./...
+	"$(GO)" test ./cmd/... ./internal/... ./panel/...
 
 vet:
 	"$(GO)" vet ./...
@@ -131,9 +131,11 @@ iso: os
 	rm -rf "$$D" dist/mcos-x86_64.iso; \
 	mkdir -p "$$D/boot/grub" "$$D/EFI/BOOT"; \
 	cp "$(BR_OUTPUT)/images/bzImage"        "$$D/boot/bzImage"; \
-	cp "$(BR_OUTPUT)/images/bzImage"        "$$D/EFI/BOOT/BOOTX64.EFI"; \
+	cp "$(BR_OUTPUT)/images/bzImage"        "$$D/bzImage"; \
 	cp "$(BR_OUTPUT)/images/rootfs.cpio.gz" "$$D/boot/initrd.img"; \
-	printf '%s\r\n' 'fs0:' '\EFI\BOOT\BOOTX64.EFI root=LABEL=MCOS-ROOT rw rootwait rootdelay=10 console=tty0 consoleblank=0 fbcon=nodefer vt.global_cursor_default=0' > "$$D/startup.nsh"; \
+	cp "$(BR_OUTPUT)/images/rootfs.cpio.gz" "$$D/initrd.img"; \
+	cp "$(BR_OUTPUT)/images/rootfs.cpio.gz" "$$D/EFI/BOOT/initrd.img"; \
+	printf '%s\r\n' 'fs0:' '\EFI\BOOT\BOOTX64.EFI console=tty0 consoleblank=0 fbcon=nodefer vt.global_cursor_default=0' > "$$D/startup.nsh"; \
 	printf '%s\n' \
 		'set timeout=3' \
 		'set default=0' \
@@ -144,22 +146,31 @@ iso: os
 		'insmod part_msdos' \
 		'insmod part_gpt' \
 		'insmod fat' \
+		'insmod ext2' \
 		'insmod iso9660' \
-		'set gfxmode=auto' \
+		'insmod search' \
+		'insmod search_fs_file' \
+		'insmod search_label' \
+		'set gfxmode=1024x768,800x600,auto' \
 		'terminal_input console' \
 		'terminal_output console gfxterm' \
 		'menuentry "MCOS Live Installer" {' \
 		'  set gfxpayload=keep' \
+		'  search --no-floppy --set=root --file /boot/bzImage' \
 		'  linux /boot/bzImage console=tty0 consoleblank=0 loglevel=3 fbcon=nodefer vt.global_cursor_default=0' \
 		'  initrd /boot/initrd.img' \
 		'}' \
-		'menuentry "MCOS Live Installer (safe / text mode)" {' \
+		'menuentry "MCOS Live Installer (Safe / VGA Text Mode)" {' \
 		'  set gfxpayload=text' \
-		'  linux /boot/bzImage console=tty0 consoleblank=0 nomodeset loglevel=3 vt.global_cursor_default=0' \
+		'  search --no-floppy --set=root --file /boot/bzImage' \
+		'  linux /boot/bzImage console=tty0 consoleblank=0 nomodeset vga=normal loglevel=3 vt.global_cursor_default=0' \
 		'  initrd /boot/initrd.img' \
 		'}' \
 		> "$$D/boot/grub/grub.cfg"; \
-	grub-mkrescue -o dist/mcos-x86_64.iso "$$D" -- -volid MCOS && \
+	GRUB_MODS=""; \
+	[ -d /usr/lib/grub/i386-pc ] && GRUB_MODS="$$GRUB_MODS /usr/lib/grub/i386-pc"; \
+	[ -d /usr/lib/grub/x86_64-efi ] && GRUB_MODS="$$GRUB_MODS /usr/lib/grub/x86_64-efi"; \
+	grub-mkrescue -o dist/mcos-x86_64.iso "$$D" $$GRUB_MODS -- -volid MCOS && \
 	echo ">> ISO ready: dist/mcos-x86_64.iso ($$(du -h dist/mcos-x86_64.iso | cut -f1))"
 
 ## qemu: boot the ISO in QEMU, BIOS mode, graphical window
