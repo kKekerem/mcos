@@ -187,6 +187,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 
+	case usbScanMsg:
+		if a.detail != nil {
+			a.detail.handleUSBScan(m)
+		}
+		return a, nil
+
 	case versionsMsg:
 		if a.wizard != nil && m.err == nil {
 			a.wizard.setVersions(m.versions)
@@ -663,7 +669,7 @@ func (a *App) pane(content string, outerW, outerH int, focused bool) string {
 		frameH = 1
 	}
 	return lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
+		Border(lipgloss.RoundedBorder()).
 		BorderForeground(bc).BorderBackground(th.P.Bg).
 		Background(th.P.Bg).Foreground(th.P.Text).
 		Width(frameW).Height(frameH).Padding(0, 1).

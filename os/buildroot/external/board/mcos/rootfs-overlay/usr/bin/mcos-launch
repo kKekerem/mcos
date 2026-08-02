@@ -11,7 +11,7 @@ SOCK_PATH="/run/mcos/mcosd.sock"
 LOG="/run/mcos/mcosd.log"
 PANEL_VT="2"
 PANEL_DEVICE="/dev/tty${PANEL_VT}"
-MCOS_FONT_NAMES="DejaVu Sans Mono,Liberation Mono,mono"
+MCOS_FONT_NAMES="Noto Color Emoji,Noto Emoji,FontAwesome,DejaVu Sans Mono,Liberation Mono,mono"
 
 mkdir -p /run/mcos /data /var/log /root /root/.cache/fontconfig /var/cache/fontconfig
 

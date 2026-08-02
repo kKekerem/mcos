@@ -228,7 +228,7 @@ fn draw_servers(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn marker(active: bool) -> &'static str {
     if active {
-        ">"
+        "➜"
     } else {
         " "
     }

@@ -83,9 +83,11 @@ cat > "${TARGET_DIR}/etc/fonts/local.conf" << 'EOF'
   <alias>
     <family>monospace</family>
     <prefer>
+      <family>Noto Color Emoji</family>
+      <family>Noto Emoji</family>
+      <family>FontAwesome</family>
       <family>DejaVu Sans Mono</family>
       <family>Liberation Mono</family>
-      <family>FontAwesome</family>
     </prefer>
   </alias>
   <match target="font">
@@ -100,7 +102,7 @@ EOF
 
 # Generate fbterm configuration (.fbtermrc) with font fallback and correct color palette
 cat > "${TARGET_DIR}/root/.fbtermrc" << 'EOF'
-font-names=DejaVu Sans Mono,Liberation Mono,FontAwesome,mono
+font-names=Noto Color Emoji,Noto Emoji,FontAwesome,DejaVu Sans Mono,Liberation Mono,mono
 font-size=14
 font-height=0
 font-width=0

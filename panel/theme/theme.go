@@ -145,15 +145,15 @@ func New(name string) *Theme {
 	t := &Theme{P: p}
 	t.App = lipgloss.NewStyle().Background(p.Bg).Foreground(p.Text)
 	t.Sidebar = lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).
-		Padding(1, 2).Border(lipgloss.NormalBorder(), false, true, false, false).
+		Padding(1, 2).Border(lipgloss.RoundedBorder(), false, true, false, false).
 		BorderForeground(p.Border).BorderBackground(p.Bg)
 	t.MenuItem = lipgloss.NewStyle().Foreground(p.Text).Padding(0, 1)
 	t.MenuActive = lipgloss.NewStyle().Foreground(p.Accent).Bold(true).Padding(0, 1)
 	t.Title = lipgloss.NewStyle().Foreground(p.Accent).Bold(true)
 
-	// Clean rectangular borders — connects 100% seamlessly on all framebuffers
+	// Clean rounded borders — connects 100% seamlessly on all framebuffers
 	t.Card = lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).
-		Border(lipgloss.NormalBorder()).BorderForeground(p.Border).
+		Border(lipgloss.RoundedBorder()).BorderForeground(p.Border).
 		BorderBackground(p.Bg).Padding(0, 1)
 	t.CardTitle = lipgloss.NewStyle().Foreground(p.Accent).Bold(true)
 	t.Key = lipgloss.NewStyle().Foreground(p.Muted)
