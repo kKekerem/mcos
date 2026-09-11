@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -44,7 +45,16 @@ func main() {
 		*cfgPath = defaultConfigPath(*dataRoot)
 	}
 
-	lg := mlog.New(os.Stderr, parseLevel(*logLevel), 1024)
+	logDir := filepath.Join(*dataRoot, "log")
+	_ = os.MkdirAll(logDir, 0o755)
+	logFile, errFile := os.OpenFile(filepath.Join(logDir, "mcosd.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	var outWriter io.Writer = os.Stderr
+	if errFile == nil {
+		outWriter = io.MultiWriter(os.Stderr, logFile)
+		defer logFile.Close()
+	}
+
+	lg := mlog.New(outWriter, parseLevel(*logLevel), 2048)
 	lg.Infof("mcosd %s starting (data-root=%s config=%s listen=%s)", daemon.Version, *dataRoot, *cfgPath, *listen)
 
 	d, err := daemon.New(*cfgPath, *dataRoot, lg)

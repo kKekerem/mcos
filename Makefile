@@ -15,7 +15,7 @@ VERSION       := $(shell cat VERSION 2>/dev/null || echo 0.1.0)
 # Host binaries (for dev/test on the current OS).
 GO_CMDS := mcosd mcosctl mcos-detect mcos-panel
 
-.PHONY: all app build test vet fmt run clean os iso qemu qemu-uefi lite help preflight
+.PHONY: all app build test test-boot check-ui check-fonts preview-ui vet fmt run clean os iso qemu qemu-uefi lite help preflight uefi bios usb verify-usb boottest linux
 
 all: app
 
@@ -44,14 +44,45 @@ lite:
 		cd lite-panel && "$(CARGO)" build --release; \
 	else echo "lite-panel not present yet (M5)"; fi
 
+# Go paket kapsamı. "./..." KULLANILMAZ: ISO bir kez derlendikten sonra
+# os/buildroot/output/build/*/gcc/testsuite altında binlerce geçersiz .go
+# dosyası oluşur (ör. bug257.go 20 000 satır, "relative import paths are not
+# supported in module mode"). Go araçları .gitignore'a bakmadığı için "./..."
+# bunları da tarar ve build/vet baştan kırılır.
+GO_PKGS := ./cmd/... ./internal/... ./panel/...
+
 test:
-	"$(GO)" test ./cmd/... ./internal/... ./panel/...
+	"$(GO)" test $(GO_PKGS)
+
+## test-boot: kurulum/önyükleme mantığını doğrular (diske dokunmaz)
+test-boot:
+	@sh scripts/test-disksig.sh
+	@sh scripts/test-install-logic.sh
+	@sh scripts/test-bootloader-embed.sh
+	@sh scripts/test-boot-logic.sh
+	@sh scripts/test-display-logic.sh
+
+## probe-boot: HEDEF rootfs'te hangi önyükleyici araçlarının olduğunu gösterir
+probe-boot:
+	@sh scripts/probe-target-boot.sh $(BR_OUTPUT)/target
+
+## check-ui: TUI'de çift genişlikli glif (emoji) kalmadığını doğrular
+check-ui:
+	@python3 scripts/check-tui-glyphs.py
+
+## check-fonts: hedef rootfs'teki fbterm font yığınını denetler
+check-fonts:
+	@sh scripts/check-fonts.sh
+
+## preview-ui: paneli headless çalıştırıp bir kare basar (SECTION=0 W=96 H=30)
+preview-ui:
+	@sh scripts/preview-ui.sh $(or $(SECTION),0) $(or $(W),96) $(or $(H),30)
 
 vet:
-	"$(GO)" vet ./...
+	"$(GO)" vet $(GO_PKGS)
 
 fmt:
-	"$(GO)" fmt ./...
+	"$(GO)" fmt $(GO_PKGS)
 
 ## run: start the daemon against a local dev data root over TCP loopback
 run: build
@@ -127,15 +158,12 @@ iso: os
 	fi; \
 	command -v grub-mkrescue >/dev/null 2>&1 || { echo "iso: need grub-common + grub-pc-bin + grub-efi-amd64-bin + mtools"; exit 1; }; \
 	command -v xorriso >/dev/null 2>&1 || { echo "iso: need xorriso"; exit 1; }; \
+	. scripts/lib/display.sh; \
 	D=dist/iso; \
 	rm -rf "$$D" dist/mcos-x86_64.iso; \
 	mkdir -p "$$D/boot/grub" "$$D/EFI/BOOT"; \
 	cp "$(BR_OUTPUT)/images/bzImage"        "$$D/boot/bzImage"; \
-	cp "$(BR_OUTPUT)/images/bzImage"        "$$D/bzImage"; \
 	cp "$(BR_OUTPUT)/images/rootfs.cpio.gz" "$$D/boot/initrd.img"; \
-	cp "$(BR_OUTPUT)/images/rootfs.cpio.gz" "$$D/initrd.img"; \
-	cp "$(BR_OUTPUT)/images/rootfs.cpio.gz" "$$D/EFI/BOOT/initrd.img"; \
-	printf '%s\r\n' 'fs0:' '\EFI\BOOT\BOOTX64.EFI console=tty0 consoleblank=0 fbcon=nodefer vt.global_cursor_default=0' > "$$D/startup.nsh"; \
 	printf '%s\n' \
 		'set timeout=3' \
 		'set default=0' \
@@ -151,19 +179,20 @@ iso: os
 		'insmod search' \
 		'insmod search_fs_file' \
 		'insmod search_label' \
-		'set gfxmode=1024x768,800x600,auto' \
+		"set gfxmode=$$MCOS_GFXMODE" \
+		'set gfxpayload=keep' \
 		'terminal_input console' \
 		'terminal_output console gfxterm' \
 		'menuentry "MCOS Live Installer" {' \
 		'  set gfxpayload=keep' \
 		'  search --no-floppy --set=root --file /boot/bzImage' \
-		'  linux /boot/bzImage console=tty0 consoleblank=0 loglevel=3 fbcon=nodefer vt.global_cursor_default=0' \
+		"  linux /boot/bzImage $$MCOS_CMDLINE_BASE" \
 		'  initrd /boot/initrd.img' \
 		'}' \
 		'menuentry "MCOS Live Installer (Safe / VGA Text Mode)" {' \
 		'  set gfxpayload=text' \
 		'  search --no-floppy --set=root --file /boot/bzImage' \
-		'  linux /boot/bzImage console=tty0 consoleblank=0 nomodeset vga=normal loglevel=3 vt.global_cursor_default=0' \
+		"  linux /boot/bzImage $$MCOS_CMDLINE_RECOVERY" \
 		'  initrd /boot/initrd.img' \
 		'}' \
 		> "$$D/boot/grub/grub.cfg"; \
@@ -189,6 +218,60 @@ qemu-uefi: iso
 	[ -n "$$OVMF" ] || { echo "qemu-uefi: OVMF firmware not found — install 'ovmf'"; exit 1; }; \
 	KVM=""; if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then KVM="-enable-kvm"; else echo ">> /dev/kvm not accessible -> using TCG software emulation (slower, no KVM needed)"; fi; \
 	qemu-system-x86_64 -m 2048 -bios "$$OVMF" -cdrom dist/mcos-x86_64.iso -vga std -boot d $$KVM
+
+
+# ── Kalici USB disk imajlari ────────────────────────────────────────────────
+#
+# NEDEN ISO YETERLI DEGIL:
+#   ISO salt-okunur bir CD dosya sistemidir. USB'ye yazildiginda (a) kalici
+#   veri alani yoktur, (b) hibrit MBR olmadan bircok BIOS/UEFI firmware'i onu
+#   boot edilebilir GORMEZ — kullanicinin "USB'ye kurunca PC gormuyor"
+#   sikayetinin sebebi tam olarak bu. Asagidaki hedefler GERCEK bolum tablolu
+#   disk imajlari uretir ve ikisi de QEMU'da USB aygiti olarak boot ederek
+#   dogrulandi (scripts/boottest.sh).
+#
+# KALICILIK NASIL CALISIYOR:
+#   2. bolum "MCOS-DATA" etiketiyle ext4'tur. Acilista S99mcos onu
+#   mcos-findfs ile bulup /data'ya baglar. Java kurulumlari ve olusturulan
+#   sunucular /data altinda yasadigi icin reboot'ta KORUNUR.
+#
+# ROOT GEREKMEZ: FAT bolumu mtools, ext4 bolumu "mke2fs -d" ile dogrudan
+# dosya uzerinde uretilir; mount/losetup yoktur.
+
+# USB imaj toplam boyutu. Yazilacak USB bellekten kucuk veya esit olmali.
+USB_SIZE    ?= 4G
+# Boot bolumu boyutu (cekirdek ~10M + initramfs ~122M + pay).
+USB_BOOT_MB ?= 768
+
+## uefi: kalici UEFI USB disk imaji -> dist/mcos-uefi.img
+uefi: os
+	@bash scripts/mkusb.sh --mode uefi --out dist/mcos-uefi.img \
+		--size $(USB_SIZE) --boot-mb $(USB_BOOT_MB)
+	@bash scripts/verify-usb.sh dist/mcos-uefi.img
+
+## bios: kalici BIOS (Legacy) USB disk imaji -> dist/mcos-bios.img
+bios: os
+	@bash scripts/mkusb.sh --mode bios --out dist/mcos-bios.img \
+		--size $(USB_SIZE) --boot-mb $(USB_BOOT_MB)
+	@bash scripts/verify-usb.sh dist/mcos-bios.img
+
+## usb: hem UEFI hem BIOS kalici imajlarini uret
+usb: uefi bios
+
+## verify-usb: uretilmis imajlari BOOT ETMEDEN denetle (bolum tablosu, onyukleyici, etiket)
+verify-usb:
+	@for f in dist/mcos-uefi.img dist/mcos-bios.img; do \
+		if [ -f "$$f" ]; then bash scripts/verify-usb.sh "$$f"; fi; \
+	done
+
+## boottest: imajlari QEMU'da GERCEKTEN boot edip hangi asamaya geldigini raporla
+boottest:
+	@bash scripts/mkusb.sh --mode bios --out dist/boottest-bios.img \
+		--size 1G --cmdline "console=ttyS0,115200" >/dev/null
+	@bash scripts/boottest.sh --img dist/boottest-bios.img --mode bios --seconds 45
+	@bash scripts/mkusb.sh --mode uefi --out dist/boottest-uefi.img \
+		--size 1G --cmdline "console=ttyS0,115200" >/dev/null
+	@bash scripts/boottest.sh --img dist/boottest-uefi.img --mode uefi --seconds 60
 
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //'

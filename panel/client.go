@@ -127,6 +127,19 @@ func (cl *Client) CatalogInstall(serverID, slug string) (string, error) {
 	return res.Message, err
 }
 
+func (cl *Client) ScanUSBMods() ([]model.USBJar, error) {
+	var res ipc.USBScanResult
+	err := cl.c.Call(ipc.MethodServerScanUSBMods, nil, &res)
+	return res.Items, err
+}
+
+func (cl *Client) InstallUSBMods(serverID string, items []model.USBJar) (string, error) {
+	var res ipc.OKResult
+	err := cl.c.Call(ipc.MethodServerInstallUSBMods,
+		ipc.USBInstallParams{ServerID: serverID, Items: items}, &res)
+	return res.Message, err
+}
+
 func (cl *Client) Console(id string, cursor int64) (ipc.ConsoleResult, error) {
 	var res ipc.ConsoleResult
 	err := cl.c.Call(ipc.MethodServerConsole, ipc.ConsoleParams{ID: id, Cursor: cursor}, &res)

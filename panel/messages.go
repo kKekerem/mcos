@@ -181,7 +181,7 @@ func doInstallOS(cl *Client, device string, dlJava, dlPlugins bool) tea.Cmd {
 			_, _ = cl.JavaInstall(17)
 			_, _ = cl.JavaInstall(21)
 		}
-		
+
 		// Note: dlPlugins logic can be added here or in mcos-install script.
 		// For now, we prioritize Java as it's the largest/most critical part.
 
@@ -386,6 +386,28 @@ func doCatalogInstall(cl *Client, id, slug string) tea.Cmd {
 			return actionMsg{err: err}
 		}
 		return actionMsg{msg: "kuruldu: " + name}
+	}
+}
+
+type usbScanMsg struct {
+	items []model.USBJar
+	err   error
+}
+
+func doUSBScan(cl *Client) tea.Cmd {
+	return func() tea.Msg {
+		items, err := cl.ScanUSBMods()
+		return usbScanMsg{items: items, err: err}
+	}
+}
+
+func doUSBInstall(cl *Client, id string, items []model.USBJar) tea.Cmd {
+	return func() tea.Msg {
+		msg, err := cl.InstallUSBMods(id, items)
+		if err != nil {
+			return actionMsg{err: err}
+		}
+		return actionMsg{msg: msg}
 	}
 }
 

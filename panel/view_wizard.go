@@ -616,14 +616,14 @@ func (w *wizardModel) view(termW, termH int) string {
 	cardBody := lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
 	if w.errMsg != "" {
 		cardBody = lipgloss.JoinVertical(lipgloss.Left, cardBody, "",
-			lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠️  "+w.errMsg))
+			lipgloss.NewStyle().Foreground(th.P.Red).Render(theme.IconWarn+"  "+w.errMsg))
 	}
 
 	boxW := 72
 	if boxW > termW-4 {
 		boxW = termW - 4
 	}
-	box := RenderCard(th, "🎮 YENİ MINECRAFT SUNUCUSU", cardBody, boxW, true)
+	box := RenderCard(th, theme.IconServer+" YENİ MINECRAFT SUNUCUSU", cardBody, boxW, true)
 	return lipgloss.Place(termW, termH, lipgloss.Center, lipgloss.Center, box,
 		lipgloss.WithWhitespaceChars(" "))
 }
@@ -634,7 +634,7 @@ func (w *wizardModel) row(label, value string, active bool) string {
 	lbl := th.Key.Render(fmt.Sprintf("%-22s", label))
 	val := th.Val.Render(value)
 	if active {
-		marker = th.Accent.Render(" ➜ ")
+		marker = th.Accent.Render(" " + theme.IconCursor + " ")
 		lbl = th.Accent.Bold(true).Render(fmt.Sprintf("%-22s", label))
 		val = th.Val.Bold(true).Render(value)
 	}

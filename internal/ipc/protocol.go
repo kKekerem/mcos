@@ -80,6 +80,9 @@ const (
 	MethodCatalogSearch  = "catalog.search"  // Modrinth mod/plugin search
 	MethodCatalogInstall = "catalog.install" // one-click install into plugins/mods
 
+	MethodServerScanUSBMods    = "server.scanUSBMods"    // scan USB drives for .jar files
+	MethodServerInstallUSBMods = "server.installUSBMods" // copy selected USB .jar files to mods/plugins
+
 	MethodJavaList     = "java.list"
 	MethodJavaInstall  = "java.install"
 	MethodJavaResolve  = "java.resolve" // mcVersion -> required major

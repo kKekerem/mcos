@@ -5,188 +5,222 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
 	"mcos/internal/model"
 	"mcos/panel/theme"
 )
 
-// UI Component Library for MCOS TUI
-// The panel runs under fbterm which renders TrueType fonts on the framebuffer.
-// All Unicode characters (rounded borders, emojis, box-drawing) display perfectly.
+// MCOS BİLEŞEN KÜTÜPHANESİ
+//
+// Kurallar:
+//
+//  1. Hiçbir ölçü burada ham sayı olarak yazılmaz — hepsi panel/theme/tokens.go
+//     içindeki token'lardan gelir (theme.LabelWidth, theme.BarWidth …).
+//  2. Hiçbir renk burada seçilmez — hepsi hazır tema stillerinden gelir
+//     (th.Body, th.Muted, th.Selected …).
+//  3. Hiçbir glif burada ham yazılmaz — theme.Icon* sabitleri kullanılır.
+//
+// Böylece "bir yerde 18, başka yerde 14 kolon" tutarsızlığı yapısal olarak
+// imkânsız hale gelir.
 
-// RenderCard wraps content inside a sleek container with rounded borders.
-func RenderCard(th *theme.Theme, title string, body string, width int, focused bool) string {
-	if width < 30 {
-		width = 30
-	}
-	frameW := width - 2 // Border is outside the style width; padding is inside.
-	if frameW < 28 {
-		frameW = 28
-	}
+// ── Metin yardımcıları ──────────────────────────────────────────────────────
 
-	borderColor := th.P.Border
+// Truncate shortens s to at most n display cells, appending an ellipsis.
+// Rune tabanlı çalışır: Türkçe karakterler yarıdan kesilmez.
+func Truncate(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	if n == 1 {
+		return theme.Ellipsis
+	}
+	return string(r[:n-1]) + theme.Ellipsis
+}
+
+// pad right-pads s to exactly w display cells (truncating if longer).
+// lipgloss.Width kullanır, böylece renk kaçış dizileri sayılmaz.
+func pad(s string, w int) string {
+	cur := lipgloss.Width(s)
+	if cur > w {
+		return Truncate(s, w)
+	}
+	return s + strings.Repeat(" ", w-cur)
+}
+
+// ── Kart ────────────────────────────────────────────────────────────────────
+
+// Card renders content inside a rounded box of exactly `width` total columns.
+//
+// Genişlik hesabı TEK yerde: theme.InnerWidth(). Eskiden her çağıran kendi
+// "width-2" aritmetiğini yapıyordu ve kenarlık/dolgu payları tutmuyordu.
+func Card(th *theme.Theme, title, body string, width int, focused bool) string {
+	inner := theme.InnerWidth(width)
+	style := th.Card
 	if focused {
-		borderColor = th.P.Accent
+		style = th.CardFocused
 	}
-
-	boxStyle := lipgloss.NewStyle().
-		Background(th.P.Bg).
-		Foreground(th.P.Text).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(borderColor).
-		BorderBackground(th.P.Bg).
-		Padding(1, 2).
-		Width(frameW)
-
-	header := th.Title.Bold(true).Render(title)
-	cardContent := header + "\n\n" + body
-	return boxStyle.Render(cardContent)
+	content := body
+	if title != "" {
+		content = th.Heading.Render(Truncate(title, inner)) + "\n\n" + body
+	}
+	return style.Width(inner).Render(content)
 }
 
-// RenderHeader renders the top step bar for OOBE and setup wizards.
-func RenderHeader(th *theme.Theme, currentStep int, totalSteps int, title string) string {
-	pct := (currentStep * 100) / totalSteps
-	if pct > 100 {
-		pct = 100
-	}
-
-	barWidth := 25
-	filled := (pct * barWidth) / 100
-	if filled < 0 {
-		filled = 0
-	}
-	if filled > barWidth {
-		filled = barWidth
-	}
-	barStr := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
-
-	stepBadge := th.Badge(fmt.Sprintf(" Adım %d / %d ", currentStep, totalSteps), th.P.Accent)
-	titleStr := th.Title.Bold(true).Render(title)
-	progressStr := th.Muted.Render(fmt.Sprintf("[%s] %d%%", barStr, pct))
-
-	return lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.JoinHorizontal(lipgloss.Center, stepBadge, "  ", titleStr),
-		progressStr,
-	)
+// RenderCard is the previous name for Card, kept for the existing views.
+func RenderCard(th *theme.Theme, title string, body string, width int, focused bool) string {
+	return Card(th, title, body, width, focused)
 }
 
-// RenderButton renders a keyboard action with a clear focus marker.
-func RenderButton(th *theme.Theme, label string, shortcut string, focused bool) string {
-	color := th.P.Text
+// card is the compact internal helper used by dashboard-style views.
+func card(t *theme.Theme, title, body string, w int) string {
+	return Card(t, title, body, w, false)
+}
+
+// ── Butonlar ────────────────────────────────────────────────────────────────
+
+// Button renders a REAL bordered button with an optional key hint.
+//
+// Eskiden butonlar yalnızca renkli metindi: renderPill() aldığı arka plan
+// rengini hiç kullanmıyor, sadece Foreground + Bold uyguluyordu. Bu yüzden
+// "buton" ile normal metin görsel olarak ayırt edilemiyordu. Artık gerçek
+// yuvarlak çerçeve var ve odaklı buton çerçevesi vurgu rengine döner.
+//
+// Etiket alanı theme.ButtonMinWidth'e doldurulur, böylece yan yana dizilen
+// butonlar eşit genişlikte görünür.
+func Button(th *theme.Theme, label, key string, focused bool) string {
+	// Odak, renkten BAĞIMSIZ olarak da anlaşılmalı (renk körlüğü, düşük
+	// kontrastlı ekran): odaklı butona bir işaretçi eklenir. İşaretçi ve
+	// boşluğu, etiketin yerini YEMEZ — buton büyür.
 	prefix := "  "
 	if focused {
-		color = th.P.Accent
-		prefix = "➜ "
-	}
-	btnText := fmt.Sprintf("%s%s  %s", prefix, label, shortcut)
-	return lipgloss.NewStyle().Foreground(color).Bold(focused).Render(btnText)
-}
-
-// RenderOptionRow renders an interactive option selection item.
-func RenderOptionRow(th *theme.Theme, label string, note string, selected bool) string {
-	if selected {
-		row := renderPill(th.P.Accent, th.P.Bg, "➜ "+label, true)
-		if note != "" {
-			row += "  " + th.Muted.Render(note)
-		}
-		return row
-	}
-	rowText := th.MenuItem.Render("  ◯  " + label)
-	if note != "" {
-		rowText += "  " + th.Muted.Render(note)
-	}
-	return rowText
-}
-
-// RenderNavItem is the sidebar counterpart of RenderOptionRow. The active
-// entry is a complete rounded pill, so focus never depends on color alone.
-func RenderNavItem(th *theme.Theme, icon string, label string, selected bool, focused bool, disabled bool) string {
-	text := icon + " " + label
-	if disabled {
-		return th.MenuItem.Faint(true).Render("  "+text) + th.Muted.Render("  pasif")
-	}
-	if selected {
-		if focused {
-			return renderPill(th.P.Accent, th.P.Bg, "➜ "+text, true)
-		}
-		return th.Accent.Bold(true).Render("  ➜ " + text)
-	}
-	return th.MenuItem.Render("    " + text)
-}
-
-// RenderInputField renders a form input row with focused status.
-func RenderInputField(th *theme.Theme, label string, inputView string, help string, focused bool) string {
-	lblStyle := th.Key
-	if focused {
-		lblStyle = th.Accent.Bold(true)
+		prefix = theme.IconCursor + " "
 	}
 
-	lbl := lblStyle.Render(fmt.Sprintf("%-18s", label))
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(th.P.Border).
-		Padding(0, 1).
-		Render(inputView)
+	text := prefix + label
+	if key != "" {
+		text += "  " + key
+	}
+
+	// Buton etikete göre BÜYÜR; asla kesmez. Eski sürüm metni
+	// theme.ButtonMinWidth'e pad() ile zorluyordu ve pad() uzun metni
+	// kısaltıyordu, bu yüzden "Taramayı Başlat" → "Taramayı Başl…" oluyordu:
+	// butonun ne yaptığı okunamaz hale geliyordu.
+	if w := lipgloss.Width(text); w < theme.ButtonMinWidth {
+		text += strings.Repeat(" ", theme.ButtonMinWidth-w)
+	}
 
 	if focused {
-		box = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(th.P.Accent).
-			Padding(0, 1).
-			Render(inputView)
+		return th.ButtonFocused.Render(text)
 	}
-
-	res := fmt.Sprintf("%s : %s", lbl, box)
-	if help != "" && focused {
-		res += "\n" + th.Muted.Render("                     "+help)
-	}
-	return res
+	return th.Button.Render(text)
 }
 
-// RenderProgressBar renders a visual progress bar with sleek block characters.
-func RenderProgressBar(th *theme.Theme, pct int, width int) string {
-	if width < 10 {
-		width = 20
-	}
-	if pct < 0 {
-		pct = 0
-	}
-	if pct > 100 {
-		pct = 100
-	}
-	filled := (pct * width) / 100
-	empty := width - filled
-
-	fillStr := strings.Repeat("█", filled)
-	emptyStr := strings.Repeat("─", empty)
-
-	return fmt.Sprintf("▐%s%s▌ %3d%%", th.Accent.Bold(true).Render(fillStr), th.Muted.Render(emptyStr), pct)
+// RenderButton is the previous name for Button.
+func RenderButton(th *theme.Theme, label string, shortcut string, focused bool) string {
+	return Button(th, label, shortcut, focused)
 }
 
-// KeyCap renders a single keyboard key as a compact visual affordance.
+// Chip renders a SINGLE-LINE selectable label, for tab bars and inline
+// affordances.
+//
+// Button() çerçeveli olduğu için ÜÇ satır yükseklik kaplar. Sekme çubuğu gibi
+// tek satırlık bir şeride konulduğunda satır sayıları uyuşmaz ve düzen bozulur
+// (renderTabBar bunu yapıyordu: çerçeveli butonu düz metinlerle strings.Join
+// ile aynı satıra koyuyordu). Tek satır gereken her yerde Chip kullanılmalı.
+func Chip(th *theme.Theme, label string, active bool) string {
+	if active {
+		return th.Selected.Render(theme.IconCursor + label)
+	}
+	return th.Muted.Render(" " + label)
+}
+
+// ChipBar joins chips on one line with a thin vertical separator.
+func ChipBar(th *theme.Theme, chips []string) string {
+	sep := th.Divider.Render(" " + theme.SepVert + " ")
+	return strings.Join(chips, sep)
+}
+
+// ButtonRow lays buttons out horizontally with one grid unit between them.
+func ButtonRow(buttons ...string) string {
+	if len(buttons) == 0 {
+		return ""
+	}
+	gap := strings.Repeat(" ", theme.GridUnit)
+	parts := make([]string, 0, len(buttons)*2-1)
+	for i, b := range buttons {
+		if i > 0 {
+			parts = append(parts, gap)
+		}
+		parts = append(parts, b)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+// Action describes one entry in an action bar.
+type Action struct {
+	Label   string // ne yaptığı ("İleri", "Geri", "İptal")
+	Key     string // hangi tuş ("Enter", "Shift+Tab", "Esc")
+	Primary bool   // birincil eylem: çerçevesi vurgu renginde ve işaretçili
+}
+
+// ActionBar renders the screen's available actions as REAL buttons.
+//
+// Neden: kullanıcı "arayüzde yazı ile buton anlaşılmıyor" dedi. Eskiden her
+// ekranın altında yalnızca tek satırlık bir tuş ipucu şeridi vardı
+// ("Enter ilerle · Esc vazgeç") — düz metin, eylem olduğu belli değil.
+// Burada her eylem yuvarlak çerçeveli bir butondur ve birincil eylem
+// (genelde "İleri") vurgu rengiyle + işaretçiyle öne çıkar.
+//
+// Ekran daralırsa butonlar sığmaz; o durumda tek satırlık ipucu şeridine
+// düşer, böylece düzen asla taşmaz.
+func ActionBar(th *theme.Theme, maxWidth int, actions ...Action) string {
+	if len(actions) == 0 {
+		return ""
+	}
+	btns := make([]string, 0, len(actions))
+	hints := make([]KeyHint, 0, len(actions))
+	for _, a := range actions {
+		btns = append(btns, Button(th, a.Label, a.Key, a.Primary))
+		hints = append(hints, KeyHint{Key: a.Key, Label: a.Label})
+	}
+	row := ButtonRow(btns...)
+	if maxWidth > 0 && lipgloss.Width(row) > maxWidth {
+		return RenderKeyHints(th, hints, maxWidth)
+	}
+	return row
+}
+
+// ── Tuş kapağı ve ipuçları ──────────────────────────────────────────────────
+
+// KeyCap renders one keyboard key as a bordered cap so it reads as a key.
 func KeyCap(th *theme.Theme, key string) string {
-	return renderPill(th.P.Accent, th.P.Bg, key, true)
+	return th.KeyCap.Render(key)
 }
 
-// KeyHint pairs a key with a short action label for the bottom help bar.
+// KeyHint pairs a key with a short action label for the footer bar.
 type KeyHint struct {
 	Key   string
 	Label string
 }
 
-// RenderKeyHints renders keyboard-only controls in a way that looks actionable
-// without implying mouse support.
+// RenderKeyHints renders the footer hint bar on ONE line.
+//
+// Tuş kapakları çerçeveli olduğu için 3 satır yükseklik kaplar; alt şerit tek
+// satır olmalı (theme.FooterHeight). Bu yüzden burada kapak KULLANILMAZ:
+// tuş vurgu renginde, eylem ikincil renkte yazılır.
 func RenderKeyHints(th *theme.Theme, hints []KeyHint, maxWidth int) string {
+	sep := th.Muted.Render("  " + theme.SepDot + "  ")
 	parts := make([]string, 0, len(hints))
-	sep := th.Muted.Render("  ")
 	for _, h := range hints {
 		if h.Key == "" || h.Label == "" {
 			continue
 		}
-		part := KeyCap(th, h.Key) + " " + th.Help.Render(h.Label)
-		candidate := part
-		if len(parts) > 0 {
-			candidate = strings.Join(append(append([]string{}, parts...), part), sep)
-		}
+		part := th.Selected.Render(h.Key) + th.Muted.Render(" "+h.Label)
+		candidate := strings.Join(append(append([]string{}, parts...), part), sep)
 		if maxWidth > 0 && lipgloss.Width(candidate) > maxWidth {
 			break
 		}
@@ -195,20 +229,185 @@ func RenderKeyHints(th *theme.Theme, hints []KeyHint, maxWidth int) string {
 	return strings.Join(parts, sep)
 }
 
-// renderPill preserves the familiar compact controls without filling their
-// background. The selected state uses a bright marker and foreground colour.
-func renderPill(bg, fg lipgloss.Color, label string, bold bool) string {
-	color := fg
-	if fg == "0" {
-		color = bg
-	}
-	return lipgloss.NewStyle().Foreground(color).Bold(bold).Render(label)
+// ── Bilgi satırları ─────────────────────────────────────────────────────────
+
+// InfoRow renders a "label   value" row on the shared label grid.
+func InfoRow(th *theme.Theme, label, value string) string {
+	return th.Label.Render(Truncate(label, theme.LabelWidth)) + " " + th.Value.Render(value)
 }
 
-// scrollList windows already-styled rows around cursor into exactly h lines,
-// appending a "n-m / total" status line when the list does not fit. Keeps the
-// selected row visible and never renders past h lines.
-func scrollList(th *theme.Theme, rows []string, cursor, h int) string {
+// kv is the previous name for InfoRow and is used in 76 places.
+func kv(t *theme.Theme, key, val string) string {
+	return InfoRow(t, key, val)
+}
+
+// ── Seçim satırları ────────────────────────────────────────────────────────
+
+// Radio renders a single-choice option row.
+func Radio(th *theme.Theme, label, note string, selected bool) string {
+	icon, style := theme.IconUnselect, th.Body
+	if selected {
+		icon, style = theme.IconSelected, th.Selected
+	}
+	row := style.Render(icon + " " + label)
+	if note != "" {
+		row += "  " + th.Muted.Render(note)
+	}
+	return row
+}
+
+// RenderOptionRow is the previous name for Radio.
+func RenderOptionRow(th *theme.Theme, label string, note string, selected bool) string {
+	return Radio(th, label, note, selected)
+}
+
+// Checkbox renders a multi-choice option row.
+func Checkbox(th *theme.Theme, label string, checked, focused bool) string {
+	icon := theme.IconUnchcked
+	if checked {
+		icon = theme.IconChecked
+	}
+	prefix := "  "
+	style := th.Body
+	if focused {
+		prefix = theme.IconCursor + " "
+		style = th.Selected
+	}
+	return style.Render(prefix + icon + " " + label)
+}
+
+// NavItem renders one sidebar entry within exactly `width` columns.
+//
+// Odak renkten BAĞIMSIZ olarak da anlaşılır: seçili satır işaretçi taşır.
+// Pasif bölümler sonuna "kapalı" eklenir ve etiket buna göre KISALTILIR —
+// eskiden "(pasif)" eklenip taşan satır alt satıra sarıyor ve kenar çubuğu
+// hizasını bozuyordu.
+func NavItem(th *theme.Theme, icon, label string, width int, selected, disabled bool) string {
+	const marker = 2 // "▸ " veya "  "
+	avail := width - marker - lipgloss.Width(icon) - 1
+	if avail < 4 {
+		avail = 4
+	}
+
+	if disabled {
+		const suffix = " kapalı"
+		return th.Disabled.Render("  " + icon + " " +
+			Truncate(label, avail-len(suffix)) + suffix)
+	}
+	text := icon + " " + Truncate(label, avail)
+	if selected {
+		return th.Selected.Render(theme.IconCursor + " " + text)
+	}
+	return th.Body.Render("  " + text)
+}
+
+// RenderNavItem is the previous name for NavItem.
+func RenderNavItem(th *theme.Theme, icon string, label string, width int, selected bool, disabled bool) string {
+	return NavItem(th, icon, label, width, selected, disabled)
+}
+
+// ── Form alanı ──────────────────────────────────────────────────────────────
+
+// Field renders a labelled text input.
+//
+// Kutu çerçeveli olduğu için ÜÇ satırdır. Eskiden
+//
+//	fmt.Sprintf("%s : %s", label, box)
+//
+// biçimi kullanılıyordu; bu, kutunun 1. satırını etiketin yanına, 2. ve 3.
+// satırlarını 0. kolona koyuyordu ve formlar tamamen kayıyordu. Doğru araç
+// lipgloss.JoinHorizontal: etiketi kutunun dikey ortasına hizalar.
+func Field(th *theme.Theme, label, inputView, help string, focused bool) string {
+	labelStyle := th.Label
+	if focused {
+		labelStyle = th.Label.Foreground(th.P.Accent).Bold(true)
+	}
+	box := th.Input
+	if focused {
+		box = th.InputFocused
+	}
+
+	row := lipgloss.JoinHorizontal(
+		lipgloss.Center, // ← etiket, çerçeveli kutunun ortasına hizalanır
+		labelStyle.Render(Truncate(label, theme.LabelWidth)),
+		" ",
+		box.Render(inputView),
+	)
+	if help != "" && focused {
+		indent := strings.Repeat(" ", theme.LabelWidth+1)
+		row += "\n" + indent + th.Muted.Render(help)
+	}
+	return row
+}
+
+// RenderInputField is the previous name for Field.
+func RenderInputField(th *theme.Theme, label string, inputView string, help string, focused bool) string {
+	return Field(th, label, inputView, help, focused)
+}
+
+// ── İlerleme ────────────────────────────────────────────────────────────────
+
+// ProgressBar renders a bar of exactly `width` body cells plus a percentage.
+func ProgressBar(th *theme.Theme, pct, width int) string {
+	if width <= 0 {
+		width = theme.BarWidth
+	}
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	filled := (pct * width) / 100
+	return th.Selected.Render(strings.Repeat(theme.BarFill, filled)) +
+		th.Divider.Render(strings.Repeat(theme.BarEmpty, width-filled)) +
+		th.Muted.Render(fmt.Sprintf(" %3d%%", pct))
+}
+
+// RenderProgressBar is the previous name for ProgressBar.
+func RenderProgressBar(th *theme.Theme, pct int, width int) string {
+	return ProgressBar(th, pct, width)
+}
+
+// bar renders a float-percentage gauge (CPU / RAM meters).
+func bar(t *theme.Theme, pct float64, width int) string {
+	return ProgressBar(t, int(pct+0.5), width)
+}
+
+// ── Başlık ──────────────────────────────────────────────────────────────────
+
+// StepHeader renders the wizard header: title on one line, progress on the
+// next. Toplam yükseklik theme.HeaderHeight ile eşleşir.
+func StepHeader(th *theme.Theme, step, total int, title string) string {
+	if total < 1 {
+		total = 1
+	}
+	pct := (step * 100) / total
+	if pct > 100 {
+		pct = 100
+	}
+	head := th.Title.Render(title) + th.Muted.Render(fmt.Sprintf("   adım %d/%d", step, total))
+	return head + "\n" + ProgressBar(th, pct, theme.BarWidth)
+}
+
+// RenderHeader is the previous name for StepHeader.
+func RenderHeader(th *theme.Theme, currentStep int, totalSteps int, title string) string {
+	return StepHeader(th, currentStep, totalSteps, title)
+}
+
+// Divider renders a horizontal rule of the given width.
+func Divider(th *theme.Theme, width int) string {
+	if width < 1 {
+		return ""
+	}
+	return th.Divider.Render(strings.Repeat(theme.SepHoriz, width))
+}
+
+// ── Liste ───────────────────────────────────────────────────────────────────
+
+// List windows already-styled rows around cursor into exactly h lines,
+// appending a position indicator when the list does not fit.
+func List(th *theme.Theme, rows []string, cursor, h int) string {
 	n := len(rows)
 	if h < 1 {
 		h = 1
@@ -233,43 +432,65 @@ func scrollList(th *theme.Theme, rows []string, cursor, h int) string {
 	if top > n-visible {
 		top = n - visible
 	}
-	win := append([]string{}, rows[top:top+visible]...)
-	status := th.Muted.Render(fmt.Sprintf("  ▲▼  %d-%d / %d  (seçim için yön tuşları)", top+1, top+visible, n))
-	return strings.Join(append(win, status), "\n")
+	status := th.Muted.Render(fmt.Sprintf("  %s%s  %d-%d / %d",
+		theme.IconUp, theme.IconDown, top+1, top+visible, n))
+	return strings.Join(append(append([]string{}, rows[top:top+visible]...), status), "\n")
 }
 
-// Dashboard helper primitives
-func kv(t *theme.Theme, key, val string) string {
-	return t.Key.Render(fmt.Sprintf("%-14s", key)) + " " + t.Val.Render(val)
+// scrollList is the previous name for List.
+func scrollList(th *theme.Theme, rows []string, cursor, h int) string {
+	return List(th, rows, cursor, h)
 }
 
-func bar(t *theme.Theme, pct float64, width int) string {
-	if width < 6 {
-		width = 10
-	}
-	pInt := int(pct)
-	if pInt < 0 {
-		pInt = 0
-	}
-	if pInt > 100 {
-		pInt = 100
-	}
-	filled := (pInt * width) / 100
-	empty := width - filled
+// ── Durum göstergeleri ──────────────────────────────────────────────────────
 
-	fillStr := strings.Repeat("█", filled)
-	emptyStr := strings.Repeat("─", empty)
-
-	return fmt.Sprintf("▐%s%s▌ %3.0f%%", t.Accent.Bold(true).Render(fillStr), t.Muted.Render(emptyStr), pct)
+// StateBadge renders a server state with a fixed-width label so list columns
+// never shift as state changes.
+func StateBadge(t *theme.Theme, st model.ServerState) string {
+	var (
+		icon  string
+		label string
+		style lipgloss.Style
+	)
+	switch st {
+	case model.StateRunning:
+		icon, label, style = theme.IconDotOn, theme.StateLabelRunning, t.OK
+	case model.StateStarting:
+		icon, label, style = theme.IconDotOn, theme.StateLabelStarting, t.Warn
+	case model.StateStopping:
+		icon, label, style = theme.IconDotOn, theme.StateLabelStopping, t.Warn
+	case model.StateError:
+		icon, label, style = theme.IconFail, theme.StateLabelError, t.Error
+	default:
+		icon, label, style = theme.IconDotOf, theme.StateLabelStopped, t.Muted
+	}
+	return style.Render(icon + " " + pad(label, theme.StateLabelWidth))
 }
 
-func card(t *theme.Theme, title, body string, w int) string {
-	frameW := w - 2 // border is outside the style width; padding is inside.
-	if frameW < 10 {
-		frameW = 10
+// stateBadge is the previous name for StateBadge.
+func stateBadge(t *theme.Theme, st model.ServerState) string { return StateBadge(t, st) }
+
+// BoolBadge renders a yes/no marker with optional custom labels.
+func BoolBadge(t *theme.Theme, val bool, labels ...string) string {
+	on, off := "EVET", "HAYIR"
+	if len(labels) > 0 && labels[0] != "" {
+		on = labels[0]
 	}
-	return t.Card.Width(frameW).Render(t.CardTitle.Render(title) + "\n\n" + body)
+	if len(labels) > 1 && labels[1] != "" {
+		off = labels[1]
+	}
+	if val {
+		return t.OK.Render(theme.IconOK + " " + on)
+	}
+	return t.Muted.Render(theme.IconDash + " " + off)
 }
+
+// boolBadge is the previous name for BoolBadge.
+func boolBadge(t *theme.Theme, val bool, labels ...string) string {
+	return BoolBadge(t, val, labels...)
+}
+
+// ── Biçimlendirme ───────────────────────────────────────────────────────────
 
 func fmtBytes(b uint64) string {
 	const unit = 1024
@@ -293,48 +514,19 @@ func fmtUptime(sec int64) string {
 	m := (sec % 3600) / 60
 	s := sec % 60
 
-	if d > 0 {
-		return fmt.Sprintf("%dg %dh", d, h)
+	switch {
+	case d > 0:
+		return fmt.Sprintf("%dg %dsa", d, h)
+	case h > 0:
+		return fmt.Sprintf("%dsa %ddk", h, m)
+	case m > 0:
+		return fmt.Sprintf("%ddk %dsn", m, s)
+	default:
+		return fmt.Sprintf("%dsn", s)
 	}
-	if h > 0 {
-		return fmt.Sprintf("%dh %dm", h, m)
-	}
-	if m > 0 {
-		return fmt.Sprintf("%dm %ds", m, s)
-	}
-	return fmt.Sprintf("%ds", s)
 }
 
+// joinH joins two blocks side by side with an explicit gap.
 func joinH(gap int, left, right string) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, strings.Repeat(" ", gap), right)
-}
-
-func stateBadge(t *theme.Theme, st model.ServerState) string {
-	switch st {
-	case model.StateRunning:
-		return t.Badge("● ÇALIŞIYOR", t.P.Green)
-	case model.StateStarting:
-		return t.Badge("● BAŞLIYOR", t.P.Yellow)
-	case model.StateStopping:
-		return t.Badge("● DURUYOR", t.P.Yellow)
-	case model.StateError:
-		return t.Badge("● HATA", t.P.Red)
-	default:
-		return t.Badge("○ KAPALI", t.P.Muted)
-	}
-}
-
-func boolBadge(t *theme.Theme, val bool, labels ...string) string {
-	onLabel := "EVET"
-	offLabel := "HAYIR"
-	if len(labels) > 0 && labels[0] != "" {
-		onLabel = labels[0]
-	}
-	if len(labels) > 1 && labels[1] != "" {
-		offLabel = labels[1]
-	}
-	if val {
-		return t.Badge("✓ "+onLabel, t.P.Green)
-	}
-	return t.Badge("– "+offLabel, t.P.Muted)
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"mcos/internal/files"
 	"mcos/internal/ipc"
 	"mcos/internal/java"
 	"mcos/internal/model"
@@ -132,4 +133,46 @@ func (d *Daemon) handleServerChangeVersion(ctx context.Context, raw json.RawMess
 	}(srv.Clone())
 
 	return ipc.OKResult{OK: true, Message: fmt.Sprintf("%s %s kuruluyor", srv.Software, srv.MCVersion)}, nil
+}
+
+func (d *Daemon) handleServerScanUSBMods(_ context.Context, _ json.RawMessage) (any, error) {
+	items, err := files.ScanUSBJars()
+	if err != nil {
+		return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: err.Error()}
+	}
+	return ipc.USBScanResult{Items: items}, nil
+}
+
+func (d *Daemon) handleServerInstallUSBMods(_ context.Context, raw json.RawMessage) (any, error) {
+	var p ipc.USBInstallParams
+	if err := decode(raw, &p); err != nil {
+		return nil, err
+	}
+	if len(p.Items) == 0 {
+		return nil, &ipc.Error{Code: ipc.CodeInvalidParams, Message: "kurulacak dosya seçilmedi"}
+	}
+	srv, err := d.store.GetServer(p.ServerID)
+	if err != nil {
+		return nil, &ipc.Error{Code: ipc.CodeNotFound, Message: "sunucu bulunamadı"}
+	}
+	targetFolder := filepath.Join(d.store.Paths.ServerData(srv.ID), contentDirFor(srv.Software))
+
+	copied, err := files.InstallUSBJars(p.Items, targetFolder)
+	switch {
+	case copied == 0:
+		// Tamamen başarısız. Eski sürüm burada "0 mod/eklenti kuruldu" diye
+		// BAŞARI dönüyordu; artık gerçek sebep hata olarak iletilir.
+		msg := "USB'den hiçbir dosya kopyalanamadı"
+		if err != nil {
+			msg = err.Error()
+		}
+		return nil, &ipc.Error{Code: ipc.CodeInternalError, Message: msg}
+	case err != nil:
+		// Kısmî başarı: kopyalananı da başarısızları da bildir.
+		d.log.Warnf("usb: kısmî kurulum (%d dosya): %v", copied, err)
+		return ipc.OKResult{OK: true, Message: err.Error()}, nil
+	default:
+		d.log.Infof("usb: %d dosya %s içine kuruldu", copied, targetFolder)
+		return ipc.OKResult{OK: true, Message: fmt.Sprintf("%d mod/eklenti kuruldu", copied)}, nil
+	}
 }

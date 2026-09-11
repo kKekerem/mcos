@@ -121,33 +121,50 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 		return fmt.Errorf("server already %s", s)
 	}
 
+	// failStart, hatayı hem konsola (kullanıcı için Türkçe) hem günlüğe
+	// (teknik ayrıntıyla) yazar ve durumu Error'a çeker.
 	failStart := func(err error) error {
 		r.setState(model.StateError)
 		m.sup.Remove(srv.ID)
-		m.onConsoleLine(srv.ID, fmt.Sprintf("[MCOS HATA] Sunucu başlatılamadı: %v", err))
+		m.onConsoleLine(srv.ID, "[MCOS HATA] "+UserMessage(err))
 		if m.log != nil {
-			m.log.Errorf("server: %s (%s) start error: %v", srv.Name, srv.ID, err)
+			m.log.Errorf("server: %q (%s) başlatma hatası: %v", srv.Name, srv.ID, err)
 		}
 		return err
 	}
 
 	r.setState(model.StateStarting)
+
 	if err := m.EnsureInstalled(ctx, srv); err != nil {
-		return failStart(fmt.Errorf("install: %w", err))
+		return failStart(startErr(StageInstall,
+			fmt.Sprintf("%s %s sunucu yazılımı indirilemedi veya kurulamadı. "+
+				"İnternet bağlantısını kontrol edin, sonra tekrar deneyin.",
+				srv.Software, srv.MCVersion), err))
 	}
+
 	li, err := m.loadLaunch(srv.ID)
 	if err != nil {
-		return failStart(fmt.Errorf("load launch info: %w", err))
+		return failStart(startErr(StageLaunch,
+			"Kurulum kaydı okunamadı. Sunucu klasörü bozulmuş olabilir; "+
+				"Yazılım sekmesinden sürümü yeniden kurun.", err))
 	}
 
 	javaBin, jvmArgs, err := m.java.BindForServer(srv)
 	if err != nil {
-		return failStart(fmt.Errorf("java bind: %w", err))
+		return failStart(startErr(StageJava,
+			fmt.Sprintf("Bu sunucu Java %d gerektiriyor ama kurulamadı. "+
+				"Ayarlar → Java bölümünden Java %d kurun.",
+				srv.JavaMajor, srv.JavaMajor), err))
+	}
+	if javaBin == "" {
+		return failStart(startErr(StageJava,
+			fmt.Sprintf("Java %d çalıştırılabilir dosyası bulunamadı.", srv.JavaMajor), nil))
 	}
 
 	args, err := buildLaunchArgs(jvmArgs, li)
 	if err != nil {
-		return failStart(err)
+		return failStart(startErr(StageArgs,
+			"Sunucu başlatma komutu oluşturulamadı. Sürümü yeniden kurmayı deneyin.", err))
 	}
 
 	dataDir := m.store.Paths.ServerData(srv.ID)
@@ -178,9 +195,51 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 
 	m.logf("server: starting %q (%s, java=%s)", srv.Name, srv.Software, javaBin)
 	if err := m.sup.Start(srv.ID); err != nil {
-		return failStart(err)
+		return failStart(startErr(StageSpawn,
+			fmt.Sprintf("Java süreci başlatılamadı (%s). Dosya izinlerini ve "+
+				"kalan disk alanını kontrol edin.", javaBin), err))
 	}
+	go m.watchStartup(srv.ID)
 	return nil
+}
+
+// startupGrace, "Done (…)!" satırı beklenirken tanınan süre. Bu sürenin
+// sonunda süreç hâlâ yaşıyorsa sunucu çalışıyor kabul edilir.
+const startupGrace = 3 * time.Minute
+
+// watchStartup keeps a server from being stuck on "BAŞLIYOR" forever.
+//
+// Durum geçişi yalnızca konsolda "Done (…)!" satırı görülünce yapılıyordu
+// (bkz. onConsoleLine). Forge/NeoForge ve bazı sürümler bu satırı farklı
+// biçimde bastığı için sunucu gerçekten çalışsa bile panel sonsuza kadar
+// "BAŞLIYOR" gösteriyordu. Burada süre dolduğunda sürecin canlı olup
+// olmadığına bakıp durumu netleştiriyoruz.
+func (m *Manager) watchStartup(id string) {
+	time.Sleep(startupGrace)
+
+	r := m.rt(id)
+	if r.getState() != model.StateStarting {
+		return // zaten Running/Error/Stopped oldu
+	}
+	r.mu.Lock()
+	proc := r.proc
+	r.mu.Unlock()
+	if proc == nil {
+		return
+	}
+
+	if proc.State() == supervisor.StateRunning {
+		r.setState(model.StateRunning)
+		m.onConsoleLine(id, fmt.Sprintf(
+			"[MCOS] Sunucu %.0f dakikadır çalışıyor ama beklenen \"Done\" satırını yazmadı; "+
+				"çalışıyor kabul edildi.", startupGrace.Minutes()))
+		m.logf("server: %s uzun süre BAŞLIYOR kaldı, süreç canlı olduğu için ÇALIŞIYOR yapıldı", id)
+		return
+	}
+
+	r.setState(model.StateError)
+	m.onConsoleLine(id, "[MCOS HATA] Sunucu başlatılamadı: süreç açılış sırasında sonlandı. "+
+		"Konsol çıktısındaki son satırlara bakın.")
 }
 
 // niceForServer maps a server's priority and full-performance flag to a Unix
@@ -230,7 +289,13 @@ func (m *Manager) Restart(ctx context.Context, srv *model.Server) error {
 		if err := m.Stop(srv.ID); err != nil {
 			return err
 		}
-		if p := m.rt(srv.ID).proc; p != nil {
+		// r.proc, kod tabanının her yerinde r.mu altında okunuyor; burada
+		// kilitsiz okunuyordu (veri yarışı).
+		r := m.rt(srv.ID)
+		r.mu.Lock()
+		p := r.proc
+		r.mu.Unlock()
+		if p != nil {
 			p.Wait()
 		}
 	}
@@ -279,22 +344,61 @@ func (m *Manager) StartAutostart(ctx context.Context, servers []*model.Server) {
 	}
 }
 
+// isServerReadyLine reports whether a console line signals "server is up".
+//
+// Eskiden koşul `Done (` VE `For help` idi. Forge/NeoForge ve bazı sürümler
+// "For help" kısmını basmadığı için sunucu gerçekten açılsa bile durum
+// BAŞLIYOR'da kalıyordu. Ortak ve ayırt edici imza `Done (` + `)!`:
+//
+//	[Server thread/INFO]: Done (12.345s)! For help, type "help"
+//	[modloading-worker-0/INFO]: Done (30.1s)!
+//
+// Sohbet satırları da dışlanır: bir oyuncunun sohbete "Done (1s)!" yazarak
+// durumu etkilemesini engeller (isPlayerEventLine ile aynı `<` kuralı).
+func isServerReadyLine(line string) bool {
+	if strings.Contains(line, "<") {
+		return false
+	}
+	i := strings.Index(line, "Done (")
+	if i < 0 {
+		return false
+	}
+	return strings.Contains(line[i:], ")!")
+}
+
+// isPlayerEventLine reports whether a line is a genuine join/leave event rather
+// than a chat message that merely contains the phrase.
+//
+// Sohbet satırları oyuncu adını `<isim>` biçiminde taşır:
+//
+//	[Server thread/INFO]: <Ahmet> ben de joined the game    ← sohbet, sayılmamalı
+//	[Server thread/INFO]: Ahmet joined the game             ← gerçek olay
+//
+// Bu yüzden `<` içeren satırlar reddedilir ve olay ifadesinin satırın SONUNDA
+// olması istenir.
+func isPlayerEventLine(line, suffix string) bool {
+	if strings.Contains(line, "<") {
+		return false
+	}
+	return strings.HasSuffix(strings.TrimRight(line, " \t\r"), suffix)
+}
+
 // onConsoleLine records output and updates derived state (running / players).
 func (m *Manager) onConsoleLine(id, line string) {
 	r := m.rt(id)
 	r.console.Add(log.Entry{Time: time.Now(), Message: line})
 
 	switch {
-	case strings.Contains(line, "Done (") && strings.Contains(line, "For help"):
+	case isServerReadyLine(line):
 		if r.getState() == model.StateStarting {
 			r.setState(model.StateRunning)
-			m.logf("server: %s is up", id)
+			m.logf("server: %s açıldı", id)
 		}
-	case strings.Contains(line, "joined the game"):
+	case isPlayerEventLine(line, "joined the game"):
 		r.mu.Lock()
 		r.players++
 		r.mu.Unlock()
-	case strings.Contains(line, "left the game"):
+	case isPlayerEventLine(line, "left the game"):
 		r.mu.Lock()
 		if r.players > 0 {
 			r.players--

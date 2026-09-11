@@ -1,0 +1,69 @@
+#!/bin/sh
+# mcos-findfs — bir dosya sistemi etiketini blok aygıt yoluna çevirir.
+#
+# Kullanım:  mcos-findfs MCOS-DATA   →  /dev/sda2   (bulunamazsa çıkış kodu 1)
+#
+# NEDEN BU BETİK VAR:
+#
+#   MCOS imajında udev/eudev YOK (mcos_defconfig'de BR2_ROOTFS_DEVICE_CREATION_*
+#   ayarlanmadığı için Buildroot varsayılanı statik /dev'dir). Çekirdek
+#   CONFIG_DEVTMPFS_MOUNT=y sayesinde /dev/sda1 gibi düğümleri oluşturur, AMA
+#   /dev/disk/by-label/* sembolik bağlarını udev kuralları oluşturur — o da
+#   yok. Dolayısıyla:
+#
+#     [ -b /dev/disk/by-label/MCOS-DATA ]     ← HER ZAMAN FALSE
+#
+#   Eski S99mcos tam olarak bunu yapıyordu, bu yüzden kalıcı bölüm hiç mount
+#   edilmiyor ve /data her açılışta boş kalıyordu: kurulan Java ve oluşturulan
+#   sunucular reboot'ta kayboluyordu.
+#
+#   Ayrıca "blkid -L ETIKET" biçimi yalnızca util-linux blkid'de var; busybox
+#   blkid seçenek almaz. Bu yüzden burada dört yol sırayla denenir ve hangisi
+#   varsa o kullanılır.
+
+set -u
+
+LABEL="${1:-}"
+if [ -z "$LABEL" ]; then
+    echo "Kullanım: mcos-findfs <ETIKET>" >&2
+    exit 2
+fi
+
+# 1) util-linux findfs — en doğrudan yol.
+if command -v findfs >/dev/null 2>&1; then
+    dev="$(findfs "LABEL=$LABEL" 2>/dev/null || true)"
+    if [ -n "$dev" ] && [ -b "$dev" ]; then
+        printf '%s\n' "$dev"
+        exit 0
+    fi
+fi
+
+# 2) util-linux blkid -L.
+if command -v blkid >/dev/null 2>&1; then
+    dev="$(blkid -L "$LABEL" 2>/dev/null || true)"
+    if [ -n "$dev" ] && [ -b "$dev" ]; then
+        printf '%s\n' "$dev"
+        exit 0
+    fi
+fi
+
+# 3) udev sembolik bağı (ileride udev eklenirse çalışsın).
+if [ -b "/dev/disk/by-label/$LABEL" ]; then
+    printf '%s\n' "/dev/disk/by-label/$LABEL"
+    exit 0
+fi
+
+# 4) Son çare: her blok aygıtı tek tek yokla. busybox blkid seçenek almaz ama
+#    kendisine verilen aygıt için LABEL="..." satırı basar, bu yüzden bu yol
+#    hem busybox hem util-linux ile çalışır.
+if command -v blkid >/dev/null 2>&1; then
+    for dev in /dev/sd[a-z][0-9]* /dev/nvme*n*p* /dev/mmcblk*p* /dev/vd[a-z][0-9]* /dev/hd[a-z][0-9]*; do
+        [ -b "$dev" ] || continue
+        if blkid "$dev" 2>/dev/null | grep -q "LABEL=\"$LABEL\""; then
+            printf '%s\n' "$dev"
+            exit 0
+        fi
+    done
+fi
+
+exit 1

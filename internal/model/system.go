@@ -60,6 +60,16 @@ type NetStatus struct {
 
 // SystemStatus is the snapshot shown on the main dashboard. It is computed by
 // the daemon on request (system.status), never persisted.
+// USBStatus summarises attached removable storage.
+//
+// KATMAN KURALI: model paketi "files" paketini import ETMEZ (sozlesme katmani
+// is mantigina bagimli olmamali). Bu yuzden files.USBInfo burada AYNEN
+// tekrarlanir ve daemon tarafinda kopyalanir.
+type USBStatus struct {
+	Present    bool `json:"present"`
+	Partitions int  `json:"partitions"`
+}
+
 type SystemStatus struct {
 	SystemName     string     `json:"systemName"`
 	Version        string     `json:"version"`
@@ -86,6 +96,12 @@ type SystemStatus struct {
 	FullPerformanceOn   bool `json:"fullPerformanceOn"`
 	ClusterOn           bool `json:"clusterOn"`
 	WANOn               bool `json:"wanOn"`
+
+	// USB, takili cikarilabilir depolamayi ozetler. Panel bunu sol menude
+	// "USB" bolumunu gosterip gizlemek icin kullanir. Tespit hicbir seyi
+	// BAGLAMAZ (yalnizca /sys/block + /proc/mounts okur), bu yuzden durum
+	// dongusunde her saniye guvenle hesaplanabilir.
+	USB USBStatus `json:"usb"`
 
 	// ClockSynced is true once the daemon has set the system clock from NTP
 	// (RTC-less PCs boot with a wrong date → TLS fails until this flips). The

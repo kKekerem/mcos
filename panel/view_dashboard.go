@@ -81,7 +81,7 @@ func (a *App) renderDashboard(w, h int) string {
 	// Services card.
 	turbo := "kapalı"
 	if st.TurboOn {
-		turbo = "AÇIK ⚡"
+		turbo = theme.IconTurbo + " AÇIK"
 	}
 	svcBody := strings.Join([]string{
 		kv(th, "Sunucular", fmt.Sprintf("%d çalışıyor / %d toplam", st.ServersUp, st.ServersTotal)),

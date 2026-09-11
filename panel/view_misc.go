@@ -7,6 +7,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"mcos/internal/model"
+	"mcos/panel/theme"
 )
 
 func (a *App) renderSoftware(w, h int) string {
@@ -37,7 +38,7 @@ func (a *App) renderSoftware(w, h int) string {
 		sel := (a.focus == focusContent && a.rowCursor == idx)
 		prefix := "  "
 		if sel {
-			prefix = "➜ "
+			prefix = theme.IconCursor + " "
 		}
 
 		titleStyle := th.Val.Render(t.name)
@@ -65,7 +66,7 @@ func (a *App) renderSoftware(w, h int) string {
 			empty := barW - filled
 			fillStr := strings.Repeat("█", filled)
 			emptyStr := strings.Repeat("─", empty)
-			pStr := fmt.Sprintf("      ⏳ [ %s%s ] %3d%%  %s", th.Accent.Bold(true).Render(fillStr), th.Muted.Render(emptyStr), pct, prog.Status)
+			pStr := fmt.Sprintf("      %s [ %s%s ] %3d%%  %s", theme.IconWait, th.Accent.Bold(true).Render(fillStr), th.Muted.Render(emptyStr), pct, prog.Status)
 			b.WriteString(pStr + "\n")
 		} else if rt, isInst := installedMap[t.major]; isInst {
 			verShort := truncate(rt.Version, w-35)
@@ -192,7 +193,7 @@ func (a *App) renderPeers(w, h int) string {
 			sel := (a.focus == focusContent && a.rowCursor == idx)
 			prefix := "  "
 			if sel {
-				prefix = "➜ "
+				prefix = theme.IconCursor + " "
 			}
 			state := string(p.State)
 			if p.Paired {
@@ -225,7 +226,7 @@ func (a *App) renderSettings(w, h int) string {
 	}
 	turbo := th.Muted.Render("kapalı")
 	if cfg.Turbo {
-		turbo = th.Badge("AÇIK ⚡", th.P.Accent)
+		turbo = th.Badge(theme.IconTurbo+" AÇIK", th.P.Accent)
 	}
 
 	options := []struct {
@@ -248,7 +249,7 @@ func (a *App) renderSettings(w, h int) string {
 		sel := (a.focus == focusContent && a.rowCursor == idx)
 		prefix := "  "
 		if sel {
-			prefix = "➜ "
+			prefix = theme.IconCursor + " "
 		}
 
 		labelStyle := th.Key.Render(fmt.Sprintf("%-28s", opt.title))

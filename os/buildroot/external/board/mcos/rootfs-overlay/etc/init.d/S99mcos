@@ -19,8 +19,23 @@ mount_persistent() {
         return
     fi
     mkdir -p "$MCOS_DATA"
-    if [ -b /dev/disk/by-label/MCOS-DATA ]; then
-        mount /dev/disk/by-label/MCOS-DATA "$MCOS_DATA"
+
+    # Kalici bolumu ETIKETLE bul. Eskiden burada
+    #     [ -b /dev/disk/by-label/MCOS-DATA ]
+    # vardi; imajda udev OLMADIGI icin o sembolik bag hic olusmuyor ve kosul
+    # her zaman false donuyordu. Sonuc: /data hicbir zaman kalici bolumden
+    # mount edilmiyor, kurulan Java ve olusturulan sunucular her reboot'ta
+    # kayboluyordu. mcos-findfs dort ayri yontemi sirayla dener.
+    part="$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)"
+    if [ -z "$part" ]; then
+        printf "Kalici bolum (MCOS-DATA) bulunamadi; /data RAM'de kalacak.\n"
+        return
+    fi
+
+    if mount "$part" "$MCOS_DATA"; then
+        printf "Kalici depolama baglandi: %s -> %s\n" "$part" "$MCOS_DATA"
+    else
+        printf "UYARI: %s baglanamadi; /data RAM'de kalacak.\n" "$part"
     fi
 }
 
@@ -58,11 +73,16 @@ start() {
     printf "Starting MCOS...\n"
     
     # Load Turkish keymap, enable UTF-8, and load a modern Terminus font for TUI
-    if command -v unicode_start >/dev/null 2>&1; then
-        unicode_start ter-u16n || true
-    elif command -v setfont >/dev/null 2>&1; then
-        printf '\033%%G' # Force UTF-8 mode just in case
-        setfont ter-u16n 2>/dev/null || setfont ter-116n 2>/dev/null || setfont Lat15-Terminus16 2>/dev/null || true
+    # Konsol fontu: kbd pakedinin GERCEKTEN kurdugu fontlardan seciyoruz.
+    # Eskiden "ter-u16n" deneniyordu; o font Terminus paketine ait ve imajda
+    # yok, bu yuzden her acilista setfont hatasi basiliyordu (QEMU boot
+    # testiyle yakalandi). Lat2-Terminus16 Turkce harfleri kapsar.
+    printf '\033%%G'   # konsolu UTF-8 moduna al
+    if command -v setfont >/dev/null 2>&1; then
+        setfont Lat2-Terminus16 2>/dev/null \
+            || setfont iso09.16 2>/dev/null \
+            || setfont lat9u-16 2>/dev/null \
+            || true
     fi
     if command -v loadkeys >/dev/null 2>&1; then
         loadkeys trq 2>/dev/null || true

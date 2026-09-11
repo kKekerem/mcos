@@ -461,7 +461,10 @@ func (s *setupModel) adjust(delta int) {
 		case 0:
 			n := len(theme.Names())
 			s.themeIdx = (s.themeIdx + delta + n) % n
-			s.th = theme.New(theme.Names()[s.themeIdx]) // live preview
+			// Canlı önizleme: hem stiller hem fbterm palet yuvaları yenilenir.
+			name := theme.Names()[s.themeIdx]
+			s.th = theme.New(name)
+			theme.ApplyTheme(os.Stdout, name)
 		case 1:
 			n := len(timezones)
 			s.tzIdx = (s.tzIdx + delta + n) % n
@@ -601,13 +604,6 @@ func (s *setupModel) view(w, h int, peers []model.Peer) string {
 		stepTitle = "Kurulum Onayı"
 	}
 
-	header := RenderHeader(th, int(s.step)+1, int(stepCount), stepTitle)
-	help := RenderKeyHints(th, []KeyHint{{"Enter", "ilerle"}, {"Shift+Tab", "geri"}, {"↑/↓", "gezin"}, {"Esc", "vazgeç"}}, 70)
-	if s.errMsg != "" {
-		help = lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠️  "+s.errMsg) + "\n" + help
-	}
-	cardBody := lipgloss.JoinVertical(lipgloss.Left, header, "", body, "", help)
-
 	boxW := int(float64(w) * 0.85)
 	if boxW < 72 {
 		boxW = 72
@@ -615,7 +611,50 @@ func (s *setupModel) view(w, h int, peers []model.Peer) string {
 	if boxW > w-4 {
 		boxW = w - 4
 	}
-	box := RenderCard(th, "MCOS KURULUM SİHİRBAZI", cardBody, boxW, true)
+	inner := theme.InnerWidth(boxW) - 2*theme.CardPadX
+
+	// İlerleme şeridi: yalnızca adım sayacı + çubuk. Adım BAŞLIĞI kart
+	// başlığına taşındı; eskiden ikisi birden yazılıyordu
+	// ("MCOS KURULUM SİHİRBAZI" + "Diske Kurulum") ve gereksiz tekrar
+	// ekranın üst yarısını dolduruyordu.
+	pct := (int(s.step) + 1) * 100 / int(stepCount)
+	progress := th.Muted.Render(fmt.Sprintf("adım %d/%d", int(s.step)+1, int(stepCount))) +
+		"   " + ProgressBar(th, pct, theme.BarWidth)
+
+	parts := []string{progress, Divider(th, inner), "", body}
+
+	// Hata varsa GÖVDENİN ALTINDA, butonların ÜSTÜNDE göster: kullanıcı neyi
+	// düzelteceğini eylemi seçmeden önce okumalı.
+	if s.errMsg != "" {
+		parts = append(parts, "", th.Error.Render(theme.IconWarn+" "+s.errMsg))
+	}
+
+	// Gerçek butonlar. Birincil eylem her adımda "İleri"dir; son adımda
+	// "Kurulumu Bitir" olur, böylece ne olacağı belli olur.
+	next := "İleri"
+	if s.step == stepConfirm {
+		next = "Kurulumu Bitir"
+	}
+	actions := []Action{{Label: next, Key: "Enter", Primary: true}}
+	if s.step > stepIntro {
+		actions = append(actions, Action{Label: "Geri", Key: "Shift+Tab"})
+	}
+	actions = append(actions, Action{Label: "İptal", Key: "Esc"})
+
+	parts = append(parts, "", ActionBar(th, inner, actions...))
+
+	// Gezinme ipucu YALNIZCA seçilebilir satırı olan adımlarda gösterilir.
+	// Tanıtım ve sistem-kontrolü ekranlarında seçilecek bir şey yok; orada
+	// "↑/↓ satır seç" yazmak kullanıcıyı boşa arattırır.
+	switch s.step {
+	case stepIntro, stepSystem:
+		// gezinme ipucu yok
+	default:
+		parts = append(parts, th.Muted.Render("↑/↓ satır seç   ←/→ değer değiştir"))
+	}
+
+	cardBody := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	box := RenderCard(th, "MCOS Kurulumu — "+stepTitle, cardBody, boxW, true)
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, box,
 		lipgloss.WithWhitespaceChars(" "))
 }
@@ -687,10 +726,12 @@ func (s *setupModel) viewInstall() string {
 		}, "\n")
 	}
 	if s.disksLoading {
-		return th.Muted.Render("🔍 Diskler taranıyor...")
+		return th.Muted.Render(theme.IconWait + " Diskler taranıyor…")
 	}
 	lines := []string{
-		th.Val.Render("💾 MCOS Kurulumu — Disk Seçimi"),
+		// Kart başlığı zaten "MCOS Kurulumu — Diske Kurulum" yazıyor; burada
+		// tekrar etmek yerine kullanıcıya NE YAPACAĞINI söylüyoruz.
+		th.Body.Render("MCOS'u kalıcı olarak kuracağınız diski seçin:"),
 		th.Muted.Render("(Yenilemek için 'r' tuşuna basın)"),
 		"",
 	}
@@ -700,7 +741,7 @@ func (s *setupModel) viewInstall() string {
 			label += " [MCOS KURULU]"
 		}
 
-		marker := "◯"
+		marker := theme.IconUnselect
 		if s.cursor == i {
 			marker = th.Accent.Render("●")
 			label = th.Val.Render(label)
@@ -712,7 +753,7 @@ func (s *setupModel) viewInstall() string {
 	}
 
 	// Add skip option
-	skipMarker := "◯"
+	skipMarker := theme.IconUnselect
 	skipLabel := "Atla (Sadece RAM'de çalıştır, kalıcı veri yok)"
 	if s.cursor == len(s.disks) {
 		skipMarker = th.Accent.Render("●")
@@ -748,25 +789,27 @@ func (s *setupModel) viewInstall() string {
 	}
 	lines = append(lines, fmt.Sprintf("  %s %s", checkPlug, labelPlug))
 
-	lines = append(lines, "", lipgloss.NewStyle().Foreground(th.P.Red).Render("⚠️  DİKKAT: Seçilen disk tamamen silinecektir!"))
+	lines = append(lines, "", lipgloss.NewStyle().Foreground(th.P.Red).Render(theme.IconWarn+" DİKKAT: Seçilen disk tamamen silinecektir!"))
 	return strings.Join(lines, "\n")
 }
 
 func (s *setupModel) viewIntro() string {
 	th := s.th
+	// Kart başlığı zaten "MCOS Kurulumu — Hoş Geldiniz" yazıyor ve alttaki
+	// buton "İleri  Enter" diyor; ikisini de gövdede tekrar etmiyoruz.
+	// Madde imi tokenlendi (theme.IconCursor) — sabit "✦" token setinde yoktu.
+	bullet := "  " + theme.IconBullet + " "
 	return strings.Join([]string{
-		th.Val.Render("◆ MCOS Kurulum Sihirbazı"),
+		th.Body.Render("MCOS, yalnızca Minecraft sunucuları yönetmek için tasarlanmış"),
+		th.Body.Render("özel bir işletim sistemidir."),
 		"",
-		th.Muted.Render("MCOS, yalnızca Minecraft sunucuları yönetmek için tasarlanmış"),
-		th.Muted.Render("özel bir işletim sistemidir. Bu kısa kurulum:"),
+		th.Muted.Render("Bu kısa kurulum şunları yapar:"),
 		"",
-		"  ✦ " + th.Val.Render("Donanımınızı kontrol eder"),
-		"  ✦ " + th.Val.Render("Ağ (WiFi) ve Java'yı hazırlar"),
-		"  ✦ " + th.Val.Render("Tema ve kaynak limitlerini ayarlar"),
-		"  ✦ " + th.Val.Render("Yakındaki MCOS cihazlarıyla eşleşir"),
-		"  ✦ " + th.Val.Render("İsterseniz ilk sunucunuzu kurar"),
-		"",
-		th.Accent.Render("Başlamak için Enter'a basın."),
+		bullet + th.Value.Render("Donanımınızı kontrol eder"),
+		bullet + th.Value.Render("Ağ (WiFi) ve Java'yı hazırlar"),
+		bullet + th.Value.Render("Tema ve kaynak limitlerini ayarlar"),
+		bullet + th.Value.Render("Yakındaki MCOS cihazlarıyla eşleşir"),
+		bullet + th.Value.Render("İsterseniz ilk sunucunuzu kurar"),
 	}, "\n")
 }
 
@@ -823,10 +866,10 @@ func (s *setupModel) viewIdentity() string {
 	lines := []string{
 		s.field("PC Adı", s.pcName.View(), s.cursor == 0),
 		"",
-		th.Key.Render("  📶 Bir Kablosuz Ağ Seçin") + th.Muted.Render("  (r: yeniden tara · "+s.scanNote+")"),
+		th.Key.Render("  "+theme.IconSignal+" Bir Kablosuz Ağ Seçin") + th.Muted.Render("  (r: yeniden tara · "+s.scanNote+")"),
 	}
 	if len(s.networks) == 0 {
-		lines = append(lines, th.Muted.Render("    🔍 Kablosuz ağ taranıyor / bulunamadı — kablolu ağ için 'Kablolu / Atla'"))
+		lines = append(lines, th.Muted.Render("    "+theme.IconWait+" Kablosuz ağ taranıyor / bulunamadı — kablolu ağ için 'Kablolu / Atla'"))
 	} else {
 		for i, n := range s.networks {
 			if i >= 8 {
@@ -835,7 +878,7 @@ func (s *setupModel) viewIdentity() string {
 			lines = append(lines, s.networkRow(n, s.cursor == i+1))
 		}
 	}
-	lines = append(lines, s.field("🔌 Kablolu / Atla", "", s.isWiredRow(s.cursor)))
+	lines = append(lines, s.field(theme.IconNetwork+" Kablolu / Atla", "", s.isWiredRow(s.cursor)))
 
 	if s.netPassPrompt {
 		name := ""
@@ -843,7 +886,7 @@ func (s *setupModel) viewIdentity() string {
 			name = net.SSID
 		}
 		lines = append(lines, "",
-			th.Accent.Render("🔒 "+name+" Parolası: ")+s.pass.View(),
+			th.Accent.Render(theme.IconLock+" "+name+" Parolası: ")+s.pass.View(),
 			RenderKeyHints(th, []KeyHint{{"Enter", "bağlan"}, {"Esc", "vazgeç"}}, 54))
 	} else {
 		lines = append(lines, "",
@@ -855,13 +898,15 @@ func (s *setupModel) viewIdentity() string {
 // networkRow renders one scanned access point, highlighted when selected.
 func (s *setupModel) networkRow(n ipc.WiFiNetwork, sel bool) string {
 	th := s.th
-	lock := "  "
+	// Korumalı ağ göstergesi TEK kolon olmalı, yoksa sinyal yüzdesi sütunu
+	// güvenli/açık ağlar arasında kayar.
+	lock := " "
 	if n.Secured {
-		lock = "🔒"
+		lock = theme.IconLock
 	}
 	label := fmt.Sprintf("%-22s %s %3d%%", truncate(n.SSID, 22), lock, n.Signal)
 	if sel {
-		return th.Accent.Render(" ➜ ") + th.MenuActive.Render(" "+label+" ")
+		return th.Accent.Render(" "+theme.IconCursor+" ") + th.MenuActive.Render(" "+label+" ")
 	}
 	return "   " + th.Val.Render(label)
 }
@@ -992,7 +1037,7 @@ func (s *setupModel) field(label, value string, active bool) string {
 	marker := "  "
 	lbl := th.Key.Render(fmt.Sprintf("%-24s", label))
 	if active {
-		marker = th.Accent.Render("➜  ")
+		marker = th.Accent.Render(theme.IconCursor + "  ")
 		lbl = th.Accent.Render(fmt.Sprintf("%-24s", label))
 	}
 	return marker + lbl + th.Val.Render(value)

@@ -8,6 +8,27 @@ import (
 // This file declares the typed parameter/result payloads for each RPC method.
 // The Go front-ends import these directly; the Rust lite panel mirrors the same
 // JSON shapes. Keeping them in one place makes the protocol the single contract.
+//
+// KATMAN KURALI: bu paket YALNIZCA "model" (ve tip zorunluluğu olan "java")
+// paketlerine bağımlı olmalıdır. Yönetici paketlerini (files, server, cluster…)
+// buradan import etmek sözleşme katmanını iş mantığına bağlar ve ileride import
+// döngüsüne yol açar. Paylaşılan veri tipleri "internal/model" içine konur.
+
+// USBScanResult wraps the list of .jar files found on attached removable drives.
+type USBScanResult struct {
+	Items []model.USBJar `json:"items"`
+}
+
+// USBInstallParams requests copying selected USB .jar files into a server's
+// mods/plugins folder.
+//
+// Tam öğeler taşınır, mutlak yol değil: tarama bölümü ayırdığı için tarama
+// anındaki mutlak yol kurulum anında geçersizdir
+// (bkz. internal/files/usb_linux.go).
+type USBInstallParams struct {
+	ServerID string         `json:"serverId"`
+	Items    []model.USBJar `json:"items"`
+}
 
 // PingResult is returned by the ping method.
 type PingResult struct {
@@ -66,16 +87,16 @@ type ServerCreateParams struct {
 }
 
 type ServerUpdateParams struct {
-	ID           string         `json:"id"`
-	RAMMB        int            `json:"ramMB,omitempty"`
-	CPUQuota     int            `json:"cpuQuota,omitempty"`
-	ViewDistance int            `json:"viewDistance,omitempty"`
-	SimDistance  int            `json:"simDistance,omitempty"`
-	MaxPlayers   int            `json:"maxPlayers,omitempty"`
-	FullPerf     *bool          `json:"fullPerf,omitempty"`
-	JVMFlags     string         `json:"jvmFlags,omitempty"`
-	Autostart    *bool          `json:"autostart,omitempty"`
-	WAN          *bool          `json:"wan,omitempty"`
+	ID           string `json:"id"`
+	RAMMB        int    `json:"ramMB,omitempty"`
+	CPUQuota     int    `json:"cpuQuota,omitempty"`
+	ViewDistance int    `json:"viewDistance,omitempty"`
+	SimDistance  int    `json:"simDistance,omitempty"`
+	MaxPlayers   int    `json:"maxPlayers,omitempty"`
+	FullPerf     *bool  `json:"fullPerf,omitempty"`
+	JVMFlags     string `json:"jvmFlags,omitempty"`
+	Autostart    *bool  `json:"autostart,omitempty"`
+	WAN          *bool  `json:"wan,omitempty"`
 }
 
 // ServerChangeVersionParams re-installs a server at a new version/software,
@@ -199,13 +220,13 @@ type TurboResult struct {
 
 // DiskTarget is one candidate block device for the "make USB persistent" flow.
 type DiskTarget struct {
-	Device      string `json:"device"`      // e.g. /dev/sda
-	Model       string `json:"model"`       // e.g. "SanDisk Ultra"
-	SizeBytes   uint64 `json:"sizeBytes"`   // total device size
-	Removable   bool   `json:"removable"`   // USB / removable media
-	IsBootDisk  bool   `json:"isBootDisk"`  // the device MCOS booted from
-	HasPersist  bool   `json:"hasPersist"`  // already carries an MCOS-DATA partition
-	FreeBytes   uint64 `json:"freeBytes"`   // unallocated space available
+	Device     string `json:"device"`     // e.g. /dev/sda
+	Model      string `json:"model"`      // e.g. "SanDisk Ultra"
+	SizeBytes  uint64 `json:"sizeBytes"`  // total device size
+	Removable  bool   `json:"removable"`  // USB / removable media
+	IsBootDisk bool   `json:"isBootDisk"` // the device MCOS booted from
+	HasPersist bool   `json:"hasPersist"` // already carries an MCOS-DATA partition
+	FreeBytes  uint64 `json:"freeBytes"`  // unallocated space available
 }
 
 // DisksResult lists candidate devices for persistence.

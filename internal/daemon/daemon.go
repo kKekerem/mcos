@@ -6,13 +6,14 @@ package daemon
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/hex"
 	"strings"
 	"sync"
 	"time"
 
 	"mcos/internal/backup"
 	"mcos/internal/catalog"
-	"mcos/internal/tunnel"
 	"mcos/internal/cluster"
 	"mcos/internal/files"
 	"mcos/internal/ipc"
@@ -23,6 +24,7 @@ import (
 	"mcos/internal/server"
 	"mcos/internal/store"
 	"mcos/internal/supervisor"
+	"mcos/internal/tunnel"
 	"mcos/internal/worlds"
 )
 
@@ -132,6 +134,8 @@ func (d *Daemon) Register(s *ipc.Server) {
 
 	s.Handle(ipc.MethodCatalogSearch, d.handleCatalogSearch)
 	s.Handle(ipc.MethodCatalogInstall, d.handleCatalogInstall)
+	s.Handle(ipc.MethodServerScanUSBMods, d.handleServerScanUSBMods)
+	s.Handle(ipc.MethodServerInstallUSBMods, d.handleServerInstallUSBMods)
 
 	s.Handle(ipc.MethodJavaList, d.handleJavaList)
 	s.Handle(ipc.MethodJavaResolve, d.handleJavaResolve)
@@ -178,9 +182,7 @@ func (d *Daemon) Register(s *ipc.Server) {
 func (d *Daemon) Run(ctx context.Context) {
 	d.applyNetworkFromConfig()
 	go d.timeSyncLoop(ctx)
-	if err := d.cluster.Start(); err != nil {
-		d.log.Warnf("cluster: start failed: %v", err)
-	}
+	d.applyClusterFromConfig()
 	d.autostart(ctx)
 	go d.backupScheduler(ctx)
 	go d.clusterWorkLoop(ctx)
@@ -190,6 +192,64 @@ func (d *Daemon) Run(ctx context.Context) {
 	d.sup.StopAll()
 }
 
+// applyClusterFromConfig starts or stops the LAN cluster to match
+// config.cluster.enabled, generating the pre-shared key on first enable.
+//
+// GÜVENLİK: eskiden Run() koşulsuz d.cluster.Start() çağırıyordu ve
+// ClusterConfig.Enabled alanı kod tabanında HİÇ okunmuyordu. Sonuç: kullanıcı
+// OOBE'de "PC eşleştirme"yi kapatsa bile kimliksiz eşleştirme sunucusu her
+// arabirimde :27890 portunu dinliyordu. Artık bayrak gerçekten uygulanıyor ve
+// config.set ile çalışma zamanında da değiştirilebiliyor.
+func (d *Daemon) applyClusterFromConfig() {
+	cfg := d.Config()
+	if !cfg.Cluster.Enabled {
+		if d.cluster.Running() {
+			d.log.Infof("cluster: yapılandırma gereği durduruluyor")
+			d.cluster.Stop()
+		}
+		return
+	}
+
+	// Anahtar yoksa üret ve kalıcı hale getir. Anahtar olmadan hiçbir görev
+	// kabul edilmez (bkz. cluster.authorizeTask).
+	if strings.TrimSpace(cfg.Cluster.Secret) == "" {
+		secret, err := randomSecret()
+		if err != nil {
+			d.log.Errorf("cluster: anahtar üretilemedi, cluster başlatılmıyor: %v", err)
+			return
+		}
+		d.mu.Lock()
+		d.cfg.Cluster.Secret = secret
+		snapshot := d.cfg
+		d.mu.Unlock()
+		if err := store.SaveConfig(d.cfgPath, snapshot); err != nil {
+			d.log.Errorf("cluster: anahtar kaydedilemedi: %v", err)
+			return
+		}
+		d.log.Infof("cluster: yeni eşleştirme anahtarı üretildi ve kaydedildi")
+		cfg = snapshot
+	}
+
+	d.cluster.SetSecret(cfg.Cluster.Secret)
+	if d.cluster.Running() {
+		return
+	}
+	if err := d.cluster.Start(); err != nil {
+		d.log.Warnf("cluster: başlatılamadı: %v", err)
+		return
+	}
+	d.log.Infof("cluster: etkin (port %d) — görevler yalnızca eşleştirilmiş ve doğru anahtarı sunan eşlerden kabul edilir", cfg.Cluster.Port)
+}
+
+// randomSecret returns a 32-hex-character pre-shared cluster key.
+func randomSecret() (string, error) {
+	b := make([]byte, 16)
+	if _, err := crand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // backupScheduler runs auto-backups on each server's configured interval and
 // enforces the retention count. Schedule is a Go duration string ("30m", "6h",
 // "24h"); empty disables it. Backups are submitted as cluster tasks so they go
@@ -197,6 +257,11 @@ func (d *Daemon) Run(ctx context.Context) {
 func (d *Daemon) backupScheduler(ctx context.Context) {
 	tk := time.NewTicker(1 * time.Minute)
 	defer tk.Stop()
+	// last, yalnızca bu süreçte alınan yedekleri izler. Zamanlama kararı DİSKTEN
+	// okunan en son yedek zamanına dayanır (lastBackupTime): eskiden bu harita
+	// tek gerçek kaynaktı ve her daemon yeniden başlatmasında sıfırlanıyordu;
+	// "seed" dalı bir aralık daha beklettiği için sık yeniden başlayan bir
+	// cihazda otomatik yedek HİÇ alınmıyordu.
 	last := map[string]time.Time{}
 	for {
 		select {
@@ -215,23 +280,51 @@ func (d *Daemon) backupScheduler(ctx context.Context) {
 				if perr != nil || every <= 0 {
 					continue
 				}
-				lt, seen := last[srv.ID]
-				if !seen {
-					last[srv.ID] = now // seed; first auto-backup after one interval
+
+				ref, ok := last[srv.ID]
+				if !ok {
+					// Süreç içi kayıt yok — diskteki en son yedeğe bak.
+					ref, ok = d.lastBackupTime(srv.ID)
+				}
+				if ok && now.Sub(ref) < every {
 					continue
 				}
-				if now.Sub(lt) < every {
-					continue
+				if !ok {
+					// Hiç yedek yok: hemen bir tane al, böylece ilk yedek için
+					// bir tam aralık beklenmez.
+					d.log.Infof("backup: %s için ilk otomatik yedek alınıyor", srv.ID)
 				}
+
 				last[srv.ID] = now
 				d.cluster.SubmitTask(model.Task{
 					ID: generateTaskID(), Kind: model.TaskBackup, State: model.TaskQueued,
 					ServerID: srv.ID, Params: map[string]string{"name": ""}, CreatedAt: now,
 				})
-				d.pruneBackups(srv)
+				// NOT: budama artık BURADA yapılmıyor. Görev henüz kuyruğa
+				// alındı, yedek üretilmedi; hemen budamak bir tur gecikmeli
+				// çalışıyordu. Budama, yedek gerçekten oluştuktan sonra
+				// aşağıdaki turda yapılır.
+			}
+
+			// Retention'ı her turda uygula: bu noktada önceki turların yedekleri
+			// diskte hazırdır.
+			for _, srv := range servers {
+				if srv.Backup.Keep > 0 {
+					d.pruneBackups(srv)
+				}
 			}
 		}
 	}
+}
+
+// lastBackupTime returns the creation time of the newest backup on disk.
+// Daemon yeniden başlatmalarına dayanıklı zamanlama için tek gerçek kaynak.
+func (d *Daemon) lastBackupTime(serverID string) (time.Time, bool) {
+	list, err := d.backup.List(serverID) // en yeni ilk
+	if err != nil || len(list) == 0 {
+		return time.Time{}, false
+	}
+	return list[0].CreatedAt, true
 }
 
 // pruneBackups deletes the oldest backups beyond the server's Keep count.

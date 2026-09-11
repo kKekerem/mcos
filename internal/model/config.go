@@ -31,6 +31,15 @@ type ClusterConfig struct {
 	Discovery string `json:"discovery"` // "mdns+udp"
 	Port      int    `json:"port"`      // peer protocol TCP port
 	Role      string `json:"role"`      // "auto" | "game-host" | "helper"
+
+	// Secret is the pre-shared key that authorises task offloading between
+	// nodes. İlk kullanımda üretilir ve config.json'a yazılır.
+	//
+	// Bu alan OLMADAN eşleştirme protokolünde hiçbir kimlik doğrulaması yoktu:
+	// LAN'daki herkes eşleştirme portuna bağlanıp "assignTask" gönderebiliyor,
+	// daemon da işi doğrudan çalıştırıyordu. İki MCOS cihazının birlikte
+	// çalışması için bu anahtarın ikisinde de aynı olması gerekir.
+	Secret string `json:"secret,omitempty"`
 }
 
 // WANGlobal holds daemon-wide tunnel settings.
@@ -89,7 +98,11 @@ func DefaultConfig() *Config {
 		Tier:             TierConfig{Mode: "auto"},
 		AutostartServers: true,
 		Cluster: ClusterConfig{
-			Enabled:   true,
+			// KAPALI varsayılan: eşleştirme sunucusu ağa açık bir TCP portu
+			// dinler, bu yüzden kullanıcı OOBE'de açıkça istemediyse
+			// başlatılmaz. Eskiden bu alan hiç okunmuyordu ve cluster her zaman
+			// çalışıyordu.
+			Enabled:   false,
 			NodeName:  "mcos-1",
 			Discovery: "mdns+udp",
 			Port:      27890,

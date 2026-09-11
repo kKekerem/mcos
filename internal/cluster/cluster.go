@@ -5,8 +5,10 @@ package cluster
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strconv"
 	"sync"
@@ -23,9 +25,18 @@ const (
 	multicastAddr = "239.255.0.1:27891"
 	beaconPeriod  = 5 * time.Second
 	peerTimeout   = 20 * time.Second
+
+	// peerConnTimeout, bir eş bağlantısının toplam ömrü. Kimlik doğrulanmamış
+	// bir bağlantının süresiz açık kalmasını engeller.
+	peerConnTimeout = 3 * time.Minute
+	// maxPeerMessageBytes, tek bir eş bağlantısından okunacak en fazla veri.
+	// Görev parametreleri (log metni) buraya sığar; sınırsız JSON beslemesiyle
+	// bellek tüketimini engeller.
+	maxPeerMessageBytes = 8 << 20 // 8 MiB
 )
 
-// beacon is the UDP multicast payload.
+// beacon is the UDP multicast payload. Yalnızca genel bilgi taşır; hiçbir
+// gizli değer (cluster anahtarı dahil) yayınlanmaz.
 type beacon struct {
 	NodeName   string `json:"nodeName"`
 	Version    string `json:"version"`
@@ -34,6 +45,13 @@ type beacon struct {
 	Cores      int    `json:"cores"`
 	RAMMB      int    `json:"ramMB"`
 	Role       string `json:"role"` // effective role
+}
+
+// peerRequest is the wire format for peer-to-peer requests.
+type peerRequest struct {
+	Method string      `json:"method"`
+	Token  string      `json:"token,omitempty"` // cluster anahtarı (assignTask için zorunlu)
+	Task   *model.Task `json:"task,omitempty"`
 }
 
 // Executor performs the real work behind a task. The daemon implements it so
@@ -58,6 +76,7 @@ type Manager struct {
 	exec       Executor
 
 	mu      sync.RWMutex
+	secret  string // önceden paylaşılmış cluster anahtarı
 	peers   map[string]*model.Peer
 	tasks   []model.Task
 	running bool
@@ -77,8 +96,30 @@ func NewManager(cfg model.ClusterConfig, version string, st *store.Store, lg *lo
 		log:        lg,
 		store:      st,
 		exec:       exec,
+		secret:     cfg.Secret,
 		peers:      map[string]*model.Peer{},
 	}
+}
+
+// Secret returns the local cluster key so the panel can show it for pairing.
+func (m *Manager) Secret() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.secret
+}
+
+// SetSecret installs the pre-shared cluster key.
+func (m *Manager) SetSecret(s string) {
+	m.mu.Lock()
+	m.secret = s
+	m.mu.Unlock()
+}
+
+// Running reports whether the cluster manager is active.
+func (m *Manager) Running() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.running
 }
 
 // Start launches the UDP beacon listener, the TCP peer server, and the
@@ -158,11 +199,16 @@ func (m *Manager) Stop() {
 	if m.cancel != nil {
 		m.cancel()
 	}
+	// Kapatılan tanıtıcıları nil'e çek: aksi halde yeniden Start() çağrıldığında
+	// (config.set ile cluster tekrar açıldığında) multicast bağlanması başarısız
+	// olursa beaconLoop kapatılmış eski soketi kullanmaya çalışır.
 	if m.conn != nil {
 		m.conn.Close()
+		m.conn = nil
 	}
 	if m.ln != nil {
 		m.ln.Close()
+		m.ln = nil
 	}
 }
 
@@ -299,14 +345,19 @@ func (m *Manager) upsertPeer(b beacon, ip string) {
 		return
 	}
 	m.peers[id] = &model.Peer{
-		ID:       id,
-		Name:     b.NodeName,
-		IP:       ip,
-		Port:     m.listenPort,
-		Cores:    b.Cores,
-		RAMMB:    b.RAMMB,
-		State:    model.PeerAvailable,
-		Paired:   true, // Auto-pair on LAN to enable seamless resource sharing
+		ID:    id,
+		Name:  b.NodeName,
+		IP:    ip,
+		Port:  m.listenPort,
+		Cores: b.Cores,
+		RAMMB: b.RAMMB,
+		State: model.PeerAvailable,
+		// GÜVENLİK: otomatik eşleştirme KALDIRILDI. Eskiden burada
+		// "Paired: true" vardı; keşfedilen her düğüm anında güvenilir kabul
+		// ediliyordu, bu da cluster.pair RPC'sini ve README'deki eşleştirme
+		// güvenlik hikâyesini anlamsız kılıyordu. Eşleştirme artık yalnızca
+		// kullanıcının açık eylemiyle (cluster.pair) olur.
+		Paired:   false,
 		LastSeen: time.Now(),
 	}
 }
@@ -348,33 +399,90 @@ func (m *Manager) tcpAcceptLoop() {
 	}
 }
 
+// authorizeTask decides whether an incoming assignTask may run.
+//
+// GÜVENLİK: eskiden hiçbir kontrol yoktu — LAN'daki herhangi biri eşleştirme
+// portuna bağlanıp "assignTask" gönderebiliyor, daemon işi doğrudan
+// Executor.Execute ile çalıştırıyordu. Tekrarlanan backup görevleriyle diski
+// doldurmak veya CPU'yu yüklemek mümkündü. Artık iki koşul birlikte gerekli:
+//
+//  1. İstek, yerel cluster anahtarıyla eşleşen bir token taşımalı
+//     (sabit süreli karşılaştırma).
+//  2. Kaynak IP, KULLANICI TARAFINDAN eşleştirilmiş bir eşe ait olmalı.
+//     Otomatik eşleştirme kaldırıldı (bkz. upsertPeer).
+//
+// ping/status salt-okunur olduğu ve keşif arayüzü için gerekli olduğundan
+// kimlik doğrulaması istemez.
+func (m *Manager) authorizeTask(remoteIP, token string) error {
+	m.mu.RLock()
+	secret := m.secret
+	m.mu.RUnlock()
+
+	if secret == "" {
+		return fmt.Errorf("cluster anahtarı yapılandırılmamış")
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(secret)) != 1 {
+		return fmt.Errorf("geçersiz cluster anahtarı")
+	}
+	if !m.isPairedIP(remoteIP) {
+		return fmt.Errorf("eş eşleştirilmemiş: %s", remoteIP)
+	}
+	return nil
+}
+
+// isPairedIP reports whether any user-paired peer is reachable at ip.
+func (m *Manager) isPairedIP(ip string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, p := range m.peers {
+		if p.IP == ip && p.Paired {
+			return true
+		}
+	}
+	return false
+}
+
 // handlePeerConn handles an incoming TCP peer connection.
 func (m *Manager) handlePeerConn(conn net.Conn) {
 	defer conn.Close()
-	dec := json.NewDecoder(conn)
+
+	remoteIP := ""
+	if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
+		remoteIP = host
+	}
+
+	// Kaynak sınırları: eskiden ne okuma zaman aşımı ne de boyut sınırı vardı,
+	// yani bir eş bağlantıyı süresiz tutabilir veya sınırsız JSON besleyerek
+	// belleği tüketebilirdi.
+	_ = conn.SetDeadline(time.Now().Add(peerConnTimeout))
+	dec := json.NewDecoder(io.LimitReader(conn, maxPeerMessageBytes))
 	enc := json.NewEncoder(conn)
+
 	for {
-		var msg map[string]any
+		var msg peerRequest
 		if err := dec.Decode(&msg); err != nil {
 			return
 		}
-		method, _ := msg["method"].(string)
-		switch method {
+		switch msg.Method {
 		case "status":
-			enc.Encode(m.localStatus())
+			_ = enc.Encode(m.localStatus())
 		case "ping":
-			enc.Encode(map[string]any{"pong": true})
+			_ = enc.Encode(map[string]any{"pong": true})
 		case "assignTask":
-			// A peer (the game-host) is handing us work to run with our CPU.
-			// We execute it inline and return the result so the host can track
-			// it. This is the core of LAN power-sharing: the helper does the
-			// heavy side-work (log analysis / optimization) for the host.
-			taskData, _ := json.Marshal(msg["task"])
-			var t model.Task
-			if err := json.Unmarshal(taskData, &t); err != nil {
-				enc.Encode(map[string]any{"accepted": false, "error": err.Error()})
+			if err := m.authorizeTask(remoteIP, msg.Token); err != nil {
+				if m.log != nil {
+					m.log.Warnf("cluster: %s adresinden yetkisiz görev reddedildi: %v", remoteIP, err)
+				}
+				_ = enc.Encode(map[string]any{"accepted": false, "error": "yetkisiz"})
+				return // yetkisiz eşle konuşmayı sürdürme
+			}
+			// Eş (game-host) bize CPU'muzla çalıştırılacak iş veriyor. İşi yerinde
+			// yürütüp sonucu döndürüyoruz; LAN güç paylaşımının çekirdeği budur.
+			if msg.Task == nil {
+				_ = enc.Encode(map[string]any{"accepted": false, "error": "görev yok"})
 				continue
 			}
+			t := *msg.Task
 			result, execErr := "", error(nil)
 			if m.exec != nil {
 				result, execErr = m.exec.Execute(t)
@@ -387,11 +495,11 @@ func (m *Manager) handlePeerConn(conn net.Conn) {
 				resp["state"] = string(model.TaskDone)
 			}
 			if m.log != nil {
-				m.log.Infof("cluster: ran offloaded task %s (%s) from peer", t.ID, t.Kind)
+				m.log.Infof("cluster: %s eşinden gelen görev %s (%s) çalıştırıldı", remoteIP, t.ID, t.Kind)
 			}
-			enc.Encode(resp)
+			_ = enc.Encode(resp)
 		default:
-			enc.Encode(map[string]any{"error": "unknown method"})
+			_ = enc.Encode(map[string]any{"error": "bilinmeyen metot"})
 		}
 	}
 }
@@ -524,7 +632,9 @@ func (m *Manager) offloadToPeer(t model.Task, p *model.Peer) {
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
-	if err := enc.Encode(map[string]any{"method": "assignTask", "task": t}); err != nil {
+	// Yerel cluster anahtarını gönder; eş bunu kendi anahtarıyla karşılaştırır.
+	// İki cihazın birlikte çalışması için anahtarların aynı olması gerekir.
+	if err := enc.Encode(peerRequest{Method: "assignTask", Token: m.Secret(), Task: &t}); err != nil {
 		m.runTaskLocal(t)
 		return
 	}

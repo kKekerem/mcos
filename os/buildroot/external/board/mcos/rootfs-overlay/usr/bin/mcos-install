@@ -1,177 +1,399 @@
 #!/bin/sh
-# mcos-install — Install MCOS live system to persistent disk (UEFI + BIOS GPT Dual Boot)
+# mcos-install — MCOS'u bir USB belleğe/diske KALICI olarak kurar.
+#                (OOBE sihirbazından çağrılır.)
+#
+# ══════════════════════════════════════════════════════════════════════════
+# TASARIM: neden "initramfs + kalıcı /data" modeli
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Eski sürüm tüm kök dosya sistemini ext4 bir bölüme kopyalıyor ve çekirdeği
+# "root=PARTUUID=..." ile başlatmaya çalışıyordu. Bu model üç sorun üretti:
+#
+#   1. Canlı ISO'nun cpio'su bir /init içerir (Buildroot ROOTFS_CPIO_ADD_INIT).
+#      Çekirdek initramfs'te /init bulursa onu PID 1 yapar ve root='u YOK SAYAR.
+#      initrd yüklenirse disk hiç mount edilmez; yüklenmezse ext4 kökün
+#      kusursuz olması gerekir.
+#   2. "root=LABEL=..." çekirdek tarafından desteklenmez → VFS panic.
+#   3. Tüm rootfs'i kopyalamak yavaş ve her cp hatası sessizce yutuluyordu.
+#
+# Bu sürüm, canlı sistemin ZATEN çalışan boot modelini kullanır:
+#
+#   * Sistem initramfs'ten çalışır (RAM'de, hızlı, güç kesintisine dayanıklı).
+#   * KALICILIK ikinci bölümdedir: ext4, etiket "MCOS-DATA". Açılışta S99mcos
+#     onu mcos-findfs ile bulup /data'ya bağlar. Java kurulumları, sunucular
+#     ve config.json /data altında yaşadığı için reboot'ta KORUNUR.
+#
+# Bu model QEMU'da hem BIOS hem UEFI ile boot ederek doğrulandı
+# (scripts/exp-grub-dd.sh + scripts/boottest.sh) ve scripts/mkusb.sh'nin
+# ürettiği imajlarla birebir aynıdır — tek boot modeli, tek kod yolu.
+#
+# ══════════════════════════════════════════════════════════════════════════
+# TASARIM: neden hedefte grub-install ÇAĞRILMIYOR
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Hedef rootfs'te grub-install, grub-mkimage ve /usr/lib/grub/i386-pc HİÇ YOK
+# (ölçüldü: scripts/probe-target-boot.sh). Eski kod
+#
+#     if command -v grub-install >/dev/null 2>&1; then ... fi
+#
+# kontrolüne takılıp SESSİZCE hiçbir önyükleyici yazmıyordu: kurulum
+# "başarılı" görünüyor, ama BIOS diski bootable görmüyordu. Kullanıcının
+# bildirdiği hata tam olarak buydu.
+#
+# Artık önyükleyici parçaları BUILD ZAMANINDA üretilip rootfs'e gömülüyor
+# (board/mcos/post-build.sh → /usr/lib/mcos/boot/). Burada yalnızca dd ve cp
+# yapılır; hedefte hiçbir önyükleyici aracına ihtiyaç yoktur.
 
-set -e
+set -eu
+
+STATUS_FILE=/tmp/mcos-install.status
+LOG_FILE=/tmp/mcos-install.log
+TARGET_MNT=/mnt/mcos-target
+BOOTLIB=/usr/lib/mcos/boot
+
+# Boot bölümü: çekirdek (~10 MB) + initramfs (~122 MB) + pay.
+BOOT_MB=768
 
 log() {
-    echo -e "\n>> mcos-install: $*\n"
-    echo "$*" >> /tmp/mcos-install.log 2>/dev/null || true
+    printf '\n>> mcos-install: %s\n' "$*"
+    printf '%s\n' "$*" >>"$LOG_FILE" 2>/dev/null || true
 }
 
+# Panel bu dosyayı "yüzde|mesaj" olarak okur (panel/view_setup.go).
 status() {
-    pct="$1"
-    msg="$2"
-    log "$msg"
-    echo "$pct|$msg" > /tmp/mcos-install.status 2>/dev/null || true
+    log "$2"
+    printf '%s|%s\n' "$1" "$2" >"$STATUS_FILE" 2>/dev/null || true
 }
 
-TARGET="$1"
-if [ -z "$TARGET" ]; then
-    echo "Kullanım: mcos-install /dev/sdX"
+cleanup() {
+    umount "$TARGET_MNT/boot" 2>/dev/null || true
+    umount "$TARGET_MNT" 2>/dev/null || true
+    rmdir "$TARGET_MNT/boot" "$TARGET_MNT" 2>/dev/null || true
+}
+
+# fail: kurulumu anlaşılır bir Türkçe mesajla ve sıfırdan farklı çıkış koduyla
+# bitirir. SESSİZ BAŞARISIZLIK YOK — panel mesajı doğrudan kullanıcıya gösterir.
+fail() {
+    log "HATA: $*"
+    printf 'HATA|%s\n' "$*" >"$STATUS_FILE" 2>/dev/null || true
+    cleanup
+    printf 'mcos-install başarısız: %s\n' "$*" >&2
     exit 1
+}
+
+need() {
+    command -v "$1" >/dev/null 2>&1 || fail "gerekli araç bulunamadı: $1"
+}
+
+# ── Hedef aygıtı doğrula ────────────────────────────────────────────────────
+
+TARGET="${1:-}"
+[ -n "$TARGET" ] || { printf 'Kullanım: mcos-install /dev/sdX\n' >&2; exit 2; }
+[ -b "$TARGET" ] || fail "geçersiz blok aygıtı: $TARGET"
+
+# Üzerinde çalıştığımız medyaya kurmayı reddet: kendi altımızdaki diski
+# biçimlendirmek sistemi anında bozar.
+if [ -r /proc/mounts ]; then
+    while read -r dev mp _rest; do
+        case "$dev" in
+            "$TARGET"*)
+                case "$mp" in
+                    /|/boot|/data)
+                        fail "$TARGET şu anda sistem tarafından kullanılıyor ($mp) — başka bir aygıt seçin"
+                        ;;
+                esac
+                ;;
+        esac
+    done < /proc/mounts
 fi
 
-if [ ! -b "$TARGET" ]; then
-    echo "Hata: Geçersiz hedef aygıt $TARGET"
-    exit 1
+need parted
+need mkfs.vfat
+need mkfs.ext4
+need dd
+need od
+need partprobe
+
+: >"$LOG_FILE" 2>/dev/null || true
+
+# ── Önyükleyici parçaları gömülü mü? ────────────────────────────────────────
+#
+# Bunlar olmadan kurulum boot ETMEZ. En başta kontrol edilir: kullanıcı 5
+# dakika bekleyip sonunda boot etmeyen bir disk almasın.
+
+HAVE_BIOS=0
+HAVE_UEFI=0
+[ -f "$BOOTLIB/boot.img" ] && [ -f "$BOOTLIB/core.img" ] && HAVE_BIOS=1
+[ -f "$BOOTLIB/BOOTX64.EFI" ] && HAVE_UEFI=1
+
+if [ "$HAVE_BIOS" = 0 ] && [ "$HAVE_UEFI" = 0 ]; then
+    fail "önyükleyici dosyaları imajda yok ($BOOTLIB). Bu MCOS imajı kurulum için derlenmemiş; ISO'yu yeniden derleyin."
+fi
+log "önyükleyici durumu: BIOS=$HAVE_BIOS UEFI=$HAVE_UEFI"
+
+# Çekirdek ve initramfs'i canlı sistemde bul.
+KERNEL=""
+for k in /boot/bzImage /bzImage; do
+    [ -f "$k" ] && { KERNEL="$k"; break; }
+done
+[ -n "$KERNEL" ] || fail "çekirdek (bzImage) canlı sistemde bulunamadı"
+
+# initramfs: post-build onu rootfs'ten SİLER (kendini özyinelemeli
+# paketlememesi için), bu yüzden boot medyasından okunur.
+INITRD=""
+for i in /boot/initrd.img /initrd.img "$BOOTLIB/initrd.img"; do
+    [ -f "$i" ] && { INITRD="$i"; break; }
+done
+if [ -z "$INITRD" ]; then
+    # Boot medyasını bulup oradan al: canlı sistem ondan boot etti.
+    for lbl in MCOS-BOOT MCOS MCOS_LIVE; do
+        part="$(/usr/bin/mcos-findfs "$lbl" 2>/dev/null || true)"
+        [ -n "$part" ] || continue
+        mkdir -p /mnt/mcos-src
+        if mount -o ro "$part" /mnt/mcos-src 2>/dev/null; then
+            for i in /mnt/mcos-src/boot/initrd.img /mnt/mcos-src/initrd.img; do
+                [ -f "$i" ] && { INITRD="$i"; break; }
+            done
+            [ -n "$INITRD" ] && break
+            umount /mnt/mcos-src 2>/dev/null || true
+        fi
+    done
+fi
+[ -n "$INITRD" ] || fail "initramfs (initrd.img) bulunamadı — boot medyası okunamadı"
+log "çekirdek=$KERNEL initramfs=$INITRD"
+
+KSIZE_MB=$(( ( $(stat -c%s "$KERNEL") + $(stat -c%s "$INITRD") ) / 1048576 + 16 ))
+[ "$BOOT_MB" -ge "$KSIZE_MB" ] || BOOT_MB="$KSIZE_MB"
+
+# ── 1/7 Bölümleme ───────────────────────────────────────────────────────────
+#
+# MBR (msdos) seçildi, GPT değil: MBR'li bir FAT32 bölümünde
+# /EFI/BOOT/BOOTX64.EFI bulunan disk, hem Legacy BIOS hem de çoğu UEFI
+# firmware'i tarafından boot edilir. Böylece TEK disk iki firmware türünde de
+# çalışır ve kullanıcıya "hangisini seçeyim" sorusu sorulmaz.
+
+status 5 "[1/7] Bölüm tablosu oluşturuluyor: $TARGET"
+cleanup
+
+# Eski imzaları temizle: kalıntı bir GPT, MBR'yi gölgeleyip firmware'i
+# şaşırtabilir.
+dd if=/dev/zero of="$TARGET" bs=1M count=17 status=none 2>/dev/null || true
+# Diskin SONUNDAKİ yedek GPT başlığını da sil.
+TOTAL_SECTORS="$(blockdev --getsz "$TARGET" 2>/dev/null || echo 0)"
+if [ "$TOTAL_SECTORS" -gt 4096 ]; then
+    dd if=/dev/zero of="$TARGET" bs=512 seek=$(( TOTAL_SECTORS - 2048 )) count=2048 \
+        status=none 2>/dev/null || true
 fi
 
-status "5" "[1/6] MBR bölüm tablosu oluşturuluyor: $TARGET"
-# Clear partition table header
-dd if=/dev/zero of="$TARGET" bs=1M count=10 status=none 2>/dev/null || true
-
-# Partitioning: MBR (msdos) with Boot ESP FAT32 (1MB-513MB) + Root EXT4 (513MB-100%)
-# MBR partition table with active boot flag is universally recognized by 100% of Legacy BIOS and UEFI firmwares!
-parted -s "$TARGET" mklabel msdos
-parted -s "$TARGET" mkpart primary fat32 1MiB 513MiB
-parted -s "$TARGET" set 1 boot on
+parted -s "$TARGET" mklabel msdos || fail "bölüm tablosu oluşturulamadı"
+parted -s "$TARGET" mkpart primary fat32 1MiB "$(( BOOT_MB + 1 ))MiB" \
+    || fail "boot bölümü oluşturulamadı"
+parted -s "$TARGET" set 1 boot on || fail "boot bayrağı ayarlanamadı"
 parted -s "$TARGET" set 1 lba on 2>/dev/null || true
-parted -s "$TARGET" mkpart primary ext4 513MiB 100%
+parted -s "$TARGET" mkpart primary ext4 "$(( BOOT_MB + 1 ))MiB" 100% \
+    || fail "kalıcı veri bölümü oluşturulamadı"
 
-status "15" "[2/6] Bölüm tablosu çekirdeğe bildiriliyor..."
-# Allow kernel to re-read partition table
+status 12 "[2/7] Bölüm tablosu çekirdeğe bildiriliyor..."
 partprobe "$TARGET" 2>/dev/null || partx -a "$TARGET" 2>/dev/null || true
-udevadm settle 2>/dev/null || sleep 2
+# Bu imajda udev yok; udevadm settle her zaman başarısız olur, sabit bekleme.
+sleep 2
 
-# Determine partition paths (/dev/sda1 vs /dev/nvme0n1p1)
-if echo "$TARGET" | grep -q "[0-9]$"; then
-    BOOT_PART="${TARGET}p1"
-    ROOT_PART="${TARGET}p2"
+# Bölüm yolları: /dev/sda1 ile /dev/nvme0n1p1 ayrımı. Ayırt edici kural aygıt
+# adının RAKAMLA bitmesidir (nvme0n1, mmcblk0 → "p" eki).
+case "$TARGET" in
+    *[0-9]) BOOT_PART="${TARGET}p1"; DATA_PART="${TARGET}p2" ;;
+    *)      BOOT_PART="${TARGET}1";  DATA_PART="${TARGET}2"  ;;
+esac
+[ -b "$BOOT_PART" ] || fail "boot bölümü görünmedi: $BOOT_PART"
+[ -b "$DATA_PART" ] || fail "veri bölümü görünmedi: $DATA_PART"
+
+# ── 3/7 Dosya sistemleri ────────────────────────────────────────────────────
+
+status 22 "[3/7] Dosya sistemleri oluşturuluyor (FAT32 boot + ext4 kalıcı veri)..."
+mkfs.vfat -F 32 -n MCOS-BOOT "$BOOT_PART" >/dev/null 2>&1 \
+    || fail "boot bölümü biçimlendirilemedi ($BOOT_PART)"
+# ETİKET KRİTİK: S99mcos kalıcı bölümü "MCOS-DATA" etiketiyle arar.
+mkfs.ext4 -F -L MCOS-DATA "$DATA_PART" >/dev/null 2>&1 \
+    || fail "kalıcı veri bölümü biçimlendirilemedi ($DATA_PART)"
+
+# ── 4/7 Çekirdek + initramfs ────────────────────────────────────────────────
+
+status 35 "[4/7] Çekirdek ve sistem imajı kopyalanıyor..."
+mkdir -p "$TARGET_MNT/boot"
+mount "$BOOT_PART" "$TARGET_MNT/boot" || fail "boot bölümü bağlanamadı ($BOOT_PART)"
+mkdir -p "$TARGET_MNT/boot/boot/grub" "$TARGET_MNT/boot/EFI/BOOT"
+
+cp "$KERNEL" "$TARGET_MNT/boot/boot/bzImage" || fail "çekirdek kopyalanamadı (disk dolu olabilir)"
+status 55 "[4/7] Sistem imajı kopyalanıyor (~$(( $(stat -c%s "$INITRD") / 1048576 )) MB)..."
+cp "$INITRD" "$TARGET_MNT/boot/boot/initrd.img" || fail "sistem imajı kopyalanamadı (disk dolu olabilir)"
+
+# ── 5/7 Önyükleyici yapılandırması ──────────────────────────────────────────
+
+status 72 "[5/7] Önyükleyici yapılandırması yazılıyor..."
+
+# root= YOK ve olmamalı: sistem initramfs'ten çalışır (baştaki tasarım notu).
+# "quiet" de yok: bir şey ters giderse kullanıcı gerçek çekirdek mesajını
+# görmeli.
+# Çözünürlük ve komut satırı tanımı derleme sırasında buraya kopyalanır
+# (post-build.sh, kaynağı scripts/lib/display.sh). Böylece ISO, USB imajı ve
+# kurulu disk AYNI çözünürlük listesini kullanır — eskiden üçü farklıydı ve
+# aynı makine üç ayrı çözünürlükte açılıyordu.
+if [ -r /usr/lib/mcos/display.sh ]; then
+    . /usr/lib/mcos/display.sh
 else
-    BOOT_PART="${TARGET}1"
-    ROOT_PART="${TARGET}2"
+    # Gömülü yedek: imaj eski bir post-build ile derlendiyse kurulum yine de
+    # çalışsın. Değerler scripts/lib/display.sh ile aynı olmalı.
+    MCOS_GFXMODE='1920x1080x32,1920x1080,1680x1050,1600x900,1440x900,1366x768,1280x1024,1280x800,1280x720,1024x768,auto'
+    MCOS_CMDLINE_BASE='console=tty0 consoleblank=0 loglevel=4 fbcon=nodefer vt.global_cursor_default=0'
+    MCOS_CMDLINE_RECOVERY='console=tty0 nomodeset vga=normal loglevel=7'
 fi
 
-status "25" "[3/6] Dosya sistemleri oluşturuluyor (FAT32 Boot + EXT4 Root)..."
-mkfs.vfat -F 32 -n MCOS-BOOT "$BOOT_PART"
-mkfs.ext4 -F -L MCOS-ROOT "$ROOT_PART"
-
-udevadm settle 2>/dev/null || sleep 1
-ROOT_PARTUUID=$(blkid -s PARTUUID -o value "$ROOT_PART" 2>/dev/null || true)
-if [ -n "$ROOT_PARTUUID" ]; then
-    ROOT_CMDLINE="root=PARTUUID=$ROOT_PARTUUID rw rootwait rootdelay=5 console=tty0 consoleblank=0 quiet loglevel=3 fbcon=nodefer vt.global_cursor_default=0"
-else
-    ROOT_CMDLINE="root=LABEL=MCOS-ROOT rw rootwait rootdelay=5 console=tty0 consoleblank=0 quiet loglevel=3 fbcon=nodefer vt.global_cursor_default=0"
+# Kullanıcı ekran ayarlarından bir mod seçtiyse onu EN BAŞA koy; liste yine de
+# tamamı korunarak devam eder, böylece seçilen mod bu firmware'de yoksa sistem
+# yine açılır (tek değer yazsaydık kara ekran riski olurdu).
+GFXMODE="$MCOS_GFXMODE"
+if [ -r /data/mcos/display.conf ]; then
+    pref="$(sed -n 's/^gfxmode=//p' /data/mcos/display.conf | head -1)"
+    case "$pref" in
+        [0-9]*x[0-9]*) GFXMODE="$pref,$MCOS_GFXMODE" ;;
+    esac
 fi
 
-log "Bölümler bağlanıyor..."
-mkdir -p /mnt/target
-mount "$ROOT_PART" /mnt/target
-mkdir -p /mnt/target/boot /mnt/target/data /mnt/target/etc /mnt/target/var /mnt/target/run /mnt/target/tmp /mnt/target/dev /mnt/target/proc /mnt/target/sys
+CMDLINE="$MCOS_CMDLINE_BASE"
 
-status "35" "[4/6] Temel sistem dosyaları kopyalanıyor (/bin, /sbin, /etc)..."
-for d in bin sbin etc root data; do
-    if [ -d "/$d" ]; then
-        cp -a "/$d" /mnt/target/ 2>/dev/null || true
-    fi
-done
-
-status "50" "[4/6] Kütüphaneler ve modüller kopyalanıyor (/lib, /lib64)..."
-for d in lib lib64; do
-    if [ -d "/$d" ]; then
-        cp -a "/$d" /mnt/target/ 2>/dev/null || true
-    fi
-done
-
-status "65" "[4/6] Kullanıcı uygulamaları kopyalanıyor (/usr, /var)..."
-for d in usr var; do
-    if [ -d "/$d" ]; then
-        cp -a "/$d" /mnt/target/ 2>/dev/null || true
-    fi
-done
-
-if [ -d /run/mcos/data ]; then
-    cp -a /run/mcos/data/* /mnt/target/data/ 2>/dev/null || true
-fi
-
-if [ -f /data/config.json ]; then
-    cp /data/config.json /mnt/target/data/config.json 2>/dev/null || true
-fi
-
-# Essential /dev nodes required for init before devtmpfs mounts
-mknod -m 600 /mnt/target/dev/console c 5 1 2>/dev/null || true
-mknod -m 666 /mnt/target/dev/null c 1 3 2>/dev/null || true
-mknod -m 666 /mnt/target/dev/zero c 1 5 2>/dev/null || true
-
-status "80" "[5/6] Çekirdek ve Ön Yükleyici (GRUB2 UEFI + BIOS) kuruluyor..."
-mount "$BOOT_PART" /mnt/target/boot
-mkdir -p /mnt/target/boot/EFI/BOOT /mnt/target/boot/grub
-
-# Copy Linux Kernel bzImage to target boot partition
-for img in /boot/bzImage /mnt/cdrom/boot/bzImage /media/*/boot/bzImage; do
-    if [ -f "$img" ]; then
-        cp "$img" /mnt/target/boot/bzImage
-        cp "$img" /mnt/target/boot/EFI/BOOT/bzImage 2>/dev/null || true
-        break
-    fi
-done
-
-status "88" "[5/6] GRUB2 Ön Yükleyici diske yazılıyor (BIOS + UEFI Dual Boot)..."
-# 1. Install GRUB2 for UEFI and BIOS
-if command -v grub-install >/dev/null 2>&1; then
-    log "GRUB2 UEFI kuruluyor..."
-    grub-install --target=x86_64-efi --efi-directory=/mnt/target/boot --boot-directory=/mnt/target/boot --removable --recheck "$TARGET" 2>/dev/null || true
-    log "GRUB2 BIOS (Legacy) kuruluyor..."
-    grub-install --target=i386-pc --boot-directory=/mnt/target/boot --recheck "$TARGET" 2>/dev/null || true
-fi
-
-# Set MBR active boot flag on Partition 1 (0x80)
-sfdisk --activate "$TARGET" 1 2>/dev/null || true
-parted -s "$TARGET" set 1 boot on 2>/dev/null || true
-
-# 2. Standalone GRUB EFI or EFISTUB Fallback
-if command -v grub-mkimage >/dev/null 2>&1 && [ ! -f /mnt/target/boot/EFI/BOOT/BOOTX64.EFI ]; then
-    log "Standalone GRUB2 EFI executable üretiliyor..."
-    grub-mkimage -O x86_64-efi -o /mnt/target/boot/EFI/BOOT/BOOTX64.EFI -p "/EFI/BOOT" part_gpt part_msdos fat ext2 normal boot configfile linux search search_label search_fs_uuid search_part_uuid 2>/dev/null || true
-fi
-
-if [ ! -f /mnt/target/boot/EFI/BOOT/BOOTX64.EFI ] && [ -f /mnt/target/boot/bzImage ]; then
-    log "EFISTUB fallback (Kernel EFI STUB) kopyalanıyor..."
-    cp /mnt/target/boot/bzImage /mnt/target/boot/EFI/BOOT/BOOTX64.EFI
-    echo "\\EFI\\BOOT\\BOOTX64.EFI $ROOT_CMDLINE" > /mnt/target/boot/startup.nsh
-fi
-
-status "94" "[6/6] GRUB2 yapılandırma dosyaları oluşturuluyor..."
-# 3. Create unified grub.cfg for installed system in all search paths
-GRUB_CFG_CONTENT="set timeout=2
+GRUB_CFG="set timeout=3
 set default=0
 insmod all_video
 insmod gfxterm
-insmod part_gpt
-insmod part_msdos
-insmod ext2
-insmod fat
+# ÇÖZÜNÜRLÜK: ekran ayarları ekranı yalnızca aşağıdaki satırı yeniden yazar.
+set gfxmode=$GFXMODE
+set gfxpayload=keep
+terminal_output gfxterm
 
 menuentry \"MCOS (Minecraft Server OS)\" {
-    search --no-floppy --label --set=root MCOS-ROOT
-    linux /boot/bzImage $ROOT_CMDLINE
+    set gfxpayload=keep
+    linux /boot/bzImage $CMDLINE
+    initrd /boot/initrd.img
 }
 
-menuentry \"MCOS (BOOT Bölümü Fallback)\" {
-    search --no-floppy --label --set=root MCOS-BOOT
-    linux /bzImage $ROOT_CMDLINE
+menuentry \"MCOS (kurtarma — VGA metin modu, ayrıntılı günlük)\" {
+    set gfxpayload=text
+    linux /boot/bzImage $MCOS_CMDLINE_RECOVERY
+    initrd /boot/initrd.img
 }
 "
+printf '%s' "$GRUB_CFG" > "$TARGET_MNT/boot/boot/grub/grub.cfg" \
+    || fail "grub.cfg yazılamadı"
+printf '%s' "$GRUB_CFG" > "$TARGET_MNT/boot/EFI/BOOT/grub.cfg" || true
 
-echo "$GRUB_CFG_CONTENT" > /mnt/target/boot/grub/grub.cfg
-echo "$GRUB_CFG_CONTENT" > /mnt/target/boot/EFI/BOOT/grub.cfg
-mkdir -p /mnt/target/boot/boot/grub
-echo "$GRUB_CFG_CONTENT" > /mnt/target/boot/boot/grub/grub.cfg
+# ── 6/7 Önyükleyiciyi diske göm ─────────────────────────────────────────────
 
-status "100" "[6/6] Kurulum başarıyla tamamlandı!"
+status 82 "[6/7] Önyükleyici diske yazılıyor..."
+
+INSTALLED_ANY=0
+
+if [ "$HAVE_UEFI" = 1 ]; then
+    if cp "$BOOTLIB/BOOTX64.EFI" "$TARGET_MNT/boot/EFI/BOOT/BOOTX64.EFI"; then
+        log "UEFI önyükleyici yazıldı (/EFI/BOOT/BOOTX64.EFI)"
+        INSTALLED_ANY=1
+    else
+        log "UYARI: UEFI önyükleyici kopyalanamadı"
+    fi
+fi
+
+# BIOS: FAT bölümünü ayırmadan önce dd yapmak sorun değil (farklı alanlar),
+# ama düzen için önce senkronize edip ayırıyoruz.
 sync
-umount /mnt/target/boot || true
-umount /mnt/target || true
-rm -rf /mnt/target || true
+umount "$TARGET_MNT/boot" || fail "boot bölümü ayrılamadı"
+
+if [ "$HAVE_BIOS" = 1 ]; then
+    # boot.img'in ilk 440 baytı MBR bootstrap'tır. 440..511 arası bölüm
+    # tablosu ve 0x55AA imzasıdır — onlara DOKUNULMAZ.
+    if ! dd if="$BOOTLIB/boot.img" of="$TARGET" bs=440 count=1 conv=notrunc status=none; then
+        fail "MBR önyükleyici yazılamadı"
+    fi
+    # core.img sektör 1'den itibaren MBR boşluğuna. p1 1 MiB'de başladığı için
+    # 2047 sektör (≈1 MB) yer var; core.img ~30 KB.
+    CORE_SECTORS=$(( ( $(stat -c%s "$BOOTLIB/core.img") + 511 ) / 512 ))
+    if [ "$CORE_SECTORS" -ge 2047 ]; then
+        fail "core.img MBR boşluğuna sığmıyor ($CORE_SECTORS sektör)"
+    fi
+    if ! dd if="$BOOTLIB/core.img" of="$TARGET" bs=512 seek=1 conv=notrunc status=none; then
+        fail "GRUB core imajı yazılamadı"
+    fi
+    log "BIOS önyükleyici yazıldı (MBR + $CORE_SECTORS sektör core.img)"
+    INSTALLED_ANY=1
+fi
+
+[ "$INSTALLED_ANY" = 1 ] || fail "hiçbir önyükleyici kurulamadı — disk boot etmez"
+
+# ── 7/7 Kalıcı veriyi taşı ve doğrula ───────────────────────────────────────
+
+status 90 "[7/7] Ayarlar kalıcı bölüme taşınıyor..."
+
+# OOBE'de girilen ayarlar (config.json, WiFi, tema, kaynak bütçesi) canlı
+# sistemin /data'sında duruyor. Yeni kalıcı bölüme kopyalanmazsa kullanıcı
+# reboot'tan sonra sihirbazı BAŞTAN doldurmak zorunda kalır.
+mkdir -p "$TARGET_MNT"
+if mount "$DATA_PART" "$TARGET_MNT"; then
+    mkdir -p "$TARGET_MNT/servers" "$TARGET_MNT/java" "$TARGET_MNT/log"
+    if [ -d /data ]; then
+        cp -a /data/. "$TARGET_MNT/" 2>/dev/null || true
+    fi
+    if [ -f "$TARGET_MNT/config.json" ]; then
+        log "OOBE ayarları kalıcı bölüme taşındı"
+    else
+        log "not: taşınacak config.json yoktu (ilk kurulum)"
+    fi
+    sync
+    umount "$TARGET_MNT" || log "UYARI: veri bölümü ayrılamadı"
+else
+    log "UYARI: kalıcı veri bölümü bağlanamadı; ayarlar taşınamadı"
+fi
+
+# ── Son doğrulama: gerçekten boot edebilir mi? ──────────────────────────────
+
+status 96 "[7/7] Kurulum doğrulanıyor..."
+
+verify_fail=""
+
+# MBR bootstrap + imza (BIOS için zorunlu).
+if [ "$HAVE_BIOS" = 1 ]; then
+    first4="$(dd if="$TARGET" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    case "$first4" in
+        ""|00000000) verify_fail="MBR bootstrap yazılmamış" ;;
+    esac
+    sig="$(dd if="$TARGET" bs=1 skip=510 count=2 status=none 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    [ "$sig" = "55aa" ] || verify_fail="0x55AA boot imzası yok (bulunan: $sig)"
+fi
+
+# Çekirdek ve initramfs FAT bölümünde mi?
+mkdir -p "$TARGET_MNT/boot"
+if mount -o ro "$BOOT_PART" "$TARGET_MNT/boot" 2>/dev/null; then
+    [ -f "$TARGET_MNT/boot/boot/bzImage" ]   || verify_fail="çekirdek boot bölümünde yok"
+    [ -f "$TARGET_MNT/boot/boot/initrd.img" ] || verify_fail="sistem imajı boot bölümünde yok"
+    [ -f "$TARGET_MNT/boot/boot/grub/grub.cfg" ] || verify_fail="grub.cfg yok"
+    if [ "$HAVE_UEFI" = 1 ]; then
+        [ -f "$TARGET_MNT/boot/EFI/BOOT/BOOTX64.EFI" ] || verify_fail="UEFI önyükleyici yok"
+    fi
+    umount "$TARGET_MNT/boot" 2>/dev/null || true
+else
+    verify_fail="boot bölümü doğrulama için bağlanamadı"
+fi
+
+# Kalıcı bölümün etiketi doğru mu? (Yanlışsa Java/sunucular kalıcı olmaz.)
+lbl_dev="$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)"
+[ -n "$lbl_dev" ] || verify_fail="MCOS-DATA etiketli bölüm bulunamadı — kalıcılık çalışmaz"
+
+[ -z "$verify_fail" ] || fail "kurulum doğrulanamadı: $verify_fail"
+
+sync
+cleanup
+
+FW="BIOS + UEFI"
+[ "$HAVE_BIOS" = 1 ] || FW="UEFI"
+[ "$HAVE_UEFI" = 1 ] || FW="BIOS"
+status 100 "[7/7] Kurulum tamamlandı ($FW) — USB'yi çıkarıp yeniden başlatın"
+log "kurulum başarılı: boot=$BOOT_PART veri=$DATA_PART firmware=$FW"
 
 exit 0

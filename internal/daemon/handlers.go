@@ -9,10 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"mcos/internal/files"
 	"mcos/internal/ipc"
 	"mcos/internal/java"
 	"mcos/internal/model"
 	"mcos/internal/portmgr"
+	"mcos/internal/server"
 	"mcos/internal/store"
 	"mcos/internal/sysmon"
 	"mcos/internal/tier"
@@ -88,6 +90,14 @@ func (d *Daemon) handleSystemStatus(_ context.Context, _ json.RawMessage) (any, 
 
 	st.ClockSynced = timesync.Synced()
 	st.TurboOn = cfg.Turbo
+
+	// Takılı çıkarılabilir depolama. DetectUSB hiçbir şeyi BAĞLAMAZ (yalnızca
+	// /sys/block + /proc/mounts okur), bu yüzden durum döngüsünde her çağrıda
+	// güvenle hesaplanabilir. Panel bunu sol menüde "USB" bölümünü göstermek
+	// için kullanır; jar taraması — ki bölümleri geçici olarak bağlar — yalnızca
+	// kullanıcı o ekrana girdiğinde yapılır.
+	usb := files.DetectUSB()
+	st.USB = model.USBStatus{Present: usb.Present, Partitions: usb.Partitions}
 	// Turbo forces the effective tier to HIGH: full polling + every adaptive
 	// feature on, so the box throws all of itself at the running servers.
 	if cfg.Turbo {
@@ -115,12 +125,26 @@ func (d *Daemon) handleConfigSet(_ context.Context, raw json.RawMessage) (any, e
 	if err := decode(raw, &cfg); err != nil {
 		return nil, err
 	}
+
+	// Cluster anahtarını koru: istemciler tüm config nesnesini geri gönderiyor,
+	// alanı bilmeyen (veya eski) bir istemci onu boş göndererek eşleştirmeyi
+	// sessizce bozabilirdi.
+	d.mu.RLock()
+	prevSecret := d.cfg.Cluster.Secret
+	d.mu.RUnlock()
+	if strings.TrimSpace(cfg.Cluster.Secret) == "" {
+		cfg.Cluster.Secret = prevSecret
+	}
+
 	if err := store.SaveConfig(d.cfgPath, &cfg); err != nil {
 		return nil, err
 	}
 	d.mu.Lock()
 	d.cfg = &cfg
 	d.mu.Unlock()
+
+	// cluster.enabled çalışma zamanında değişebilir; portu buna göre aç/kapat.
+	d.applyClusterFromConfig()
 	return ipc.OKResult{OK: true}, nil
 }
 
@@ -396,7 +420,10 @@ func (d *Daemon) handleServerStart(ctx context.Context, raw json.RawMessage) (an
 		srv.JVMFlags = java.ProfileTurbo
 	}
 	if err := d.servers.Start(ctx, srv); err != nil {
-		return nil, &ipc.Error{Code: ipc.CodeConflict, Message: err.Error()}
+		// Kullanıcıya Türkçe, eyleme dönüştürülebilir mesaj; teknik ayrıntı
+		// günlüğe. Eskiden ham Go hatası panele düşüyordu.
+		d.log.Errorf("daemon: %s başlatılamadı: %v", srv.ID, err)
+		return nil, &ipc.Error{Code: ipc.CodeConflict, Message: server.UserMessage(err)}
 	}
 
 	// Deep integration: auto-open a Serveo tunnel when the server enables it.
@@ -563,10 +590,31 @@ func (d *Daemon) handleBackupDelete(_ context.Context, raw json.RawMessage) (any
 
 // ── Files ───────────────────────────────────────────────────────────────
 
+// requireServer verifies that a server id refers to a real, registered server
+// BEFORE any filesystem path is built from it.
+//
+// Eskiden dört files.* handler'ı da p.ServerID'yi doğrudan files.Manager'a
+// geçiyordu. Paths.ServerData(id) = Join(Root,"servers",id,"data") olduğu için
+// id=".." veri kökünün dışına çıkıyor, resolve()'un ön ek kontrolü de AYNI
+// kaçmış kökle yapıldığından kontrol geçiyordu. Doğru desen kod tabanında
+// zaten vardı (handlers_catalog.go GetServer çağırıyor), burada eksikti.
+func (d *Daemon) requireServer(id string) *ipc.Error {
+	if err := files.ValidServerID(id); err != nil {
+		return &ipc.Error{Code: ipc.CodeInvalidParams, Message: err.Error()}
+	}
+	if _, err := d.store.GetServer(id); err != nil {
+		return &ipc.Error{Code: ipc.CodeNotFound, Message: "sunucu bulunamadı: " + id}
+	}
+	return nil
+}
+
 func (d *Daemon) handleFilesList(_ context.Context, raw json.RawMessage) (any, error) {
 	var p ipc.FilesListParams
 	if err := decode(raw, &p); err != nil {
 		return nil, err
+	}
+	if e := d.requireServer(p.ServerID); e != nil {
+		return nil, e
 	}
 	entries, err := d.files.List(p.ServerID, p.Path)
 	if err != nil {
@@ -580,6 +628,9 @@ func (d *Daemon) handleFilesRead(_ context.Context, raw json.RawMessage) (any, e
 	if err := decode(raw, &p); err != nil {
 		return nil, err
 	}
+	if e := d.requireServer(p.ServerID); e != nil {
+		return nil, e
+	}
 	content, size, err := d.files.Read(p.ServerID, p.Path)
 	if err != nil {
 		return nil, err
@@ -592,6 +643,9 @@ func (d *Daemon) handleFilesWrite(_ context.Context, raw json.RawMessage) (any, 
 	if err := decode(raw, &p); err != nil {
 		return nil, err
 	}
+	if e := d.requireServer(p.ServerID); e != nil {
+		return nil, e
+	}
 	if err := d.files.Write(p.ServerID, p.Path, p.ContentBase64); err != nil {
 		return nil, err
 	}
@@ -602,6 +656,9 @@ func (d *Daemon) handleFilesDelete(_ context.Context, raw json.RawMessage) (any,
 	var p ipc.FilesDeleteParams
 	if err := decode(raw, &p); err != nil {
 		return nil, err
+	}
+	if e := d.requireServer(p.ServerID); e != nil {
+		return nil, e
 	}
 	if err := d.files.Delete(p.ServerID, p.Path); err != nil {
 		return nil, err

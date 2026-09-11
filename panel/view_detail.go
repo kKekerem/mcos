@@ -21,8 +21,22 @@ var detailTabs = []string{
 	"Dosyalar", "Dünyalar", "Yedekler", "Erişim", "İnternete Aç", "Performans", "Ağ",
 }
 
+// detailTabIcons, detailTabs ile BİREBİR aynı sırada olmalıdır.
+// Hepsi tek kolon genişliğinde (bkz. scripts/check-glyph-width.py); emoji
+// kullanılmaz, yoksa sekme şeridi hizası kayar.
 var detailTabIcons = []string{
-	"ℹ", "⌁", "⚙", "👥", "🧩", "🗂", "🌍", "💾", "🔐", "🌐", "📊", "📡",
+	theme.IconInfo,     // Genel
+	theme.IconConsole,  // Konsol
+	theme.IconSettings, // Ayarlar
+	theme.IconPlayers,  // Oyuncular
+	theme.IconSoftware, // Yazılım
+	theme.IconFiles,    // Dosyalar
+	theme.IconWorlds,   // Dünyalar
+	theme.IconBackup,   // Yedekler
+	theme.IconAccess,   // Erişim
+	theme.IconTunnel,   // İnternete Aç
+	theme.IconPerf,     // Performans
+	theme.IconNetwork,  // Ağ
 }
 
 const (
@@ -72,6 +86,13 @@ type detailModel struct {
 	settingCursor int
 	settingMode   string // e.g. "ram", "view", "sim"
 	settingInput  textinput.Model
+
+	// USB Mod Picker state
+	usbMode       bool
+	usbItems      []model.USBJar
+	usbSelected   map[int]bool
+	usbCursor     int
+	usbStatusNote string
 }
 
 func newDetail(th *theme.Theme, id string) *detailModel {
@@ -132,6 +153,50 @@ func (d *detailModel) handleKey(m tea.KeyMsg, cl *Client) (bool, tea.Cmd) {
 			d.catalogInput, cmd = d.catalogInput.Update(m)
 			return false, cmd
 		}
+	}
+
+	// USB Mod Picker mode
+	if d.usbMode {
+		switch m.String() {
+		case "esc":
+			d.usbMode = false
+			return false, nil
+		case "up", "k":
+			if len(d.usbItems) > 0 {
+				d.usbCursor = (d.usbCursor - 1 + len(d.usbItems)) % len(d.usbItems)
+			}
+			return false, nil
+		case "down", "j":
+			if len(d.usbItems) > 0 {
+				d.usbCursor = (d.usbCursor + 1) % len(d.usbItems)
+			}
+			return false, nil
+		case " ", "space":
+			if len(d.usbItems) > 0 {
+				d.usbSelected[d.usbCursor] = !d.usbSelected[d.usbCursor]
+			}
+			return false, nil
+		case "enter":
+			// Dilim üzerinden sırayla gez: map üzerinde dolaşmak Go'da rastgele
+			// sıra verir, bu da kurulum sırasını ve hata mesajlarını her
+			// çağrıda değiştirirdi.
+			var chosen []model.USBJar
+			for i, it := range d.usbItems {
+				if d.usbSelected[i] {
+					chosen = append(chosen, it)
+				}
+			}
+			if len(chosen) == 0 {
+				d.usbStatusNote = "Boşluk (Space) tuşu ile en az bir dosya seçin."
+				return false, nil
+			}
+			d.usbMode = false
+			return false, doUSBInstall(cl, d.id, chosen)
+		case "r":
+			d.usbStatusNote = "Yeniden taranıyor..."
+			return false, doUSBScan(cl)
+		}
+		return false, nil
 	}
 
 	// Settings input mode
@@ -318,6 +383,13 @@ func (d *detailModel) playersKey(m tea.KeyMsg, cl *Client) (tea.Cmd, bool) {
 // softwareKey handles the catalog browser on the Software tab.
 func (d *detailModel) softwareKey(m tea.KeyMsg, cl *Client) (tea.Cmd, bool) {
 	switch m.String() {
+	case "u", "U":
+		d.usbMode = true
+		d.usbStatusNote = "USB bellekteki .jar dosyaları taranıyor..."
+		if d.usbSelected == nil {
+			d.usbSelected = make(map[int]bool)
+		}
+		return doUSBScan(cl), true
 	case "/":
 		d.catalogFocused = true
 		return d.catalogInput.Focus(), true
@@ -441,7 +513,7 @@ func (d *detailModel) view(w, h int) string {
 	s := d.server
 
 	// Header: name + state + meta.
-	header := th.Title.Render("🎮 "+s.Name) + "  " + stateBadge(th, s.State) +
+	header := th.Title.Render(theme.IconServer+" "+s.Name) + "  " + stateBadge(th, s.State) +
 		th.Muted.Render(fmt.Sprintf("   %s · MC %s · :%d", s.Software, s.MCVersion, s.Port))
 
 	tabBar := d.renderTabBar(w)
@@ -461,21 +533,19 @@ func (d *detailModel) view(w, h int) string {
 // "Tab (i/N · sol/sağ)" pill so the bar never wraps and shifts the layout.
 func (d *detailModel) renderTabBar(w int) string {
 	th := d.th
-	parts := make([]string, len(detailTabs))
+	// Chip kullanılır, Button DEĞİL: Button çerçeveli ve 3 satırdır, sekme
+	// şeridi tek satır olmalı.
+	chips := make([]string, len(detailTabs))
 	for i, name := range detailTabs {
-		label := detailTabIcons[i] + " " + name
-		if i == d.tab {
-			parts[i] = RenderButton(th, label, "", true)
-		} else {
-			parts[i] = th.MenuItem.Render(label)
-		}
+		chips[i] = Chip(th, detailTabIcons[i]+" "+name, i == d.tab)
 	}
-	joined := strings.Join(parts, " ")
+	joined := ChipBar(th, chips)
 	if lipgloss.Width(joined) <= w {
 		return joined
 	}
-	return RenderButton(th, detailTabIcons[d.tab]+" "+detailTabs[d.tab], "", true) + " " +
-		th.Muted.Render(fmt.Sprintf("(%d/%d · sol/sağ)", d.tab+1, len(detailTabs)))
+	// Sığmıyorsa yalnızca aktif sekme + konum göstergesi.
+	return Chip(th, detailTabIcons[d.tab]+" "+detailTabs[d.tab], true) + "  " +
+		th.Muted.Render(fmt.Sprintf("%d/%d  %s/%s", d.tab+1, len(detailTabs), theme.IconLeft, theme.IconRight))
 }
 
 // tabBody renders the active tab, hard-clamped to h lines so an over-long tab
@@ -652,7 +722,65 @@ func (d *detailModel) playersView(w, h int) string {
 	return head + "\n\n" + scrollList(th, rows, d.playerCursor, listH) + "\n" + help
 }
 
+func (d *detailModel) handleUSBScan(msg usbScanMsg) {
+	d.usbItems = msg.items
+	d.usbSelected = make(map[int]bool)
+	d.usbCursor = 0
+	if msg.err != nil {
+		d.usbStatusNote = "USB Tarama Hatası: " + msg.err.Error()
+	} else if len(msg.items) == 0 {
+		d.usbStatusNote = "USB bellekte hiç .jar dosyası bulunamadı. Lütfen USB belleği takıp 'r' tuşuna basın."
+	} else {
+		d.usbStatusNote = fmt.Sprintf("%d adet .jar dosyası bulundu. [Space] ile seçip [Enter] ile kurun.", len(msg.items))
+	}
+}
+
+func (d *detailModel) usbView(w, h int) string {
+	th := d.th
+	var out []string
+	out = append(out, th.CardTitle.Render(theme.IconUSB+" USB'den Mod / Eklenti Yükle"))
+	out = append(out, th.Muted.Render(d.usbStatusNote))
+	out = append(out, "")
+
+	if len(d.usbItems) == 0 {
+		out = append(out, th.Val.Render("  [!] USB belleğinizi takın ve 'r' tuşuna basarak taranmasını sağlayın."))
+	} else {
+		rows := make([]string, len(d.usbItems))
+		for i, item := range d.usbItems {
+			check := "[ ]"
+			if d.usbSelected[i] {
+				check = "[x]"
+			}
+			line := fmt.Sprintf("%s %-30s %s (%s)", check, truncate(item.Name, 30), humanSize(item.SizeBytes), item.Origin())
+			if i == d.usbCursor {
+				rows[i] = th.Accent.Bold(true).Render(theme.IconCursor + " " + line)
+			} else {
+				rows[i] = "  " + th.Val.Render(line)
+			}
+		}
+		listH := h - 8
+		if listH < 3 {
+			listH = 3
+		}
+		out = append(out, scrollList(th, rows, d.usbCursor, listH))
+	}
+
+	out = append(out, "")
+	out = append(out, RenderKeyHints(th, []KeyHint{
+		{"↑/↓", "gezin"},
+		{"Space", "seç/kaldır"},
+		{"Enter", "seçilenleri kur"},
+		{"r", "yeniden tara"},
+		{"Esc", "vazgeç"},
+	}, w))
+
+	return strings.Join(out, "\n")
+}
+
 func (d *detailModel) softwareView(w, h int) string {
+	if d.usbMode {
+		return d.usbView(w, h)
+	}
 	th := d.th
 	s := d.server
 	var out []string
@@ -663,6 +791,11 @@ func (d *detailModel) softwareView(w, h int) string {
 		kv(th, "Plugin/Mod", yesno(s.SupportsPlugins)+" / "+yesno(s.SupportsMods)),
 		"",
 	)
+	out = append(out, RenderKeyHints(th, []KeyHint{
+		{"/", "Modrinth internetten ara"},
+		{"u", "USB belleğin içindeki jarları tara ve yükle"},
+	}, w), "")
+
 	// Catalog search box.
 	if d.catalogFocused {
 		out = append(out, d.catalogInput.View())
@@ -675,7 +808,7 @@ func (d *detailModel) softwareView(w, h int) string {
 	out = append(out, "")
 	headStr := strings.Join(out, "\n")
 	if len(d.catalogResults) == 0 {
-		return headStr + "\n" + th.Muted.Render("(sonuç yok — '/' ile arama yapın)")
+		return headStr + "\n" + th.Muted.Render("(sonuç yok — '/' ile internetten arayın veya 'u' ile USB'den yükleyin)")
 	}
 	rows := make([]string, len(d.catalogResults))
 	for i, it := range d.catalogResults {

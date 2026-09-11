@@ -2,6 +2,7 @@ package panel
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -33,15 +34,15 @@ type App struct {
 	section       int
 	focus         int
 
-	status    *systemStatus
-	servers   []*serverInfo
-	java      []javaRuntime
+	status       *systemStatus
+	servers      []*serverInfo
+	java         []javaRuntime
 	javaProgress map[int]java.DownloadProgress
-	peers     []model.Peer
-	tasks     []model.Task
-	tunnels   []model.TunnelStatus
-	statusErr string
-	flash     string
+	peers        []model.Peer
+	tasks        []model.Task
+	tunnels      []model.TunnelStatus
+	statusErr    string
+	flash        string
 
 	wifiNets []ipc.WiFiNetwork // last Wi-Fi scan (Donanım tab)
 	wifiNote string
@@ -55,6 +56,7 @@ type App struct {
 	detail        *detailModel
 	wizard        *wizardModel
 	setup         *setupModel
+	usb           *usbState // USB bölümünün akış durumu (bkz. view_usb.go)
 
 	powerMenu   bool // güç (Kapat/Yeniden Başlat) modal is open
 	powerCursor int  // 0 Kapat · 1 Yeniden Başlat · 2 Vazgeç
@@ -109,7 +111,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				oldP, hadOld := a.javaProgress[major]
 				if p.Done && (!hadOld || !oldP.Done) {
 					if p.Error != "" {
-						a.flash = fmt.Sprintf("⚠️ Java %d hatası: %s", major, p.Error)
+						a.flash = fmt.Sprintf(theme.IconWarn+" Java %d hatası: %s", major, p.Error)
 					} else {
 						a.flash = fmt.Sprintf("✓ Java %d (Temurin JDK) başarıyla kuruldu!", major)
 					}
@@ -135,6 +137,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if a.config.Theme != "" && a.config.Theme != a.themeName {
 				a.themeName = a.config.Theme
 				a.th = theme.New(a.config.Theme)
+				// Stiller yuvalara bakar; yuvaların RGB değerlerini de
+				// güncellemek gerekir, yoksa tema adı değişse bile renkler
+				// eski kalır.
+				theme.ApplyTheme(os.Stdout, a.themeName)
 			}
 			if !a.config.SetupComplete && a.setup == nil {
 				a.setup = newSetup(a.th, a.config.Theme)
@@ -188,7 +194,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case usbScanMsg:
-		if a.detail != nil {
+		// Tarama sonucu iki yere gidebilir: sunucu detayındaki Yazılım sekmesi
+		// ya da sol menüdeki USB bölümü. Hangisi taramayı istediyse ona uygula.
+		if a.section == secUSB {
+			a.handleUSBScanResult(m)
+		} else if a.detail != nil {
 			a.detail.handleUSBScan(m)
 		}
 		return a, nil
@@ -354,6 +364,15 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
+	// USB bölümü içerik odağındayken kendi tuş sözleşmesini kullanır
+	// (Space=seç, a=tümü, Enter=ilerle). Genel tuşlardan ÖNCE ele alınır,
+	// yoksa "r" (yeniden tara) global "yeniden başlat" ile çakışır.
+	if a.section == secUSB && a.focus == focusContent && a.detail == nil {
+		if cmd, handled := a.usbKey(m.String()); handled {
+			return a, cmd
+		}
+	}
+
 	switch m.String() {
 	case "ctrl+c", "q":
 		a.quitting = true
@@ -470,7 +489,11 @@ func (a *App) toggleFocus() {
 // section list, or the active section's row cursor / scroll offset.
 func (a *App) moveCursor(d int) {
 	if a.focus == focusSidebar {
-		a.section = (a.section + d + secCount) % secCount
+		// moveSection yalnızca GÖRÜNÜR bölümler arasında gezer: USB bölümü
+		// takılı USB yokken listede olmadığı için imleç ona hiç uğramaz
+		// (eskiden secCount üzerinden modulo yapılıyordu, gizli bölüm de
+		// seçilebiliyordu).
+		a.moveSection(d)
 		a.serverCursor, a.wifiCursor, a.rowCursor, a.contentScroll = 0, 0, 0, 0
 		return
 	}
@@ -541,7 +564,8 @@ func (a *App) activate() (tea.Model, tea.Cmd) {
 			}
 			a.themeName = nextTh
 			a.th = theme.New(nextTh)
-			a.flash = "Tema değiştirildi: " + nextTh
+			theme.ApplyTheme(os.Stdout, nextTh)
+			a.flash = "Tema değiştirildi: " + theme.Label(nextTh)
 		case 1:
 			// Toggle Turbo
 			if a.config != nil {
@@ -638,7 +662,12 @@ func (a *App) View() string {
 		contentOuter = 24
 	}
 
-	sidebar := a.pane(a.renderSidebar(sidebarOuter-4, bodyH-2), sidebarOuter, bodyH, a.focus == focusSidebar)
+	// Kenar çubuğu KUTUSUZ çizilir, yalnızca sağına dikey bir ayırıcı konur.
+	// Eskiden iki ayrı pane() yan yana geldiği için ortada çifte kenarlık
+	// ("││") oluşuyordu; gereksiz görsel gürültüydü ve "arayüz karmaşık"
+	// hissinin bir parçasıydı. Odak artık ayırıcının rengi + seçili satırdaki
+	// işaretçiyle anlatılıyor.
+	sidebar := a.sidebarColumn(sidebarOuter, bodyH)
 
 	innerW, innerH := contentOuter-4, bodyH-2
 	var content string
@@ -651,6 +680,33 @@ func (a *App) View() string {
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, sidebar, contentPane)
 	return lipgloss.JoinVertical(lipgloss.Left, a.renderTopBar(), body, a.renderHelp())
+}
+
+// sidebarColumn renders the navigation column as plain content occupying
+// exactly outerW columns and outerH rows.
+//
+// Ne kutu ne ayrı ayırıcı çizgi kullanılır: içerik panelinin kendi yuvarlak
+// kenarlığı iki alanı zaten ayırıyor. Eskiden kenar çubuğu da kutuluydu ve
+// ortada çifte kenarlık ("││") oluşuyordu — gereksiz görsel gürültü.
+//
+// Kenar çubuğunun odakta olduğu, seçili satırdaki işaretçi ve vurgu rengiyle
+// anlatılır (renkten bağımsız olarak da okunur).
+func (a *App) sidebarColumn(outerW, outerH int) string {
+	navW := outerW - 2 // solda ve sağda birer kolon boşluk
+	if navW < 8 {
+		navW = 8
+	}
+
+	lines := strings.Split(a.renderSidebar(navW, outerH), "\n")
+	out := make([]string, outerH)
+	for i := 0; i < outerH; i++ {
+		body := ""
+		if i < len(lines) {
+			body = lines[i]
+		}
+		out[i] = " " + pad(body, navW) + " "
+	}
+	return strings.Join(out, "\n")
 }
 
 // pane wraps content in a rounded box whose border glows in the accent colour
@@ -716,7 +772,7 @@ func (a *App) renderTopBar() string {
 	}
 	right := ""
 	if a.status != nil && a.status.TurboOn {
-		right += th.Badge("TURBO ⚡", th.P.Accent) + " "
+		right += th.Badge(theme.IconTurbo+" TURBO", th.P.Accent) + " "
 	}
 	right += a.tierBadge() + " "
 	gap := a.width - lipgloss.Width(crumb) - lipgloss.Width(right) - 1
@@ -733,6 +789,8 @@ func (a *App) renderContent(w, h int) string {
 		return a.renderDashboard(w, h)
 	case secServers:
 		return a.renderServers(w, h)
+	case secUSB:
+		return a.renderUSB(w, h)
 	case secSoftware:
 		return a.renderSoftware(w, h)
 	case secPerformance:
@@ -851,16 +909,8 @@ func max(a, b int) int {
 	return b
 }
 
-// truncate shortens s to n runes with an ellipsis.
-func truncate(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	if n <= 1 {
-		return string(r[:n])
-	}
-	return string(r[:n-1]) + "…"
-}
+// truncate shortens s to n display cells. Tek uygulama components.go
+// içindedir; burada yalnızca eski çağrı adı korunuyor.
+func truncate(s string, n int) string { return Truncate(s, n) }
 
 var _ = fmt.Sprintf

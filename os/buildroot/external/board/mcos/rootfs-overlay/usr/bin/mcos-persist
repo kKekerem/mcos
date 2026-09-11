@@ -13,7 +13,7 @@ set -e
 log() { echo "mcos-persist: $*"; }
 
 # Already persistent? Nothing to do.
-if blkid -L MCOS-DATA >/dev/null 2>&1; then
+if /usr/bin/mcos-findfs MCOS-DATA >/dev/null 2>&1; then
     log "MCOS-DATA zaten mevcut — kalıcılık aktif, değişiklik yok."
     exit 0
 fi
@@ -22,7 +22,17 @@ fi
 DEV="${1:-}"
 if [ -z "$DEV" ]; then
     # The booted USB carries the root volume label "MCOS-ROOT".
-    BOOTPART="$(blkid -L MCOS-ROOT 2>/dev/null || true)"
+    BOOTPART="$(/usr/bin/mcos-findfs MCOS-ROOT 2>/dev/null || true)"
+    # Canli ISO'nun birim etiketi Makefile'da "MCOS" olarak veriliyor;
+    # MCOS-ROOT yalnizca mcos-install calistiktan SONRA var olur. Bu yuzden
+    # olasi tum etiketler sirayla denenir (eskiden yalnizca MCOS-ROOT
+    # deneniyordu, dolayisiyla canli sistemde otomatik bulma hic calismiyordu).
+    if [ -z "$BOOTPART" ]; then
+        for lbl in MCOS-BOOT MCOS MCOS_LIVE; do
+            BOOTPART="$(/usr/bin/mcos-findfs "$lbl" 2>/dev/null || true)"
+            [ -n "$BOOTPART" ] && break
+        done
+    fi
     if [ -z "$BOOTPART" ]; then
         log "boot USB otomatik bulunamadı. Aygıtı elle verin: mcos-persist /dev/sdX"
         exit 1

@@ -11,7 +11,14 @@ SOCK_PATH="/run/mcos/mcosd.sock"
 LOG="/run/mcos/mcosd.log"
 PANEL_VT="2"
 PANEL_DEVICE="/dev/tty${PANEL_VT}"
-MCOS_FONT_NAMES="Noto Color Emoji,Noto Emoji,FontAwesome,DejaVu Sans Mono,Liberation Mono,mono"
+# FONT SIRASI: fbterm listenin İLK öğesini birincil font yapar, geri kalanlar
+# yalnızca eksik glif yedeğidir. Birincil MUTLAKA monospace bir metin fontu
+# olmalı. Eskiden burada "Noto Color Emoji" ilk sıradaydı; o font sistemde
+# kurulu bile değil ve ikinci sıradaki "Noto Emoji" monospace değil, Latin harf
+# ve box-drawing glifi de yok — bu yüzden tüm metin ve yuvarlak kenarlar bozuk
+# çiziliyordu. Bu liste board/mcos/post-build.sh içindeki .fbtermrc ve
+# /etc/fonts/local.conf ile AYNI olmalıdır.
+MCOS_FONT_NAMES="FiraCode Nerd Font,DejaVu Sans Mono,Liberation Mono,Noto Emoji"
 
 mkdir -p /run/mcos /data /var/log /root /root/.cache/fontconfig /var/cache/fontconfig
 
@@ -31,9 +38,10 @@ prepare_console() {
     setterm -blank 0 -powerdown 0 >/dev/null 2>&1 || true
     kbd_mode -u >/dev/null 2>&1 || true
     printf '\033%%G' 2>/dev/null || true
-    setfont ter-u16n 2>/dev/null \
+    # Yalnizca imajda GERCEKTEN bulunan fontlar (bkz. S99mcos yorumu).
+    setfont Lat2-Terminus16 2>/dev/null \
         || setfont iso09.16 2>/dev/null \
-        || setfont Lat15-Terminus16 2>/dev/null \
+        || setfont lat9u-16 2>/dev/null \
         || true
     loadkeys trq >/dev/null 2>&1 || true
 }

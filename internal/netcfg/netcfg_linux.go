@@ -29,7 +29,7 @@ func wirelessIfaces() []string {
 				isWireless = true
 			} else if _, err := os.Stat(filepath.Join("/sys/class/net", name, "wireless")); err == nil {
 				isWireless = true
-			} else if strings.HasPrefix(name, "wlan") || strings.HasPrefix(name, "wlp") || strings.HasPrefix(name, "wls") {
+			} else if strings.HasPrefix(name, "wlan") || strings.HasPrefix(name, "wlp") || strings.HasPrefix(name, "wls") || strings.HasPrefix(name, "wl") {
 				isWireless = true
 			}
 			if isWireless {
@@ -81,6 +81,9 @@ func apply(ssid, pass string) error {
 }
 
 func scan() ([]Network, error) {
+	_ = os.MkdirAll("/var/run/wpa_supplicant", 0755)
+	_ = os.MkdirAll("/run/wpa_supplicant", 0755)
+
 	// Unblock wireless devices via rfkill BEFORE checking /sys/class/net
 	_ = run("rfkill", "unblock", "all")
 	_ = run("rfkill", "unblock", "wifi")

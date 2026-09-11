@@ -1,80 +1,69 @@
-// Package theme defines the MCOS panel color palette and reusable Lip Gloss
-// styles. The panel runs exclusively under fbterm (framebuffer terminal) which
-// renders TrueType fonts — so ALL Unicode characters (rounded borders, emojis,
-// box-drawing, Turkish glyphs) display perfectly, like a GUI application.
+// Package theme defines the MCOS panel palette, design tokens and the reusable
+// Lip Gloss styles built from them.
+//
+// Panel fbterm (framebuffer terminali) altında TrueType fontla çalışır, bu
+// yüzden tüm Unicode karakterler (yuvarlak kenarlar, box-drawing, Türkçe
+// glifler) doğru çizilir — ŞARTIYLA ki birincil font gerçekten monospace bir
+// metin fontu olsun. Font yığını board/mcos/post-build.sh içinde tanımlıdır.
+//
+// Renk yeteneğinin neden 0-7 + bold ile sınırlı olduğu palette.go'da
+// ölçümlerle açıklanıyor.
 package theme
 
 import (
 	"github.com/charmbracelet/lipgloss"
-	"github.com/muesli/termenv"
 )
 
-// Palette holds the raw colors for a theme.
+// Palette maps semantic roles to fbterm palette slots. Değerler ham sayı
+// DEĞİL, palette.go'daki Slot* sabitleridir.
 type Palette struct {
-	Bg       lipgloss.Color // page background
-	Surface  lipgloss.Color // card / panel surface
-	SurfaceA lipgloss.Color // alternate surface (selected row, headers)
-	Border   lipgloss.Color // default border
-	Accent   lipgloss.Color // primary accent (selection, highlights)
-	Dim      lipgloss.Color // dim accent / secondary border
-	Text     lipgloss.Color // primary text
-	Muted    lipgloss.Color // secondary text
-	Green    lipgloss.Color // running / ok
-	Yellow   lipgloss.Color // starting / warn
-	Red      lipgloss.Color // error / stopped-bad
-	Blue     lipgloss.Color // info (used sparingly)
+	Bg     lipgloss.Color // sayfa arka planı
+	Border lipgloss.Color // kenarlık / ayırıcı
+	Accent lipgloss.Color // seçim, odak, başlık
+	Text   lipgloss.Color // ana metin
+	Muted  lipgloss.Color // ikincil metin, ipucu
+	OK     lipgloss.Color // çalışıyor / başarılı
+	Warn   lipgloss.Color // başlıyor / uyarı
+	Error  lipgloss.Color // hata / çöktü
+
+	// Eski adlar. Görünüm dosyaları hâlâ bunları kullanıyor; OK/Warn/Error ile
+	// aynı yuvaya bakarlar. Yeni kod semantik adları kullanmalı.
+	Green  lipgloss.Color // = OK
+	Yellow lipgloss.Color // = Warn
+	Red    lipgloss.Color // = Error
+	Blue   lipgloss.Color // = Accent (fbterm'de ayrı bir mavi yuva ayrılmadı)
 }
 
-// Named palettes.
-const defaultPalette = "graphite-teal"
+// semanticPalette, TÜM temaların paylaştığı rol→yuva eşlemesi.
+//
+// Temalar arasında değişen tek şey 6. yuvanın RGB değeridir (palette.go
+// içindeki accents tablosu). Rol eşlemesi sabit kalır, böylece hiçbir temada
+// kenarlık ile ikincil metin karışmaz — eski kodda ikisi de "5" yuvasındaydı.
+var semanticPalette = Palette{
+	Bg:     SlotBg,
+	Border: SlotBorder,
+	Accent: SlotAccent,
+	Text:   SlotText,
+	Muted:  SlotMuted,
+	OK:     SlotOK,
+	Warn:   SlotWarn,
+	Error:  SlotError,
 
-var palettes = map[string]Palette{
-	"graphite-teal": {
-		Bg: "0", Surface: "0", SurfaceA: "0",
-		Border: "5", Accent: "6", Dim: "5",
-		Text: "7", Muted: "5",
-		Green: "2", Yellow: "3", Red: "1", Blue: "6",
-	},
-	"noir-purple": {
-		Bg: "0", Surface: "0", SurfaceA: "0",
-		Border: "5", Accent: "5", Dim: "5",
-		Text: "7", Muted: "5",
-		Green: "2", Yellow: "3", Red: "1", Blue: "6",
-	},
-	"anthracite-orange": {
-		Bg: "0", Surface: "0", SurfaceA: "0",
-		Border: "5", Accent: "3", Dim: "5",
-		Text: "7", Muted: "5",
-		Green: "2", Yellow: "3", Red: "1", Blue: "6",
-	},
-	"anthracite-green": {
-		Bg: "0", Surface: "0", SurfaceA: "0",
-		Border: "5", Accent: "2", Dim: "5",
-		Text: "7", Muted: "5",
-		Green: "2", Yellow: "3", Red: "1", Blue: "6",
-	},
-	"crimson-night": {
-		Bg: "0", Surface: "0", SurfaceA: "0",
-		Border: "5", Accent: "1", Dim: "5",
-		Text: "7", Muted: "5",
-		Green: "2", Yellow: "3", Red: "1", Blue: "6",
-	},
-	"amber-graphite": {
-		Bg: "0", Surface: "0", SurfaceA: "0",
-		Border: "5", Accent: "3", Dim: "5",
-		Text: "7", Muted: "5",
-		Green: "2", Yellow: "3", Red: "1", Blue: "6",
-	},
+	Green:  SlotOK,
+	Yellow: SlotWarn,
+	Red:    SlotError,
+	Blue:   SlotAccent,
 }
 
-// themeOrder is the selectable palette order shown in the first-boot wizard's
-// theme step. The default is balanced graphite/teal; the rest are alternate
-// accent moods for users who want a warmer or sharper console.
+const defaultTheme = "graphite-teal"
+
+// themeOrder is the selectable theme order shown in the first-boot wizard.
 var themeOrder = []string{
-	"graphite-teal", "noir-purple", "anthracite-orange", "anthracite-green", "crimson-night", "amber-graphite",
+	"graphite-teal", "noir-purple", "anthracite-orange",
+	"anthracite-green", "crimson-night", "amber-graphite",
 }
 
-// themeLabels are human-friendly names for the picker.
+// themeLabels are human-friendly Turkish names for the picker.
 var themeLabels = map[string]string{
 	"graphite-teal":     "Grafit Teal",
 	"noir-purple":       "Noir Mor",
@@ -87,7 +76,7 @@ var themeLabels = map[string]string{
 // Names returns the selectable theme names in display order.
 func Names() []string { return themeOrder }
 
-// Label returns a human-friendly name for a theme (falls back to the raw name).
+// Label returns a human-friendly name for a theme.
 func Label(name string) string {
 	if l, ok := themeLabels[name]; ok {
 		return l
@@ -95,77 +84,177 @@ func Label(name string) string {
 	return name
 }
 
-// Swatch returns a color preview block using full Unicode block characters.
-// fbterm renders these perfectly with TrueType fonts.
+// Valid reports whether name is a known theme.
+func Valid(name string) bool {
+	_, ok := accents[name]
+	return ok
+}
+
+// AccentHex returns a theme's accent colour as an RRGGBB string. Tema
+// seçicisinde önizleme için kullanılır.
+func AccentHex(name string) string {
+	if a, ok := accents[name]; ok {
+		return a.base
+	}
+	return accents[defaultTheme].base
+}
+
+// Theme bundles the semantic palette with precomputed Lip Gloss styles.
+//
+// Görünümler stil ÜRETMEZ; buradaki hazır stilleri kullanır. Böylece renk ve
+// kenarlık kararları tek yerde kalır.
+type Theme struct {
+	Name string
+	P    Palette
+
+	// Metin stilleri
+	Title    lipgloss.Style // ekran başlığı (bold text → parlak)
+	Heading  lipgloss.Style // kart başlığı (bold accent)
+	Body     lipgloss.Style // normal metin
+	Muted    lipgloss.Style // ikincil metin / ipucu
+	Label    lipgloss.Style // "etiket :" kolonu, sabit genişlik
+	Value    lipgloss.Style // değer kolonu
+	Selected lipgloss.Style // seçili satır
+	Disabled lipgloss.Style // pasif satır
+
+	// Durum stilleri
+	OK    lipgloss.Style
+	Warn  lipgloss.Style
+	Error lipgloss.Style
+
+	// Çerçeveler
+	Card        lipgloss.Style // yuvarlak kenarlı kart
+	CardFocused lipgloss.Style // odaklı kart (bold kenarlık)
+	Divider     lipgloss.Style // yatay ayırıcı
+
+	// Etkileşim
+	Button        lipgloss.Style // normal buton
+	ButtonFocused lipgloss.Style // odaklı buton
+	KeyCap        lipgloss.Style // tuş kapağı
+	Input         lipgloss.Style // metin girişi çerçevesi
+	InputFocused  lipgloss.Style
+
+	// ── Eski adlar (geçiş katmanı) ──────────────────────────────────────────
+	// Görünüm dosyaları (view_setup, view_wizard, view_detail…) bu adları
+	// yoğun kullanıyor: Val 49, Accent 49, CardTitle 18, Key 13 yerde.
+	// Yeni semantik stillere BAĞLANMIŞLARDIR — yani eski çağrılar da yeni
+	// paleti, yuvarlak kenarları ve doğru renkleri kullanır.
+	//
+	// YENİ KOD BUNLARI KULLANMAMALI; karşılıkları yorumda.
+	App        lipgloss.Style // → Body
+	CardTitle  lipgloss.Style // → Heading
+	Key        lipgloss.Style // → Label
+	Val        lipgloss.Style // → Value
+	Accent     lipgloss.Style // → Selected
+	Help       lipgloss.Style // → Muted
+	MenuItem   lipgloss.Style // → Body (dolgulu)
+	MenuActive lipgloss.Style // → Selected
+}
+
+// New builds a Theme for a named theme, falling back to the default.
+//
+// NOT: lipgloss.SetColorProfile burada ÇAĞRILMAZ. Global durum tema
+// kurucusunun içinde olmamalı; program açılışında bir kez SetupTerminal()
+// çağrılır.
+func New(name string) *Theme {
+	if !Valid(name) {
+		name = defaultTheme
+	}
+	p := semanticPalette
+	t := &Theme{Name: name, P: p}
+
+	// ── Metin ───────────────────────────────────────────────────────────────
+	// Bold, fbterm'de rengi aynı tonun parlak karşılığına çevirir (fcolor ^= 8),
+	// bu yüzden "bold" burada gerçek bir vurgu aracıdır.
+	t.Title = lipgloss.NewStyle().Foreground(p.Text).Bold(true)
+	t.Heading = lipgloss.NewStyle().Foreground(p.Accent).Bold(true)
+	t.Body = lipgloss.NewStyle().Foreground(p.Text)
+	t.Muted = lipgloss.NewStyle().Foreground(p.Muted)
+	t.Label = lipgloss.NewStyle().Foreground(p.Muted).Width(LabelWidth)
+	t.Value = lipgloss.NewStyle().Foreground(p.Text)
+	t.Selected = lipgloss.NewStyle().Foreground(p.Accent).Bold(true)
+	// Faint KULLANILMAZ: fbterm faint'i her zaman 8. yuvaya sabitler
+	// (fbshell.cpp:701), yani rengi kontrol edemezdik. Pasif öğeler için
+	// açıkça Muted rengi kullanılıyor.
+	t.Disabled = lipgloss.NewStyle().Foreground(p.Muted)
+
+	// ── Durum ───────────────────────────────────────────────────────────────
+	t.OK = lipgloss.NewStyle().Foreground(p.OK).Bold(true)
+	t.Warn = lipgloss.NewStyle().Foreground(p.Warn).Bold(true)
+	t.Error = lipgloss.NewStyle().Foreground(p.Error).Bold(true)
+
+	// ── Çerçeveler ──────────────────────────────────────────────────────────
+	// RoundedBorder: fbterm TrueType işlediği için ╭╮╰╯ doğru çizilir.
+	t.Card = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.Border).
+		Padding(CardPadY, CardPadX)
+	t.CardFocused = t.Card.
+		BorderForeground(p.Accent)
+	t.Divider = lipgloss.NewStyle().Foreground(p.Border)
+
+	// ── Etkileşim ───────────────────────────────────────────────────────────
+	// Butonlar GERÇEK çerçeveli: eski renderPill yalnızca renkli metin
+	// üretiyordu (bg parametresini hiç kullanmıyordu), bu yüzden butonlar
+	// buton gibi görünmüyordu.
+	t.Button = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.Border).
+		Foreground(p.Text).
+		Padding(0, ButtonPadX)
+	t.ButtonFocused = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.Accent).
+		Foreground(p.Accent).
+		Bold(true).
+		Padding(0, ButtonPadX)
+
+	t.KeyCap = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.Border).
+		Foreground(p.Accent).
+		Bold(true).
+		Padding(0, KeyCapPadX)
+
+	t.Input = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.Border).
+		Foreground(p.Text).
+		Padding(0, 1)
+	t.InputFocused = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(p.Accent).
+		Foreground(p.Text).
+		Padding(0, 1)
+
+	// ── Eski adları yeni stillere bağla ─────────────────────────────────────
+	t.App = t.Body
+	t.CardTitle = t.Heading
+	t.Key = t.Label
+	t.Val = t.Value
+	t.Accent = t.Selected
+	t.Help = t.Muted
+	t.MenuItem = lipgloss.NewStyle().Foreground(p.Text).Padding(0, 1)
+	t.MenuActive = t.Selected
+
+	return t
+}
+
+// Badge renders a compact, text-only status marker in the given colour.
+// Arka plan bloğu KULLANILMAZ: renk durumu tek başına anlatır ve terminal sakin
+// kalır.
+func (t *Theme) Badge(label string, fg lipgloss.Color) string {
+	return lipgloss.NewStyle().Foreground(fg).Bold(true).Render(label)
+}
+
+// Swatch returns a solid colour preview block for the theme picker.
 func Swatch(c lipgloss.Color) string {
 	return lipgloss.NewStyle().Foreground(c).Render("██████")
 }
 
-// AccentColor returns the accent color of a named palette (for preview swatches),
-// falling back to the default theme's accent.
-func AccentColor(name string) lipgloss.Color {
-	if p, ok := palettes[name]; ok {
-		return p.Accent
-	}
-	return palettes[defaultPalette].Accent
-}
-
-// Theme bundles a palette with precomputed Lip Gloss styles.
-type Theme struct {
-	P Palette
-
-	App        lipgloss.Style
-	Sidebar    lipgloss.Style
-	MenuItem   lipgloss.Style
-	MenuActive lipgloss.Style
-	Title      lipgloss.Style
-	Card       lipgloss.Style
-	CardTitle  lipgloss.Style
-	Key        lipgloss.Style
-	Val        lipgloss.Style
-	Muted      lipgloss.Style
-	Help       lipgloss.Style
-	Accent     lipgloss.Style
-}
-
-// New builds a Theme for a named palette, falling back to the default palette.
-// Uses RoundedBorder (Unicode) because the panel runs under fbterm which
-// renders TrueType fonts — all Unicode characters display perfectly.
-func New(name string) *Theme {
-	p, ok := palettes[name]
-	if !ok {
-		p = palettes[defaultPalette]
-	}
-
-	// fbterm's extended colour protocol differs from xterm's. Restricting the
-	// panel to its portable ANSI colours prevents a black screen while the
-	// framebuffer palette supplies the intended soft graphite and teal shades.
-	lipgloss.SetColorProfile(termenv.ANSI)
-
-	t := &Theme{P: p}
-	t.App = lipgloss.NewStyle().Background(p.Bg).Foreground(p.Text)
-	t.Sidebar = lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).
-		Padding(1, 2).Border(lipgloss.RoundedBorder(), false, true, false, false).
-		BorderForeground(p.Border).BorderBackground(p.Bg)
-	t.MenuItem = lipgloss.NewStyle().Foreground(p.Text).Padding(0, 1)
-	t.MenuActive = lipgloss.NewStyle().Foreground(p.Accent).Bold(true).Padding(0, 1)
-	t.Title = lipgloss.NewStyle().Foreground(p.Accent).Bold(true)
-
-	// Clean rounded borders — connects 100% seamlessly on all framebuffers
-	t.Card = lipgloss.NewStyle().Background(p.Surface).Foreground(p.Text).
-		Border(lipgloss.RoundedBorder()).BorderForeground(p.Border).
-		BorderBackground(p.Bg).Padding(0, 1)
-	t.CardTitle = lipgloss.NewStyle().Foreground(p.Accent).Bold(true)
-	t.Key = lipgloss.NewStyle().Foreground(p.Muted)
-	t.Val = lipgloss.NewStyle().Foreground(p.Text)
-	t.Muted = lipgloss.NewStyle().Foreground(p.Muted)
-	t.Help = lipgloss.NewStyle().Foreground(p.Muted).Background(p.Bg)
-	t.Accent = lipgloss.NewStyle().Foreground(p.Accent)
-	return t
-}
-
-// Badge renders a compact text-only status marker. The terminal remains calm:
-// colour communicates state without putting a block behind the text.
-func (t *Theme) Badge(label string, fg lipgloss.Color) string {
-	return lipgloss.NewStyle().Foreground(fg).Bold(true).Render(label)
-}
+// AccentColor returns the accent slot for a named theme.
+//
+// fbterm'de vurgu her temada AYNI yuvadadır (6); temalar arası fark o yuvanın
+// RGB değerinde (bkz. palette.go accents). Bu yüzden önizleme için gerçek RGB
+// gerekiyorsa AccentHex() kullanılmalıdır.
+func AccentColor(string) lipgloss.Color { return SlotAccent }

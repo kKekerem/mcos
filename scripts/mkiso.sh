@@ -16,28 +16,30 @@ command -v mcopy >/dev/null || { echo "need mtools"; exit 1; }
 [ -d "$GRUBLIB/x86_64-efi" ] || { echo "need grub-efi-amd64-bin"; exit 1; }
 [ -d "$GRUBLIB/i386-pc" ] || { echo "need grub-pc-bin"; exit 1; }
 
+# Çözünürlük ve komut satırının TEK tanımı. Buradaki değerler mkusb.sh ve
+# mcos-install ile aynı olmak ZORUNDA; scripts/test-display-logic.sh doğrular.
+. "$(dirname "$0")/lib/display.sh"
+
 rm -rf "$D" "$ISO_OUT"
 mkdir -p "$D/boot/grub" "$D/EFI/BOOT"
 cp "$BR_OUTPUT/images/bzImage" "$D/boot/bzImage"
 cp "$BR_OUTPUT/images/rootfs.cpio.gz" "$D/boot/initrd.img"
 
-cat > "$D/boot/grub/grub.cfg" <<'EOF'
-set timeout=5
-set default=0
-insmod all_video
-insmod gfxterm
-set gfxmode=auto
-terminal_output gfxterm
+{
+  mcos_grub_header 5
+  cat <<EOF
 menuentry "MCOS" {
   set gfxpayload=keep
-  linux /boot/bzImage console=tty0 console=ttyS0,115200 video=1024x768 loglevel=3
+  linux /boot/bzImage ${MCOS_CMDLINE_BASE} console=ttyS0,115200
   initrd /boot/initrd.img
 }
-menuentry "MCOS (safe / nomodeset)" {
-  linux /boot/bzImage console=tty0 nomodeset loglevel=3
+menuentry "MCOS (kurtarma / nomodeset)" {
+  set gfxpayload=text
+  linux /boot/bzImage ${MCOS_CMDLINE_RECOVERY}
   initrd /boot/initrd.img
 }
 EOF
+} > "$D/boot/grub/grub.cfg"
 
 # Modules needed for ISO boot (keep minimal to stay under BIOS 480 KB limit).
 # all_video + gfxterm give the kernel a real framebuffer console (so setfont +

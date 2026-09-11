@@ -5,16 +5,21 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"mcos/panel/theme"
 )
 
 // renderServers draws the server cards list with the selected card highlighted.
 func (a *App) renderServers(w, h int) string {
 	th := a.th
-	header := th.Title.Render("🎮 Sunucular")
+	header := th.Title.Render(theme.IconServer + " Sunucular")
 	newBtn := RenderButton(th, "Yeni Sunucu", "n", true)
 
 	if len(a.servers) == 0 {
-		return header + "\n\n" + newBtn + "\n\n" + a.emptyServers(w)
+		// Boş durumda üstteki küçük butonu GÖSTERMİYORUZ: boş-durum kartı
+		// zaten birincil eylemi büyük bir butonla sunuyor, ikisi birden
+		// gereksiz tekrar ve "hangisine basayım" duraksaması yaratıyordu.
+		return header + "\n\n" + a.emptyServers(w)
 	}
 
 	// Window the cards around the cursor so the selection is always visible and
@@ -52,15 +57,23 @@ func (a *App) renderServers(w, h int) string {
 
 func (a *App) emptyServers(w int) string {
 	th := a.th
-	boxW := 56
+	// Kart, kullanılabilir genişliği DOLDURUR. Sabit 56 kolon, geniş panelde
+	// sağda boşluk bırakıyor ve kart "yarım kalmış" görünüyordu.
+	boxW := theme.ContentWidth(w)
 	if boxW > w {
 		boxW = w
 	}
-	box := RenderCard(th, "🎮 Henüz sunucu yok", strings.Join([]string{
-		th.Val.Render("İlk Minecraft sunucunuzu oluşturmak için"),
-		th.Val.Render("yeni sunucu sihirbazını başlatın."),
+	inner := theme.InnerWidth(boxW) - 2*theme.CardPadX
+	box := RenderCard(th, theme.IconServer+" Henüz sunucu yok", strings.Join([]string{
+		th.Body.Render("İlk Minecraft sunucunuzu oluşturmak için yeni sunucu"),
+		th.Body.Render("sihirbazını başlatın."),
 		"",
-		RenderKeyHints(th, []KeyHint{{"n", "yeni sunucu"}, {"Esc", "menü"}}, boxW-6),
+		// Boş durumda birincil eylem GERÇEK bir buton olmalı: bu ekranda
+		// yapılacak tek şey o.
+		ActionBar(th, inner,
+			Action{Label: "Yeni Sunucu Oluştur", Key: "n", Primary: true},
+			Action{Label: "Menü", Key: "Esc"},
+		),
 	}, "\n"), boxW, true)
 	return box
 }
@@ -82,7 +95,7 @@ func (a *App) serverCard(s *serverInfo, selected, focused bool, w int) string {
 
 	name := s.Name
 	if selected {
-		name = "➜ " + s.Name
+		name = theme.IconCursor + " " + s.Name
 	}
 	title := th.Val.Bold(true).Render(name)
 	line1 := title + "  " + stateBadge(th, s.State)
@@ -101,7 +114,7 @@ func (a *App) serverCard(s *serverInfo, selected, focused bool, w int) string {
 	if lastLog == "" {
 		lastLog = "Log henüz yok"
 	}
-	line4 := th.Muted.Render("  📋 " + truncate(lastLog, contentW-4))
+	line4 := th.Muted.Render("  " + theme.IconLog + " " + truncate(lastLog, contentW-4))
 
 	bodyText := strings.Join([]string{line1, line2, line3, line4}, "\n")
 

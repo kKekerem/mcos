@@ -26,15 +26,98 @@ func NewManager(st *store.Store, lg *log.Logger) *Manager {
 	return &Manager{store: st, log: lg}
 }
 
+// ValidServerID reports whether id is safe to embed in a filesystem path.
+//
+// Sunucu kimlikleri daemon tarafından üretilir (srv_<onaltılık>), bu yüzden
+// beyaz liste uygulanır: harf, rakam, "_" ve "-". Ayırıcı veya ".." içeren bir
+// kimlik yazım hatası değil, saldırı girdisidir.
+//
+// Bu kontrol OLMADAN serverID="../../.." verildiğinde Paths.ServerData() veri
+// kökünün dışına çıkıyor ve resolve()'un ön ek kontrolü AYNI kaçmış kökle
+// yapıldığı için kontrol geçiyordu.
+func ValidServerID(id string) error {
+	if id == "" {
+		return fmt.Errorf("sunucu kimliği boş")
+	}
+	if len(id) > 64 {
+		return fmt.Errorf("sunucu kimliği çok uzun")
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9', r == '_', r == '-':
+		default:
+			return fmt.Errorf("sunucu kimliğinde geçersiz karakter: %q", r)
+		}
+	}
+	return nil
+}
+
+// withinPath reports whether p is root itself or lives under it.
+func withinPath(root, p string) bool {
+	if p == root {
+		return true
+	}
+	return strings.HasPrefix(p, root+string(filepath.Separator))
+}
+
 // resolve returns the absolute path inside the server's data directory,
-// rejecting traversal outside the root.
+// rejecting traversal outside the root — both syntactically (".." segments,
+// absolute rel) and through symlinks that point out of the tree.
 func (m *Manager) resolve(serverID, rel string) (string, error) {
-	root := m.store.Paths.ServerData(serverID)
+	if err := ValidServerID(serverID); err != nil {
+		return "", err
+	}
+	root, err := filepath.Abs(m.store.Paths.ServerData(serverID))
+	if err != nil {
+		return "", fmt.Errorf("sunucu klasörü çözümlenemedi: %w", err)
+	}
 	clean := filepath.Clean(filepath.Join(root, rel))
-	if !strings.HasPrefix(clean+string(filepath.Separator), root+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes server root")
+	if !withinPath(root, clean) {
+		return "", fmt.Errorf("yol sunucu klasörünün dışına çıkıyor")
+	}
+	if err := m.checkSymlinkEscape(root, clean); err != nil {
+		return "", err
 	}
 	return clean, nil
+}
+
+// checkSymlinkEscape verifies that following symlinks does not lead outside
+// root. Yalnızca sözdizimsel ön ek kontrolü yeterli değildi: sunucu, veri
+// klasörünün içine "/" gösteren bir symlink bırakırsa files.write ile tüm
+// dosya sistemine yazılabiliyordu.
+//
+// Write yeni dosya oluşturabilmeli, bu yüzden yolun VAR OLAN en derin atası
+// çözülür; henüz var olmayan son bileşenler olduğu gibi eklenir.
+func (m *Manager) checkSymlinkEscape(root, p string) error {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		realRoot = root // kök henüz oluşturulmadı
+	}
+
+	cur := p
+	var missing []string
+	for {
+		if _, err := os.Lstat(cur); err == nil {
+			break
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			break
+		}
+		missing = append([]string{filepath.Base(cur)}, missing...)
+		cur = parent
+	}
+
+	realCur, err := filepath.EvalSymlinks(cur)
+	if err != nil {
+		realCur = cur
+	}
+	full := filepath.Join(append([]string{realCur}, missing...)...)
+	if !withinPath(realRoot, full) {
+		return fmt.Errorf("yol bir sembolik bağ üzerinden sunucu klasörünün dışına çıkıyor")
+	}
+	return nil
 }
 
 // List returns directory entries for a path inside a server's data tree.

@@ -167,8 +167,8 @@ type Server struct {
 	SupportsPlugins bool `json:"supportsPlugins"`
 	SupportsMods    bool `json:"supportsMods"`
 
-	Backup      BackupPolicy      `json:"backup"`
-	WAN         WANConfig         `json:"wan"`
+	Backup BackupPolicy `json:"backup"`
+	WAN    WANConfig    `json:"wan"`
 
 	CreatedAt time.Time `json:"createdAt"`
 	UpdatedAt time.Time `json:"updatedAt"`

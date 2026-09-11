@@ -27,8 +27,11 @@ BR2_PACKAGE_DOSFSTOOLS=y
 BR2_PACKAGE_DOSFSTOOLS_MKFS_FAT=y
 BR2_PACKAGE_PARTED=y
 BR2_PACKAGE_UTIL_LINUX=y
+# "basic set" — blkid, findfs, lsblk, sfdisk, wipefs, mkswap ... hepsini içerir.
+# NOT: BR2_PACKAGE_UTIL_LINUX_SFDISK / _BLKID diye AYRI seçenekler Buildroot'ta
+# YOKTUR; defconfig'de yazılıysa sessizce yok sayılırlar. Bu araçlar yalnızca
+# _BINARIES ile gelir.
 BR2_PACKAGE_UTIL_LINUX_BINARIES=y
-BR2_PACKAGE_UTIL_LINUX_SFDISK=y
 BR2_PACKAGE_UTIL_LINUX_PARTX=y
 BR2_PACKAGE_UTIL_LINUX_RFKILL=y
 BR2_PACKAGE_OPENSSH=y
@@ -37,10 +40,21 @@ BR2_PACKAGE_WPA_SUPPLICANT_CLI=y
 BR2_PACKAGE_WPA_SUPPLICANT_NL80211=y
 BR2_PACKAGE_IW=y
 BR2_PACKAGE_WIRELESS_TOOLS=y
-BR2_PACKAGE_GRUB2=y
-BR2_PACKAGE_GRUB2_I386_PC=y
-BR2_PACKAGE_GRUB2_X86_64_EFI=y
-BR2_PACKAGE_GRUB2_INSTALL_TOOLS=y
+# GRUB2 — DIKKAT: dogru secenek onegi BR2_TARGET_GRUB2, BR2_PACKAGE_GRUB2 DEGIL.
+# Eskiden burada BR2_PACKAGE_GRUB2* yaziyordu; Buildroot'ta oyle bir secenek
+# YOK (grub2 bir bootloader, package degil), bu yuzden dort satir da SESSIZCE
+# yok sayiliyordu. Sonuc: hedef rootfs'e grub'un hicbir parcasi girmiyordu ve
+# mcos-install'in "command -v grub-install" kontrolu false donup diske hicbir
+# onyukleyici yazmiyordu -> BIOS diski bootable gormuyordu.
+# (Olculdu: scripts/probe-target-boot.sh)
+BR2_TARGET_GRUB2=y
+BR2_TARGET_GRUB2_I386_PC=y
+BR2_TARGET_GRUB2_X86_64_EFI=y
+BR2_TARGET_GRUB2_INSTALL_TOOLS=y
+# Gomulu modul listeleri: core.img/EFI ikilisi kendine yeter olmali, hedef
+# diskte .mod dosyasi aramamali.
+BR2_TARGET_GRUB2_BUILTIN_MODULES_PC="biosdisk part_msdos part_gpt fat ext2 normal configfile linux boot search search_fs_file search_label echo test all_video vbe vga gfxterm minicmd sleep reboot halt"
+BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="part_gpt part_msdos fat ext2 normal configfile linux boot search search_fs_file search_label echo test all_video efi_gop efi_uga gfxterm minicmd sleep reboot halt"
 BR2_PACKAGE_LINUX_FIRMWARE=y
 BR2_PACKAGE_LINUX_FIRMWARE_WHENCE=y
 BR2_PACKAGE_LINUX_FIRMWARE_BNX2=y
