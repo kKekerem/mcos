@@ -13,7 +13,7 @@ BIN           ?= bin
 VERSION       := $(shell cat VERSION 2>/dev/null || echo 0.1.0)
 
 # Host binaries (for dev/test on the current OS).
-GO_CMDS := mcosd mcosctl mcos-detect mcos-panel
+GO_CMDS := mcosd mcosctl mcos-detect mcos-panel mcos-panel-fb
 
 .PHONY: all app build test test-boot check-ui check-fonts preview-ui vet fmt run clean os iso qemu qemu-uefi lite help preflight uefi bios usb verify-usb boottest linux
 
@@ -61,6 +61,7 @@ test-boot:
 	@sh scripts/test-bootloader-embed.sh
 	@sh scripts/test-boot-logic.sh
 	@sh scripts/test-display-logic.sh
+	@sh scripts/test-panel-wiring.sh
 
 ## probe-boot: HEDEF rootfs'te hangi önyükleyici araçlarının olduğunu gösterir
 probe-boot:

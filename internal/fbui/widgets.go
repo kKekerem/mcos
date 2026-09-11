@@ -36,6 +36,12 @@ func NewUI(dst *image.RGBA, f *fbfont.Face, pal Palette) *UI {
 // Clear paints the page background.
 func (u *UI) Clear() { u.P.Fill(u.dst.Bounds(), u.Pal.Bg) }
 
+// Bounds returns the canvas rectangle.
+//
+// Ekran kodu tuvalin boyutunu bilmek zorunda (kenar cubugu genisligi, alt
+// cubugun yeri); dst alanini disari acmadan yalnizca sinirlari veriyoruz.
+func (u *UI) Bounds() image.Rectangle { return u.dst.Bounds() }
+
 // ── Metin ───────────────────────────────────────────────────────────────────
 
 // Text draws s with its LEFT edge at x and its CELL TOP at y.

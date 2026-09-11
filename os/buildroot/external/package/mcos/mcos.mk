@@ -20,6 +20,7 @@ define MCOS_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/mcosctl $(TARGET_DIR)/usr/bin/mcosctl
 	$(INSTALL) -D -m 0755 $(@D)/mcos-panel $(TARGET_DIR)/usr/bin/mcos-panel
 	$(INSTALL) -D -m 0755 $(@D)/mcos-detect $(TARGET_DIR)/usr/bin/mcos-detect
+	$(INSTALL) -D -m 0755 $(@D)/mcos-panel-fb $(TARGET_DIR)/usr/bin/mcos-panel-fb
 endef
 
 $(eval $(generic-package))

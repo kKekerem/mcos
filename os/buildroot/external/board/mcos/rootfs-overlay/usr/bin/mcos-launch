@@ -125,6 +125,38 @@ run_panel_fbterm() {
         "export TERM=fbterm LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 HOME=/root; exec /usr/bin/mcos-panel --connect '$SOCK'"
 }
 
+# run_panel_fb calistirir: YENI framebuffer paneli.
+#
+# Eski panelden farki: fbterm YOK. Bu ikili /dev/fb0'a dogrudan piksel yazar,
+# cerceveleri gercek vektor sekiller olarak cizer ve acilir pencerelerin
+# arkasini bulaniklastirir. fbterm katmani ve font yigini tamamen devre disi
+# kalir - eski panelde hizalamayi bozan tam da o katmandi.
+#
+# Konsolu grafik kipine alir; cikista GERI VERIR (internal/fbvt). Cokerse de
+# sinyal isleyicisi geri verir, bu yuzden burada ek bir kurtarma gerekmiyor.
+run_panel_fb() {
+    [ -x /usr/bin/mcos-panel-fb ] || return 127
+    LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 HOME=/root \
+        /usr/bin/mcos-panel-fb --connect "$SOCK" --fb /dev/fb0 --tty /dev/tty
+}
+
+# panel_mode, hangi panelin calisacagini soyler.
+#
+# Sira: kullanicinin acik tercihi > yeni panel > eski panel.
+# MCOS_PANEL=legacy ile eski panele donulur (yeni panelde F12 de ayni sonucu
+# verir). Boylece yeni arayuzde bir sorun cikarsa kullanici kilitli kalmaz.
+panel_mode() {
+    if [ -n "$MCOS_PANEL" ]; then
+        echo "$MCOS_PANEL"
+        return
+    fi
+    if [ -r /data/mcos/panel.conf ]; then
+        m="$(sed -n 's/^mode=//p' /data/mcos/panel.conf | head -1)"
+        [ -n "$m" ] && { echo "$m"; return; }
+    fi
+    echo auto
+}
+
 show_recovery() {
     reason="$1"
     printf '\033[2J\033[H'
@@ -152,7 +184,46 @@ while true; do
     echo ""
 
     panel_failed=""
-    if [ -x /usr/bin/fbterm ] && has_framebuffer; then
+    MODE="$(panel_mode)"
+
+    if ! has_framebuffer; then
+        panel_failed="framebuffer (/dev/fb0) bulunamadi"
+        show_recovery "$panel_failed"
+    elif [ "$MODE" != "legacy" ] && [ -x /usr/bin/mcos-panel-fb ]; then
+        # YENI panel. Cikis kodu 0 ise kullanici normal cikti (veya F12 ile
+        # eski panele gecmek istedi); sifir disi ise bir sorun var ve eski
+        # panele DUSULUR - yeni arayuz bir aciligi engellememeli.
+        run_panel_fb
+        rc=$?
+        # Cikis kodu 64 = kullanici F12 ile ESKI paneli istedi. Bu bir hata
+        # degil, acik bir istek: ayni oturumda eski panel acilir ve secim
+        # kalici olarak kaydedilir, boylece bir sonraki acilista da eski panel
+        # gelir. Bu ayrimi yapmasaydik F12 yeni paneli yeniden acardi ve
+        # kullanici yeni arayuzde bir sorun oldugunda kilitli kalirdi.
+        if [ "$rc" -eq 64 ]; then
+            echo "eski panele geciliyor (F12)"
+            mkdir -p /data/mcos 2>/dev/null || true
+            echo "mode=legacy" > /data/mcos/panel.conf 2>/dev/null || true
+            if [ -x /usr/bin/fbterm ]; then
+                run_panel_fbterm
+                rc=$?
+                [ "$rc" -ne 0 ] && panel_failed="fbterm baslatilamadi (kod: $rc)"
+            else
+                panel_failed="fbterm bulunamadi"
+            fi
+            [ -n "$panel_failed" ] && show_recovery "$panel_failed"
+        elif [ "$rc" -ne 0 ]; then
+            echo "yeni panel baslatilamadi (kod: $rc), eski panele donuluyor" >&2
+            if [ -x /usr/bin/fbterm ]; then
+                run_panel_fbterm
+                rc=$?
+                [ "$rc" -ne 0 ] && panel_failed="fbterm de baslatilamadi (kod: $rc)"
+            else
+                panel_failed="yeni panel calismadi (kod: $rc) ve fbterm yok"
+            fi
+            [ -n "$panel_failed" ] && show_recovery "$panel_failed"
+        fi
+    elif [ -x /usr/bin/fbterm ]; then
         run_panel_fbterm
         rc=$?
         if [ "$rc" -ne 0 ]; then
@@ -160,7 +231,7 @@ while true; do
             show_recovery "$panel_failed"
         fi
     else
-        panel_failed="framebuffer veya fbterm bulunamadi"
+        panel_failed="ne mcos-panel-fb ne de fbterm bulunamadi"
         show_recovery "$panel_failed"
     fi
 
@@ -170,10 +241,15 @@ while true; do
     else
         echo "MCOS paneli kapandi."
     fi
-    echo "  [1] fbterm ile paneli yeniden ac (varsayilan)"
+    echo "  [1] Paneli yeniden ac (varsayilan)"
     echo "  [2] Font cache yenile ve yeniden dene"
     echo "  [3] USB'yi kalici yap / kurulum (mcos-persist)"
     echo "  [4] Kabuk (gelismis kullanim)"
+    if [ "$(panel_mode)" = "legacy" ]; then
+        echo "  [5] YENI arayuze geri don"
+    else
+        echo "  [5] ESKI arayuze gec"
+    fi
     printf "Secim [1] (5 sn): "
     read -t 5 choice 2>/dev/null || choice=1
     [ -z "$choice" ] && choice=1
@@ -181,8 +257,23 @@ while true; do
         2) prepare_fonts ;;
         3) mcos-persist || echo "kalicilik basarisiz"; sleep 2 ;;
         4)
-            echo "Panele donmek icin kabuktan cikin (exit). Ham mcos-panel calistirmayin; fbterm gereklidir."
+            echo "Panele donmek icin kabuktan cikin (exit)."
             exec /bin/sh
+            ;;
+        5)
+            # Arayuz secimini kalici olarak degistir. Yeni arayuzde bir sorun
+            # cikarsa kullanici buradan geri donebilmeli - tek cikis yolu
+            # panelin kendi F12 tusu OLMAMALI, cunku panel hic acilmiyorsa o
+            # tusa basilamaz.
+            mkdir -p /data/mcos 2>/dev/null || true
+            if [ "$(panel_mode)" = "legacy" ]; then
+                echo "mode=auto" > /data/mcos/panel.conf 2>/dev/null || true
+                echo "yeni arayuze gecildi"
+            else
+                echo "mode=legacy" > /data/mcos/panel.conf 2>/dev/null || true
+                echo "eski arayuze gecildi"
+            fi
+            sleep 1
             ;;
         *) : ;;
     esac

@@ -1,0 +1,1238 @@
+{
+  "summary": "Survey MCOS for UEFI boot hardening, OOBE logic bugs, offline Fabric bundling, and framebuffer UI groundwork",
+  "agentCount": 5,
+  "logs": [
+    "4/4 survey alanı tamamlandı"
+  ],
+  "result": {
+    "surveys": [
+      {
+        "key": "boot",
+        "summary": "The EFISTUB fallback is fully gone from the current installer — no path anywhere in the repo copies a raw kernel to BOOTX64.EFI, no startup.nsh is written, and every boot path goes through GRUB with an explicit `linux` command line; both GRUB prefixes (UEFI `/EFI/BOOT`, BIOS `(hd0,msdos1)/boot/grub`) match where mcos-install actually writes grub.cfg, and I verified the BIOS dd mechanics byte-for-byte (boot.img kernel_sector=1, core.img blocklist start=2/len=321). Resolution is controlled solely by `set gfxmode` in grub.cfg plus `gfxpayload=keep`; the kernel enables no native KMS driver (no i915/amdgpu/radeon/nouveau), so on bare metal the mode comes from the bootloader and cannot be changed at runtime — and none of the three test scripts would catch either a kernel-at-BOOTX64.EFI regression or a grub.cfg/prefix mismatch.",
+        "facts": [
+          {
+            "claim": "The EFISTUB fallback is completely gone from the current working-tree installer. It existed at git HEAD and was removed.",
+            "evidence": "`git show HEAD:.../mcos-install | grep -i EFISTUB` returns lines 138-141: `if [ ! -f /mnt/target/boot/EFI/BOOT/BOOTX64.EFI ] && [ -f /mnt/target/boot/bzImage ]; then` / `log \"EFISTUB fallback (Kernel EFI STUB) kopyalanıyor...\"` / `cp /mnt/target/boot/bzImage /mnt/target/boot/EFI/BOOT/BOOTX64.EFI` / `echo \"\\\\EFI\\\\BOOT\\\\BOOTX64.EFI $ROOT_CMDLINE\" > /mnt/target/boot/startup.nsh`. The working-tree file (372 lines) contains none of these; `git diff HEAD --stat` shows 325 insertions / 130 deletions.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "No path anywhere in the repo can place a raw kernel at BOOTX64.EFI. The only write to BOOTX64.EFI in the installer copies the GRUB EFI image built at build time.",
+            "evidence": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:269 `if cp \"$BOOTLIB/BOOTX64.EFI\" \"$TARGET_MNT/boot/EFI/BOOT/BOOTX64.EFI\"; then` (BOOTLIB=/usr/lib/mcos/boot, line 52). The kernel is copied only at line 226: `cp \"$KERNEL\" \"$TARGET_MNT/boot/boot/bzImage\"`. Repo-wide `grep -rn -i -e BOOTX64 -e EFISTUB` (excluding output/) shows BOOTX64 writes only in mcos-install:269, mkusb.sh:148/174, mkiso.sh:51/56, test-bootloader-embed.sh:76 — all grub-mkimage outputs.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "startup.nsh no longer exists anywhere in the repository.",
+            "evidence": "`grep -rn \"startup.nsh\" . --exclude-dir=output` returned zero hits.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "A kernel command line is ALWAYS delivered: both grub menuentries carry explicit parameters on the `linux` line, and there is no non-GRUB boot path.",
+            "evidence": "mcos-install:237 `CMDLINE=\"console=tty0 consoleblank=0 loglevel=4 fbcon=nodefer vt.global_cursor_default=0\"`; line 248 `linux /boot/bzImage $CMDLINE`; line 254 (recovery) `linux /boot/bzImage console=tty0 nomodeset vga=normal loglevel=7`. Lines 301 `[ \"$INSTALLED_ANY\" = 1 ] || fail \"hiçbir önyükleyici kurulamadı — disk boot etmez\"` means an install with no bootloader aborts rather than falling back.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "UEFI: the GRUB EFI image is built with prefix `/EFI/BOOT`, and the installer writes grub.cfg to exactly ESP:/EFI/BOOT/grub.cfg. The paths MATCH.",
+            "evidence": "post-build.sh:226-227 `grub-mkimage -O x86_64-efi -o \"$MCOS_BOOTLIB/BOOTX64.EFI\" \\` / `-p /EFI/BOOT \\`. mcos-install:260 `printf '%s' \"$GRUB_CFG\" > \"$TARGET_MNT/boot/EFI/BOOT/grub.cfg\" || true`, where $TARGET_MNT/boot is the mount point of the FAT boot/ESP partition (line 223 `mount \"$BOOT_PART\" \"$TARGET_MNT/boot\"`).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "BIOS: core.img prefix is `(hd0,msdos1)/boot/grub` and the installer writes grub.cfg to partition-1 path /boot/grub/grub.cfg. The paths MATCH, conditional on the installed disk being BIOS drive 0x80 (=hd0) at boot.",
+            "evidence": "post-build.sh:213-214 `grub-mkimage -O i386-pc -o \"$MCOS_BOOTLIB/core.img\" \\` / `-p '(hd0,msdos1)/boot/grub' \\`. mcos-install:258 `printf '%s' \"$GRUB_CFG\" > \"$TARGET_MNT/boot/boot/grub/grub.cfg\"`; partition 1 is the FAT32 boot partition (line 189 `parted -s \"$TARGET\" mkpart primary fat32 1MiB ...`, line 204/205 BOOT_PART=${TARGET}1).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The kernel/initrd paths inside grub.cfg also resolve correctly against the $root that each prefix establishes.",
+            "evidence": "mcos-install:226/228 place them at <boot-partition>/boot/bzImage and /boot/initrd.img; grub.cfg lines 248-249 and 254-255 reference `/boot/bzImage` and `/boot/initrd.img`. Same partition in both the UEFI (loaded-image device) and BIOS ((hd0,msdos1)) cases.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Both post-build.sh grub-mkimage invocations succeed on this host and produce valid images; the `/EFI/BOOT` prefix string is embedded in the EFI binary and the EFI video modules are present.",
+            "evidence": "Reproduced both commands verbatim in /tmp: BIOS core.img = 164797 bytes; UEFI BOOTX64.EFI = 765952 bytes, first two bytes `M Z`, `grub-file --is-x86_64-efi` -> yes, `strings -a BOOTX64.EFI | grep EFI/BOOT` -> `/EFI/BOOT`. Module presence check: efi_gop present, efi_uga present, video_bochs present, gfxterm present, all_video present (vbe absent, i386-pc-only, expected).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The BIOS 'dd core.img to LBA 1' scheme is byte-correct: boot.img's kernel_sector field points at LBA 1 and grub-mkimage pre-fills core.img's diskboot blocklist for a contiguous copy starting at sector 1.",
+            "evidence": "`dd if=/usr/lib/grub/i386-pc/boot.img bs=1 skip=92 count=8` -> `01 00 00 00 00 00 00 00` (kernel_sector = 1). core.img bytes 500..511 (the 12-byte grub_pc_bios_boot_blocklist at 0x1F4) = `02 00 00 00 00 00 00 00 | 41 01 | 20 08` = start LBA 2, len 0x0141 = 321 sectors, segment 0x0820 — exactly 322 total sectors minus the first. Matches mcos-install:294 `dd if=\"$BOOTLIB/core.img\" of=\"$TARGET\" bs=512 seek=1 conv=notrunc`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "core.img (322 sectors) fits in the MBR gap, but the installer's inline comment understates its size by ~5x.",
+            "evidence": "Measured 164797 bytes = 322 sectors; mcos-install:291 guards `if [ \"$CORE_SECTORS\" -ge 2047 ]; then fail ...`. mcos-install:289 comment reads `# 2047 sektör (≈1 MB) yer var; core.img ~30 KB.`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Resolution on an INSTALLED system is set exclusively by `set gfxmode` + `set gfxpayload=keep` in the grub.cfg that mcos-install writes. It is capped at 1024x768.",
+            "evidence": "mcos-install:243 `set gfxmode=1024x768,800x600,auto`; line 247 `set gfxpayload=keep`. No `video=` parameter appears in CMDLINE (line 237) or anywhere else in the installed system.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The three image-producing paths disagree on gfxmode: the Makefile ISO target matches the installer (1024x768 first), mkusb.sh uses `auto` (native/preferred mode), and mkiso.sh additionally passes `video=1024x768` on the kernel command line.",
+            "evidence": "Makefile:179 `'set gfxmode=1024x768,800x600,auto' \\`; scripts/mkusb.sh:159 `set gfxmode=auto`; scripts/mkiso.sh:29 `set gfxmode=auto` and :33 `linux /boot/bzImage console=tty0 console=ttyS0,115200 video=1024x768 loglevel=3`. `video=` appears nowhere else in the repo.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "scripts/mkiso.sh (the only file with a `video=` kernel parameter) is not invoked by the Makefile or any other script — it is a dead/alternate path.",
+            "evidence": "`grep -rn \"mkiso\" Makefile scripts/*.sh` returns only self-references inside scripts/mkiso.sh (lines 8, 9, 68). The Makefile `iso:` target at Makefile:152-199 builds its own grub.cfg inline and calls grub-mkrescue directly (Makefile:198).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The kernel enables NO native KMS driver for real GPUs. Only firmware-handover framebuffers (efifb/vesafb/simplefb/simpledrm) plus VM-only DRM drivers are built in.",
+            "evidence": "os/buildroot/external/board/mcos/kernel.config:80-91 = CONFIG_FB=y, CONFIG_FB_EFI=y, CONFIG_FB_VESA=y, CONFIG_SYSFB=y, CONFIG_SYSFB_SIMPLEFB=y, CONFIG_DRM=y, CONFIG_DRM_FBDEV_EMULATION=y, CONFIG_DRM_SIMPLEDRM=y, CONFIG_DRM_VIRTIO_GPU=y, CONFIG_DRM_VBOXVIDEO=y, CONFIG_DRM_VMWGFX=y, CONFIG_DRM_BOCHS=y; plus CONFIG_FB_SIMPLE=y at line 216. `grep -E \"I915|AMDGPU|RADEON|NOUVEAU|DRM_AST|DRM_MGAG200|DRM_QXL|DRM_CIRRUS\" kernel.config` -> NONE FOUND.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The kernel.config itself documents that the framebuffer is whatever GRUB hands over.",
+            "evidence": "kernel.config:78-80 comment: `# --- Framebuffer: real-hardware video on BOTH UEFI (GOP) and BIOS (VESA) ---` / `# sysfb/simpledrm consume the framebuffer GRUB hands over (gfxpayload=keep),` / `# giving a working console + GUI on physical machines, not just QEMU virtio.`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Nothing in MCOS can change the video mode at runtime: the Go framebuffer layer only reads screen info, and no modesetting utility ships in the image.",
+            "evidence": "`grep -nE \"FBIOPUT|FBIOGET|VSCREENINFO\" internal/fbdev/device_linux.go` returns only line 118 `FBIOGET_VSCREENINFO` and line 122 `FBIOGET_FSCREENINFO` — no FBIOPUT. Listing the built initramfs (`zcat os/buildroot/output/images/rootfs.cpio.gz | cpio -t | grep -E \"fbset|modetest|kmscon|drm\"`) yields only `usr/bin/setvtrgb` and `usr/sbin/fbset`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "mcos-launch reads only the framebuffer HEIGHT, from /sys/class/graphics/fb0/virtual_size, and uses it solely to pick an fbterm font size. Both the sysfs parse and the fbset fallback correctly extract height.",
+            "evidence": "mcos-launch:93-94 `if [ -f /sys/class/graphics/fb0/virtual_size ]; then` / `FB_H=$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null | cut -d, -f2)` (virtual_size is \"W,H\", so -f2 is height); line 98 fallback `FB_H=$(fbset 2>/dev/null | grep geometry | awk '{print $3}')` (geometry line is \"geometry W H VW VH bpp\", so $3 is height); line 100 `[ -z \"$FB_H\" ] && FB_H=768`; lines 102-112 map height to font size 10/12/14/18/24. has_framebuffer() at line 116 checks `[ -c /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ]`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "A display-settings screen exists only as a PNG-generating design mockup in a _test.go file; it has no live implementation.",
+            "evidence": "internal/fbui/mockup_test.go:321 `func TestMockupDisplaySettings(t *testing.T) {`, line 328 `u.Panel(..., \"Ekran Ayarları\", true)`, line 330 `u.Text(in.Min.X, y, \"Çözünürlük\", u.Pal.TextDim)`, line 333 `modes := []string{\"1920 x 1080\", \"1600 x 900\", \"1366 x 768\", \"1280 x 720\", \"1024 x 768\"}`, line 374 `save(t, img, \"04-ekran-ayarlari.png\")`. `grep -rn \"Ekran Ayar\" --include=\"*.go\" . | grep -v _test` returns zero hits. internal/fbui contains only mockup_test.go, theme.go, widgets.go.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The FAT boot partition is never mounted at runtime, so any settings screen that rewrites grub.cfg must mount it itself.",
+            "evidence": "os/buildroot/external/board/mcos/rootfs-overlay/etc/fstab contains only proc, devtmpfs, devpts, tmpfs /tmp, tmpfs /run, sysfs — no /boot entry. etc/init.d/S99mcos:17-35 `mount_persistent()` mounts only the MCOS-DATA label at /data (line 29 `part=\"$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)\"`, line 35 `if mount \"$part\" \"$MCOS_DATA\"; then`).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "scripts/test-install-logic.sh passes today but contains NO check for a kernel-at-BOOTX64.EFI regression, no startup.nsh check, and no check that grub.cfg's path matches the GRUB prefix.",
+            "evidence": "Ran `sh scripts/test-install-logic.sh` -> `SONUC: TUM TESTLER GECTI`. Section 4 (lines 102-147) checks only: root= count == 0, `initrd /boot/initrd.img` count == 2, MCOS-DATA present, grub-install count == 0, grub-mkimage count == 0, /usr/lib/mcos/boot present, boot.img present, core.img present, INSTALLED_ANY present, verify_fail present, `cp -a /data/.` present, executable bit. `grep -c` over the file for BOOTX64, EFI/BOOT, startup, prefix -> none of these strings appear.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "scripts/verify-usb.sh cannot catch either regression: it only tests that a file named BOOTX64 exists, and its grub.cfg check greps a RECURSIVE directory listing so a grub.cfg at any path satisfies a check labelled '/EFI/BOOT/grub.cfg'.",
+            "evidence": "verify-usb.sh:96 `FATLIST=\"$(mdir -i \"$MT\" -a -/ :: 2>/dev/null)\"` (-/ = recursive); lines 107-113 `check_file() { if printf '%s\\n' \"$FATLIST\" | grep -qi \"$1\"; then ok ...`; line 118 `check_file 'BOOTX64'  \"UEFI önyükleyici (/EFI/BOOT/BOOTX64.EFI)\"`; line 119 `check_file 'grub *cfg' \"GRUB yapılandırması (/EFI/BOOT/grub.cfg)\"`. No content/type inspection of BOOTX64.EFI anywhere in the file.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "A magic-byte check would not distinguish a raw kernel from a GRUB EFI image — both begin with 'MZ'. The existing MZ check in test-bootloader-embed.sh therefore provides no protection against the old regression.",
+            "evidence": "`head -c 2 /tmp/grubprobe2/BOOTX64.EFI | od -An -c` -> `M Z`; `head -c 2 os/buildroot/output/images/bzImage | od -An -c` -> `M Z`. scripts/test-bootloader-embed.sh:81-85 `MZ=\"$(dd if=\"$W/BOOTX64.EFI\" bs=2 count=1 status=none | od -An -c | tr -d ' \\n')\"` / `case \"$MZ\" in *M*Z*) ok \"gecerli PE/COFF imzasi (MZ)\" ;;`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The current Buildroot output tree is stale and does not contain the embedded bootloader files, so an install run from the currently built image would abort.",
+            "evidence": "`ls os/buildroot/output/target/usr/lib/mcos` -> 'No such file or directory'. `zcat os/buildroot/output/images/rootfs.cpio.gz | cpio -t | grep -c usr/lib/mcos` -> 0, while the same listing does contain `usr/bin/mcos-install`. Timestamps: post-build.sh = 2026-09-10 20:38:47, images/rootfs.cpio.gz = 2026-09-10 16:57:34, images/bzImage = 2026-09-10 16:52:31. mcos-install:126-131 would then fail with 'önyükleyici dosyaları imajda yok'. The host has grub-mkimage and /usr/lib/grub/{i386-pc,x86_64-efi}, so a rebuild will populate it.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The `&&`-chained guards in mcos-install are safe under `set -eu` (they do not cause a silent early exit).",
+            "evidence": "Tested the exact patterns from mcos-install:126-127 and :156-159 under dash: `dash -c 'set -eu; H=0; [ -f /nonexistent1 ] && [ -f /nonexistent2 ] && H=1; echo survived'` -> 'survived, H=0'; the loop `[ -n \"$I\" ] && break` pattern also survived both iterations.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "On VMs the kernel does have real KMS drivers, so runtime modesetting is theoretically possible there even though no userspace tool ships to do it.",
+            "evidence": "kernel.config:88-91 CONFIG_DRM_VIRTIO_GPU=y, CONFIG_DRM_VBOXVIDEO=y, CONFIG_DRM_VMWGFX=y, CONFIG_DRM_BOCHS=y. I did not boot a VM to confirm mode changes actually take effect.",
+            "confidence": "unverified"
+          }
+        ],
+        "problems": [
+          {
+            "title": "EFI grub.cfg write failure is swallowed and never verified — silent boot-to-rescue on UEFI",
+            "location": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:260 (write) and :346-351 (verification)",
+            "why_wrong": "The BIOS copy of grub.cfg is written with `|| fail` (line 258), but the UEFI copy at line 260 ends in `|| true`, and the final verification block checks `/boot/bzImage`, `/boot/initrd.img`, `/boot/grub/grub.cfg` and `BOOTX64.EFI` — but never `/EFI/BOOT/grub.cfg`. Since the EFI GRUB image's prefix is `/EFI/BOOT`, that file is the ONLY config UEFI GRUB will load. If its write fails, the installer reports 100% success and the disk boots UEFI into GRUB's minimal prompt with no menu and no kernel.",
+            "failure_scenario": "Boot partition fills up while copying the ~122 MB initrd plus the 10 MB kernel (BOOT_MB is sized from kernel+initrd+16 MB, line 165-166, leaving little slack). The `printf > /EFI/BOOT/grub.cfg` at line 260 fails with ENOSPC; `|| true` discards it; line 348 only checks `/boot/grub/grub.cfg`, which was written earlier and exists. Install reports 'Kurulum tamamlandı (BIOS + UEFI)'. On a UEFI machine the user gets a bare `grub>` prompt.",
+            "severity": "medium"
+          },
+          {
+            "title": "BIOS core.img hardcodes (hd0,msdos1) and the generated grub.cfg never runs `search --set=root`",
+            "location": "os/buildroot/external/board/mcos/post-build.sh:214 (prefix) with os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:239-257 (grub.cfg)",
+            "why_wrong": "The BIOS prefix `(hd0,msdos1)/boot/grub` binds the config location to BIOS drive 0x80. The installer's grub.cfg contains no `search` command, unlike the Makefile ISO config which does `search --no-floppy --set=root --file /boot/bzImage` (Makefile:184/190). If firmware does not map the installed USB to 0x80, GRUB cannot locate its own prefix and drops to rescue. The fix costs one line: the `search`, `search_fs_file` and `search_label` modules are already embedded in core.img (post-build.sh:215-216), and mkfs.vfat already labels the partition MCOS-BOOT (mcos-install:213).",
+            "failure_scenario": "User installs MCOS to a USB stick on a desktop that also has an internal SATA disk, then boots the USB via the BIOS boot menu on a firmware that keeps the internal disk as 0x80 and assigns the USB 0x81. boot.img + core.img load from the USB's MBR, but core.img then resolves `(hd0,msdos1)/boot/grub/grub.cfg` to the internal disk's first partition, finds nothing, and lands at `grub rescue>`.",
+            "severity": "medium"
+          },
+          {
+            "title": "Installed grub.cfg sets `terminal_output gfxterm` only — no console fallback if gfxterm cannot initialize",
+            "location": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:241-244",
+            "why_wrong": "The config does `insmod all_video` / `insmod gfxterm` / `set gfxmode=1024x768,800x600,auto` / `terminal_output gfxterm`. Redirecting output exclusively to gfxterm means that if no graphics mode can be established, GRUB's menu renders nowhere. The Makefile ISO config for the same build deliberately keeps both: Makefile:180-181 `'terminal_input console' \\` / `'terminal_output console gfxterm' \\`. The installer is strictly less robust than the ISO it was launched from, on the same hardware.",
+            "failure_scenario": "UEFI firmware whose GOP advertises no mode matching 1024x768 or 800x600 and where `auto` also fails to produce a usable gfxterm; or a BIOS whose VBE is unusable. GRUB loads and times out after 3 seconds on a black screen — the user sees nothing and cannot pick the recovery entry.",
+            "severity": "medium"
+          },
+          {
+            "title": "Neither verify-usb.sh nor test-install-logic.sh nor test-bootloader-embed.sh can detect a kernel-at-BOOTX64.EFI regression or a grub.cfg/prefix mismatch",
+            "location": "scripts/verify-usb.sh:118-119 and scripts/test-install-logic.sh:102-147",
+            "why_wrong": "verify-usb.sh:118 only asserts that some entry matching 'BOOTX64' appears in the FAT listing — it never inspects the file, and a raw bzImage even shares GRUB's 'MZ' PE magic (measured), so the existing MZ assertion in test-bootloader-embed.sh:81-85 would also pass. verify-usb.sh:119's `check_file 'grub *cfg'` greps a recursive listing produced by `mdir -a -/ ::` (line 96), so a grub.cfg at /boot/grub satisfies a check labelled '/EFI/BOOT/grub.cfg' and vice versa — a prefix/path mismatch is invisible. test-install-logic.sh's mcos-install invariants section never mentions BOOTX64, EFI/BOOT, startup.nsh, or any prefix.",
+            "failure_scenario": "Someone reintroduces `cp $KERNEL .../EFI/BOOT/BOOTX64.EFI` as a fallback, or changes post-build.sh's UEFI prefix from `/EFI/BOOT` to `/boot/grub` without moving the installer's write. Both test scripts print 'TUM TESTLER GECTI' / 'TÜM KONTROLLER GEÇTİ' and the regression ships.",
+            "severity": "medium"
+          },
+          {
+            "title": "verify-usb.sh infers firmware mode from the partition-table type, so it checks the wrong things on any mcos-install-produced disk",
+            "location": "scripts/verify-usb.sh:33-37 and :117-126",
+            "why_wrong": "Lines 33-37 set MODE=uefi for a gpt label and MODE=bios for a dos label. mcos-install deliberately creates an MBR/msdos table (line 188 `parted -s \"$TARGET\" mklabel msdos`, with the design comment at lines 170-173 explaining that one MBR disk serves both firmwares) while installing BOTH BIOS and UEFI bootloaders. verify-usb.sh therefore takes the BIOS branch, checks for syslinux artifacts that mcos-install never writes (lines 121-125: ldlinux.sys, ldlinux.c32, menu.c32, libcom32, syslinux.cfg), and skips the BOOTX64.EFI check entirely (line 118).",
+            "failure_scenario": "An operator images an mcos-install-produced USB and runs `scripts/verify-usb.sh disk.img` to confirm it. The script prints five spurious HATA lines for missing syslinux modules and exits 1, while never once verifying the UEFI bootloader that is actually present. A genuinely missing BOOTX64.EFI would go unreported.",
+            "severity": "medium"
+          },
+          {
+            "title": "Resolution is hard-capped at 1024x768 on installed systems and is inconsistent with the USB image path",
+            "location": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:243",
+            "why_wrong": "`set gfxmode=1024x768,800x600,auto` makes GRUB pick 1024x768 whenever the firmware can provide it, so `auto` (native/preferred mode) is only ever reached as a third fallback. Because no native KMS driver is built in (verified: no i915/amdgpu/radeon/nouveau in kernel.config) and only efifb/vesafb/simpledrm consume the bootloader handover, this single line fixes the display resolution for the entire life of the installed system. scripts/mkusb.sh:159 uses `set gfxmode=auto` for the same hardware, so the same machine gets a higher resolution from a mkusb image than from an installed disk.",
+            "failure_scenario": "User with a 1920x1080 panel installs MCOS. GRUB's efi_gop finds a 1024x768 mode, sets it, and hands it to the kernel via gfxpayload=keep. simpledrm/efifb expose exactly that one mode; fbset (present at usr/sbin/fbset) cannot change it; mcos-launch reads FB_H=768 and selects a 14px fbterm font. The user has no way to reach 1080p short of reinstalling or hand-editing grub.cfg on an unmounted FAT partition.",
+            "severity": "medium"
+          },
+          {
+            "title": "The 'recovery' menu entry can never display the TUI panel",
+            "location": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:252-256",
+            "why_wrong": "The recovery entry sets `gfxpayload=text` and passes `nomodeset`, which yields a VGA text console with no /dev/fb0. mcos-launch:155 gates the panel on `[ -x /usr/bin/fbterm ] && has_framebuffer()` (line 116: `[ -c /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ]`), so this entry always lands in show_recovery() with 'framebuffer veya fbterm bulunamadi'. That may be intended for a rescue path, but it is not documented as such and the menu label ('kurtarma — VGA metin modu, ayrıntılı günlük') suggests a usable degraded UI rather than no UI.",
+            "failure_scenario": "Graphics trouble on the default entry sends the user to the recovery entry expecting a text-mode panel. They instead get a bare shell-adjacent recovery menu with no MCOS UI at all, and no on-screen explanation that this entry structurally cannot start the panel.",
+            "severity": "low"
+          },
+          {
+            "title": "Stale inline comment understates core.img size by ~5x, weakening the MBR-gap reasoning",
+            "location": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:289",
+            "why_wrong": "The comment reads '2047 sektör (≈1 MB) yer var; core.img ~30 KB.' The actual core.img built from post-build.sh:213-217's module list measures 164797 bytes = 322 sectors (~161 KB). The runtime guard at line 291 is correct and the image still fits comfortably, but the comment invites a future contributor to add modules under the false impression of a 30x margin when the real margin is ~6x.",
+            "failure_scenario": "A contributor adds several modules (e.g. lvm, luks, btrfs, xfs, a font) to the i386-pc list believing there is ~1 MB of headroom against a 30 KB baseline. core.img crosses 2047 sectors, and instead of a build-time signal the failure surfaces at install time as `fail \"core.img MBR boşluğuna sığmıyor\"` on a user's machine.",
+            "severity": "low"
+          },
+          {
+            "title": "post-build.sh still advertises an EFISTUB fallback that no longer exists",
+            "location": "os/buildroot/external/board/mcos/post-build.sh:234",
+            "why_wrong": "The warning printed when BOOTX64.EFI generation fails reads 'UYARI - BOOTX64.EFI uretilemedi; USB'ye kurulum UEFI'de EFISTUB'a duser'. There is no EFISTUB path left in mcos-install; the real behaviour is that HAVE_UEFI stays 0 (mcos-install:127) and the disk becomes BIOS-only, or the install aborts at line 129-131 if BIOS is also unavailable. The message describes exactly the broken behaviour that was removed.",
+            "failure_scenario": "A build on a host lacking grub-efi-amd64-bin prints this warning. The maintainer reads it as 'UEFI still works via EFISTUB' and ships the image; UEFI-only machines then simply refuse to boot the installed disk, with no diagnostic pointing at the missing package.",
+            "severity": "low"
+          },
+          {
+            "title": "Test-script module lists are duplicated from post-build.sh and can drift silently",
+            "location": "scripts/test-bootloader-embed.sh:20-25",
+            "why_wrong": "MODULES_PC and MODULES_EFI are hand-copied from post-build.sh:215-217 and :228-230, guarded only by the comment 'post-build.sh ile AYNI modül listeleri. Değiştirirseniz orayı da güncelleyin.' Nothing enforces the equality, so the test can pass against a module list that the build no longer uses — which is precisely the class of silent failure the script's own header (lines 5-9) says it exists to prevent.",
+            "failure_scenario": "Someone removes `search_fs_file` from post-build.sh's EFI list to shrink the image but forgets test-bootloader-embed.sh. The test keeps building and validating the old list, reports success, and a later grub.cfg that relies on `search --file` fails only on real hardware.",
+            "severity": "low"
+          }
+        ],
+        "recommendations": [
+          "Make the UEFI grub.cfg write authoritative: change mcos-install:260 from `|| true` to `|| fail \"EFI grub.cfg yazılamadı\"`, and add `[ -f \"$TARGET_MNT/boot/EFI/BOOT/grub.cfg\" ] || verify_fail=\"EFI grub.cfg yok\"` inside the verification block at mcos-install:349-351 next to the existing BOOTX64.EFI check. This is the only config UEFI GRUB reads, and today it is the one boot-critical file nothing checks.",
+          "Add `search --no-floppy --set=root --label MCOS-BOOT` (or `--file /boot/bzImage`) as the first line of each menuentry in the grub.cfg that mcos-install writes (lines 246-256), mirroring Makefile:184/190. The `search`, `search_fs_file` and `search_label` modules are already embedded in both core.img and BOOTX64.EFI, and mkfs.vfat already sets the MCOS-BOOT label, so this removes the `(hd0,msdos1)` dependency at zero cost.",
+          "Change mcos-install:244 to `terminal_output console gfxterm` and add `terminal_input console`, matching the ISO config at Makefile:180-181, so the menu remains visible when no graphics mode can be established.",
+          "To raise resolution: edit the gfxmode list at mcos-install:243 to `set gfxmode=1920x1080,1600x900,1366x768,1280x720,1024x768,auto` and keep `gfxpayload=keep`. Apply the same change to Makefile:179 so the live ISO and the installed system agree, and reconcile scripts/mkusb.sh:159 (`auto`) with whichever policy you pick. No kernel change is needed — efi_gop/efi_uga are already embedded in BOOTX64.EFI, and CONFIG_FB_EFI/SYSFB/SIMPLEDRM already consume the handover.",
+          "Do NOT plan a live resolution switcher against the current kernel: with no i915/amdgpu/radeon/nouveau built in, bare-metal displays run on efifb/vesafb/simpledrm, which expose exactly the one mode the bootloader set. A 'Ekran Ayarları' screen must (a) enumerate candidate modes, (b) locate the boot partition via `/usr/bin/mcos-findfs MCOS-BOOT` and mount it — nothing mounts it at runtime, per fstab and S99mcos:17-35, (c) rewrite BOTH /boot/grub/grub.cfg and /EFI/BOOT/grub.cfg, and (d) tell the user a reboot is required. The mockup at internal/fbui/mockup_test.go:321-375 is a good starting point but its 'Uygula' button cannot take effect without a restart; label it accordingly.",
+          "If you want genuine runtime modesetting later, that is a kernel-config change (add CONFIG_DRM_I915 / CONFIG_DRM_AMDGPU / CONFIG_DRM_NOUVEAU plus the firmware blobs) and a userspace KMS tool — a much larger change than the gfxmode edit, and it will grow the initramfs well beyond its current ~122 MB.",
+          "Add two regression assertions to scripts/test-install-logic.sh section 4: (1) `grep -c 'BOOTX64.EFI' on lines that also mention $KERNEL or bzImage` must be 0, and a `grep -c 'startup.nsh'` must be 0 — this is the exact regression that produced the empty-cmdline VFS panic; (2) assert that the grub.cfg destination path in mcos-install matches the `-p` prefix in post-build.sh, e.g. extract `-p /EFI/BOOT` from post-build.sh and require mcos-install to write `$prefix/grub.cfg`. Neither check exists today.",
+          "Fix scripts/verify-usb.sh so it can validate mcos-install output: derive the firmware mode from what is actually on the FAT partition (presence of /EFI/BOOT/BOOTX64.EFI and/or a nonzero MBR bootstrap) rather than from the partition-table label at lines 33-37, since mcos-install always writes an msdos table while installing both bootloaders. Also replace the recursive-listing greps at lines 118-119 with path-exact `mdir -i \"$MT\" ::/EFI/BOOT` lookups so a misplaced grub.cfg is caught, and add a type check on BOOTX64.EFI stronger than MZ magic (a raw bzImage also starts with MZ) — `grub-file --is-x86_64-efi` on an extracted copy, or a grep for the embedded prefix string.",
+          "Update the two stale comments: mcos-install:289 ('core.img ~30 KB' -> ~161 KB / 322 sectors as measured) and post-build.sh:234 (drop the EFISTUB claim; say the install will be BIOS-only or will abort, and name the missing `grub-efi-amd64-bin` package).",
+          "Rebuild before any boot testing: os/buildroot/output/target/usr/lib/mcos does not exist and the built rootfs.cpio.gz contains zero usr/lib/mcos entries, so the currently built image will abort at mcos-install:130 with 'önyükleyici dosyaları imajda yok'. The host has grub-mkimage and both /usr/lib/grub platforms, so a plain rebuild populates it.",
+          "Consider deleting or wiring up scripts/mkiso.sh — it is referenced by nothing (the Makefile `iso:` target builds its own grub.cfg inline) and it is the only file carrying a `video=1024x768` kernel parameter, which will mislead anyone grepping for the resolution knob."
+        ]
+      },
+      {
+        "key": "oobe",
+        "summary": "The OOBE wizard has several concrete logic defects, the worst being that pressing Enter on the \"KURULUM BAŞARILI\" screen re-runs the disk install instead of rebooting, and that a successful disk install hard-reboots at step 5/10 so the wizard's last five steps and the entire config save (doSetupSave) never run. Additional verified defects: \"Geri\" is advertised but is a no-op on steps 2–5, the required PC name is never persisted anywhere, the required \"Düğüm adı\" field cannot accept 'h', 'l' or space, the Wi-Fi list renders only 8 networks while the cursor can move past them, and several errors (disk-list RPC, UpdateConfig, Persist) are swallowed with no user-visible feedback.",
+        "facts": [
+          {
+            "claim": "The wizard has exactly 10 steps (stepIntro..stepConfirm) and stepCount == 10, so the \"adım N/10\" counter and progress percentage are arithmetically correct.",
+            "evidence": "panel/view_setup.go:26-38 (const block, stepCount last) and panel/view_setup.go:620 `pct := (int(s.step) + 1) * 100 / int(stepCount)`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The install-target index mapping is correct — there is NO off-by-one with the trailing \"Atla\" row. The view renders disks at cursor==i and advance() uses s.disks[s.cursor] guarded by `s.cursor < len(s.disks)`.",
+            "evidence": "panel/view_setup.go:735-748 (`for i, d := range s.disks` ... `if s.cursor == i`) and panel/view_setup.go:411-416 (`if s.cursor < len(s.disks) { disk := s.disks[s.cursor] ... }`)",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Choosing \"Atla\" (cursor == len(disks)) does NOT start an install; it falls through to `s.goTo(stepTheme)`.",
+            "evidence": "panel/view_setup.go:411-417 — the `if s.cursor < len(s.disks)` branch is skipped, then `s.goTo(stepTheme)`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "With zero disks found the user is not stuck: fieldCount()==3 (skip row + 2 checkboxes), cursor 0 is the \"Atla\" row, and Enter advances to stepTheme. No index panic is possible (all cursor arithmetic is modulo a positive count).",
+            "evidence": "panel/view_setup.go:364-372 `case stepInstall: return len(s.disks) + 1 + 2`, panel/view_setup.go:411-417",
+            "confidence": "verified"
+          },
+          {
+            "claim": "'r' (rescan) does NOT conflict with typing in the PC-name field. updateIdentity only treats 'r' as rescan when cursor != 0; at cursor 0 it falls through to pcName.Update.",
+            "evidence": "panel/view_setup.go:273-277 `if m.String() == \"r\" && s.cursor != 0 { ... }`; panel/view_setup.go:322-327 fall-through to `s.pcName.Update(m)`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The Java step is NOT a dead end without internet: viewJava renders \"Kurulu Java bulunamadı.\" plus an informational message and Enter always advances to stepInstall; there is no gate.",
+            "evidence": "panel/view_setup.go:893-914 (viewJava) and panel/view_setup.go:408-410 (`case stepJava: s.goTo(stepInstall)`) — no condition on s.javaOK or s.status",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The daemon's Wi-Fi scan returns an uncapped list of unique SSIDs (no limit of 8), so >8 networks is realistic in practice.",
+            "evidence": "internal/netcfg/netcfg_linux.go:146-153 — appends every unique SSID to allNets with no cap",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The IPC client serializes every call under a mutex, so concurrent panel commands cannot interleave responses; but no deadline is set, so a slow daemon call blocks all other RPCs.",
+            "evidence": "internal/ipc/client.go:62-64 `c.mu.Lock(); defer c.mu.Unlock()` and roundtrip() at internal/ipc/client.go:100-113 with no SetDeadline",
+            "confidence": "verified"
+          },
+          {
+            "claim": "model.Config has no hostname/PC-name field at all; the only Hostname fields in the codebase are read-only system info or tunnel addresses.",
+            "evidence": "internal/model/config.go:67-90 (full Config struct — no hostname) and `grep -rn ostname` hits only internal/model/system.go:58 (SystemStatus.Net.Hostname), tunnel.go, model.go",
+            "confidence": "verified"
+          },
+          {
+            "claim": "handleConfigSet replaces the whole config document (only Cluster.Secret is preserved from the previous value).",
+            "evidence": "internal/daemon/handlers.go:123-148 — decodes a full model.Config, restores prevSecret only, then store.SaveConfig(d.cfgPath, &cfg)",
+            "confidence": "verified"
+          },
+          {
+            "claim": "mcos-install copies /data (config.json, downloaded Java) onto the new MCOS-DATA partition, but the OOBE has not written config.json yet at that point because doSetupSave only runs at stepConfirm.",
+            "evidence": "os/buildroot/.../usr/bin/mcos-install:305-325 (`cp -a /data/. \"$TARGET_MNT/\"`, with a comment claiming OOBE settings live in /data) vs panel/view_setup.go:427-429 (`case stepConfirm: return true, doSetupSave(...)`)",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Bubble Tea v1.3.10 reports a space keypress as KeyType KeySpace whose String() is \" \", so the wizard's `case \"right\", \"l\", \" \":` really does intercept the space bar.",
+            "evidence": "~/go/pkg/mod/github.com/charmbracelet/bubbletea@v1.3.10/key.go:302 `KeySpace: \" \"` and key.go:698-701 (single ' ' rune becomes KeySpace)",
+            "confidence": "verified"
+          }
+        ],
+        "problems": [
+          {
+            "title": "Enter on the \"KURULUM BAŞARILI\" screen re-runs the disk installation instead of rebooting",
+            "location": "panel/view_setup.go:411-416 (advance) and panel/view_setup.go:662-671 (viewInstall success branch)",
+            "why_wrong": "After installDoneMsg succeeds, handleInstallDone sets s.loading=false and s.installSuccess=true but never resets s.cursor, which still points at the installed disk index (0..len(disks)-1). The success screen renders RenderButton(th, \"Hemen Yeniden Başlat\", \"Enter\", true), promising a reboot. But update() is no longer short-circuited by s.loading, step is still stepInstall, so \"enter\" routes to advance() -> `case stepInstall: if s.cursor < len(s.disks) { ... doInstallOS(...) }`. Nothing in the stepInstall branch knows about installSuccess.",
+            "failure_scenario": "User picks /dev/sda, install finishes, screen says \"[OK] KURULUM BAŞARILI! Lütfen MCOS kurulum USB'sini ŞİMDİ ÇIKARIN\" with a \"Hemen Yeniden Başlat  Enter\" button and a 10-second countdown. User presses Enter (as instructed) to reboot immediately. Instead the panel flips back to \"[>>] KURULUM DEVAM EDİYOR\" and runs `mcos-install /dev/sda` a second time, re-partitioning and re-formatting the freshly installed disk. If the user already pulled the USB as told, the second run is executing from a half-removed medium. Left/right/space on that same screen also silently toggle the dlJava/dlPlugins checkboxes, and up/down move the disk cursor.",
+            "severity": "critical"
+          },
+          {
+            "title": "A successful disk install ends the wizard at step 5/10 — steps 6–10 and doSetupSave are unreachable, so nothing the wizard collected is ever persisted",
+            "location": "panel/view_setup.go:411-416, panel/view_setup.go:521-539 (handleInstallDone/handleRebootTick), panel/view_setup.go:1064-1072 (doSetupSave)",
+            "why_wrong": "doSetupSave — the only call to cl.UpdateConfig — runs exclusively from `case stepConfirm` (step 9). stepInstall is step 4 (displayed as \"adım 5/10\"). When the install succeeds the model starts a 10s countdown and then executes `reboot -f`. stepTheme, stepBudget, stepCluster, stepFirstServer and stepConfirm are therefore never reached on the install path, so cfg.Theme, cfg.Timezone, cfg.Budget, cfg.Cluster.*, cfg.WiFiSSID/WiFiPassword, cfg.SetupComplete and cfg.HardwareID are never written. mcos-install's own comment (lines 306-308) explicitly assumes the OOBE settings already exist in /data as config.json — they do not.",
+            "failure_scenario": "User walks through Intro, System, Wi-Fi and Java, reaches \"adım 5/10 · Diske Kurulum\", selects a disk, install succeeds, the box hard-reboots. On the installed system config.json is absent (or a bare default), SetupComplete is false, so the full 10-step wizard starts again from scratch — including the Wi-Fi password the user already typed. The wizard's progress bar told them they were halfway through a 10-step flow that in fact terminates at step 5.",
+            "severity": "critical"
+          },
+          {
+            "title": "\"Geri\" (Shift+Tab) is shown in the action bar on steps 2–5 but is a silent no-op there",
+            "location": "panel/view_setup.go:436-443 (back) and panel/view_setup.go:639-641 (action bar)",
+            "why_wrong": "The action bar appends `Action{Label: \"Geri\", Key: \"Shift+Tab\"}` whenever `s.step > stepIntro`, i.e. on stepSystem(1), stepIdentity(2), stepJava(3) and stepInstall(4) as well. back() only does anything when `s.step > stepInstall`, i.e. on steps 5..9. On steps 1–4 the key is consumed and nothing happens — no movement, no error message.",
+            "failure_scenario": "On \"Java Sürücüleri\" (adım 4/10) the user realises they picked the wrong Wi-Fi network and presses Shift+Tab, which the on-screen button bar says is \"Geri\". The screen does not change at all. The user presses it repeatedly; the only way back to the network step is Esc, which cancels the entire wizard (s.cancelled=true, a.setup=nil).",
+            "severity": "high"
+          },
+          {
+            "title": "The PC name is mandatory and shown in the summary but is never persisted anywhere",
+            "location": "panel/view_setup.go:493-511 (buildConfig) vs panel/view_setup.go:332-337 (validation) and panel/view_setup.go:1018 (summary)",
+            "why_wrong": "proceedFromIdentity refuses to advance with `errMsg = \"PC adı gerekli\"` when pcName is blank, and viewConfirm prints `s.kv(\"PC adı\", s.pcName.Value())`. But buildConfig() never reads s.pcName, there is no hostname field in model.Config (internal/model/config.go:67-90), and no RPC anywhere sets a hostname. The value is used only for a validation gate and a cosmetic summary line.",
+            "failure_scenario": "User types \"salon-pc\" as the PC name, is blocked from continuing until they do, sees \"PC adı  salon-pc\" on the confirmation screen, presses Enter to finish. After setup the panel's Donanım tab still shows the kernel-default hostname; the name is gone. Re-running the wizard asks for it again and discards it again.",
+            "severity": "high"
+          },
+          {
+            "title": "The required \"Düğüm adı\" field cannot accept 'h', 'l', or space, and the caret cannot be moved with the arrow keys",
+            "location": "panel/view_setup.go:192-197 (update key switch) with panel/view_setup.go:209-221 (activeTextInput) and panel/view_setup.go:419-424 (cluster validation)",
+            "why_wrong": "update() routes only stepIdentity to a dedicated handler; every other step goes through the generic switch, where `case \"left\", \"h\":` and `case \"right\", \"l\", \" \":` call adjust() and `return false, nil` unconditionally. On stepCluster with cursor==1 (the focused nodeName textinput) adjust() does nothing (it only acts on cursor==0), so those keystrokes are swallowed before reaching activeTextInput()/ti.Update(m). nodeName's \"mcos-1\" is only a Placeholder, so Value() starts empty and advance() blocks with \"Düğüm adı gerekli\" until the user types something.",
+            "failure_scenario": "On \"Cihaz Eşleştirme\" the user moves to \"Düğüm adı\" and types \"salon\" — the 'l' is dropped and the field reads \"saon\". Typing \"home lab\" yields \"omeab\" (h, space and l all swallowed). They cannot press Left/Right to fix the middle of the string either. The only way forward is a name containing none of h, l or space.",
+            "severity": "high"
+          },
+          {
+            "title": "Wi-Fi list renders at most 8 networks but the cursor can move onto rows 9..N, which are invisible",
+            "location": "panel/view_setup.go:228 (identityRows) vs panel/view_setup.go:873-880 (view loop with `if i >= 8 { break }`)",
+            "why_wrong": "identityRows() returns `1 + len(s.networks) + 1` with no cap, and updateIdentity's up/down wrap modulo that count. viewIdentity only draws the first 8 networks. For rows 9..len(networks) nothing is drawn as selected — the PC-name row is not highlighted, no network row is highlighted, and isWiredRow() is false — so the highlight simply vanishes from the screen while networkAt(cursor) still returns a real (undrawn) AP.",
+            "failure_scenario": "In an apartment block the scan returns 14 SSIDs. The user presses ↓ ten times: after the 9th press the selection marker disappears from the screen entirely (rows 9-14 are not rendered). Pressing Enter opens the \"… Parolası:\" prompt for an SSID whose name is never shown, or connects directly to an unnamed open network. Pressing ↓ four more times wraps back to the PC-name row, so the user cannot tell how many hidden rows exist.",
+            "severity": "medium"
+          },
+          {
+            "title": "The \"Temel sunucu dosyalarını (Paper/Fabric) önceden indir\" checkbox does nothing",
+            "location": "panel/messages.go:177-194 (doInstallOS) and panel/view_setup.go:779-790 (checkbox render)",
+            "why_wrong": "doInstallOS takes dlPlugins as a parameter but never reads it; the body only honours dlJava and then execs mcos-install. The source even says so: \"Note: dlPlugins logic can be added here or in mcos-install script.\" The checkbox defaults to checked (newSetup sets dlPlugins: true), so every user is shown a ticked box for a feature that is not implemented.",
+            "failure_scenario": "User leaves \"☑ Temel sunucu dosyalarını (Paper/Fabric) önceden indir\" checked on a metered connection, expecting the jars to be cached for offline use. Install reports success. Later, offline, creating a Paper server fails to download anything because nothing was pre-fetched.",
+            "severity": "medium"
+          },
+          {
+            "title": "The \"Java 17 ve 21 sürümlerini şimdi indir\" option is only honoured on the disk-install path, and its failures are discarded",
+            "location": "panel/messages.go:177-193 (doInstallOS) and panel/view_setup.go:411-417 (advance)",
+            "why_wrong": "The two `cl.JavaInstall(...)` calls live inside doInstallOS, which is invoked only when `s.cursor < len(s.disks)`. Taking \"Atla\" jumps straight to stepTheme, so the checked box downloads nothing. Both calls also discard their error (`_, _ = cl.JavaInstall(17)`), so a DNS/TLS failure (very likely on an RTC-less box whose clock is not yet synced — see the unimplemented clock gate) is invisible and the install still reports success.",
+            "failure_scenario": "User ticks \"Java 17 ve 21 sürümlerini şimdi indir\", then chooses \"Atla (Sadece RAM'de çalıştır)\" because they do not want to wipe a disk. No Java is downloaded and no message says so. Variant: user does install to disk with no internet — both JavaInstall calls fail silently, the install proceeds, and the screen shows \"[OK] KURULUM BAŞARILI\".",
+            "severity": "medium"
+          },
+          {
+            "title": "Disk-enumeration RPC errors are dropped; an RPC failure is indistinguishable from \"no disks found\"",
+            "location": "panel/app.go:151-156 (case disksMsg) and panel/messages.go:442-447 (doFetchDisks)",
+            "why_wrong": "doFetchDisks packages `err` into disksMsg, but the handler assigns `a.setup.disks = m.disks` and clears disksLoading without ever inspecting m.err. viewInstall then renders an empty disk list with only the \"Atla\" row and the reassuring \"MCOS'u kalıcı olarak kuracağınız diski seçin:\" heading.",
+            "failure_scenario": "The daemon's system.disks call fails (or the IPC connection dropped and the retry failed). The user sees the install screen with zero disks listed, concludes their SSD is unsupported, and picks \"Atla\", ending up on a RAM-only system. No error is ever shown, and pressing 'r' to rescan produces the same silent empty list.",
+            "severity": "medium"
+          },
+          {
+            "title": "A failure to save the configuration on the final step is completely invisible",
+            "location": "panel/view_setup.go:1064-1072 (doSetupSave) with panel/app.go:266-268 (errMsg) and panel/app.go:633-642 (View)",
+            "why_wrong": "doSetupSave returns errMsg{err} when cl.UpdateConfig fails. app.go's errMsg case only sets `a.statusErr`, and View() returns `a.setup.view(...)` as soon as a.setup != nil — the main layout that renders statusErr is never drawn while the wizard is open. setupDoneMsg is never emitted, so a.setup stays non-nil and the user remains on the confirmation screen with no error text. Separately, `_, _ = cl.Persist(\"\")` discards its error entirely, yet setupDoneMsg still flashes \"✓ kurulum tamamlandı\".",
+            "failure_scenario": "On the \"Kurulum Onayı\" screen the user presses Enter (\"Kurulumu Bitir\"). The config write fails (read-only /data, disk full, daemon error). The screen does not change — same summary, no error, no spinner. The user presses Enter again and again, firing a fresh UpdateConfig each time. Alternatively the config saves but mcos-persist fails; the user is told \"✓ kurulum tamamlandı\", reboots, and every setting is gone.",
+            "severity": "medium"
+          },
+          {
+            "title": "Re-running the wizard from Settings overwrites the whole config with defaults, silently resetting Turbo / autostart / features / tier",
+            "location": "panel/app.go:422-425 and panel/app.go:578-581 (newSetup on 'i' / Settings row 3) with panel/view_setup.go:493-511 (buildConfig)",
+            "why_wrong": "buildConfig() starts from `model.DefaultConfig()` and only fills in theme, timezone, budget, cluster and Wi-Fi. handleConfigSet replaces the stored document wholesale (only Cluster.Secret survives). newSetup() never loads the existing config, so every other live setting is reset: Turbo -> false (read at internal/daemon/handlers.go:92,103,522), AutostartServers -> true (read at internal/daemon/daemon.go:382), WAN.Autostart -> false, Features -> all auto, Tier.Override -> cleared, NodeID -> regenerated.",
+            "failure_scenario": "User has Turbo ON and autostart OFF. They open Ayarlar and press 'i' just to change the timezone. Completing the wizard writes a default-derived config: Turbo is now off and all servers will autostart on next boot. Nothing in the wizard mentions these settings, so the user has no way to know they were changed.",
+            "severity": "medium"
+          },
+          {
+            "title": "The documented Java gate on internet + clock sync is not implemented; s.status is dead and a fixed 2-second sleep stands in for NTP",
+            "location": "panel/view_setup.go:63-65 (status field), panel/app.go:128-130 (only writer), panel/view_setup.go:340-350 (proceedFromIdentity)",
+            "why_wrong": "The struct comment says \"status mirrors the daemon's live status so the Java step can gate on internet + clock sync (RTC-less PCs need NTP before any TLS download)\", and internal/daemon/handlers_system.go:236-239 says \"the OOBE gates Java behind ClockSynced\". Grepping view_setup.go shows s.status is written at app.go:129 and read nowhere. Instead proceedFromIdentity does a hardcoded `time.Sleep(2 * time.Second)` before calling cl.JavaList(), and viewJava never consults net.Internet or status.ClockSynced.",
+            "failure_scenario": "An RTC-less mini-PC boots with a 1970 clock. The user connects Wi-Fi; 2 seconds later JavaList runs, NTP has not completed, and the Java step just reports \"Kurulu Java bulunamadı.\" and lets the user continue. Ticking \"Java 17 ve 21 indir\" on the next screen then fails TLS certificate validation against the wrong date — and, per the finding above, that failure is discarded and the install still reports success.",
+            "severity": "medium"
+          },
+          {
+            "title": "A late javaSetupMsg clears s.loading in the middle of a disk install, re-enabling input and allowing a concurrent second install",
+            "location": "panel/view_setup.go:513-519 (handleJavaSetup sets s.loading = false unconditionally)",
+            "why_wrong": "handleJavaSetup clears s.loading regardless of what set it. The only producer of javaSetupMsg is proceedFromIdentity's command, which can run for a long time (cl.WiFiApply serialises behind the IPC mutex and can block on DHCP, plus a fixed 2s sleep, plus cl.JavaList). update()'s `if s.loading { return false, nil }` guard is the only thing blocking keystrokes during an install.",
+            "failure_scenario": "User enters a Wi-Fi password; WiFiApply blocks for ~30s waiting on DHCP. Meanwhile the user presses Enter through the Java step and the install step and starts installing to /dev/sda (s.loading = true). The delayed javaSetupMsg then arrives, sets s.loading = false, and the keyboard is live again during the install. Enter now re-enters `case stepInstall` and launches a second `mcos-install /dev/sda` concurrently with the first.",
+            "severity": "low"
+          },
+          {
+            "title": "A disk is wiped on a single Enter with no confirmation step, and 'Geri' from the theme step drops the user back onto that screen with the cursor on disk 0",
+            "location": "panel/view_setup.go:411-416 (advance) and panel/view_setup.go:436-442 (back)",
+            "why_wrong": "advance() calls doInstallOS immediately on Enter; the only warning is a static red line at the bottom of the list. back() from stepTheme does `s.step--` into stepInstall and resets s.cursor to 0, which is the first disk row — so the primary action on that freshly-entered screen is \"wipe the first disk\".",
+            "failure_scenario": "User is on \"Görünüm ve Zaman\" (adım 6/10) having chosen \"Atla\" on the install step. They press Shift+Tab to double-check something, landing back on \"Diske Kurulum\" with the selection marker on /dev/sda. Reflexively pressing Enter (the wizard's universal \"continue\" key, which advanced them on every prior screen) immediately begins repartitioning /dev/sda with no confirmation prompt.",
+            "severity": "low"
+          },
+          {
+            "title": "Enter on the \"Ek Seçenekler\" checkbox rows silently skips the disk install",
+            "location": "panel/view_setup.go:411-417 (advance) and panel/view_setup.go:768-790 (checkbox rows at cursor len(disks)+1 and +2)",
+            "why_wrong": "The checkbox rows are toggled with ←/→/space (adjust, panel/view_setup.go:453-458). Enter on those rows fails the `s.cursor < len(s.disks)` test and falls into `s.goTo(stepTheme)` — the same outcome as choosing \"Atla\" — with no indication that the disk install was skipped.",
+            "failure_scenario": "User selects /dev/sda, then moves down to \"☑ Java 17 ve 21 sürümlerini şimdi indir\" to verify it is ticked, and presses Enter expecting to continue with the selected disk. The wizard jumps to \"Görünüm ve Zaman\" and no install ever happens; the user only discovers this after reboot, when the machine comes up from the USB again.",
+            "severity": "low"
+          },
+          {
+            "title": "Dead / inconsistent navigation code: fieldCount() claims 3 rows for stepIdentity and update()'s 'r' branch for stepIdentity is unreachable",
+            "location": "panel/view_setup.go:364-378 (fieldCount) and panel/view_setup.go:184-190 ('r' case)",
+            "why_wrong": "update() dispatches stepIdentity to updateIdentity at panel/view_setup.go:166-168 before the generic switch, so `case \"r\": if s.step == stepIdentity` can never fire. Likewise moveField/fieldCount are never used for stepIdentity (it uses identityRows() = 1 + len(networks) + 1), yet fieldCount hard-codes `case stepIdentity: return 3 // pcName, ssid, pass` — a stale model where the SSID was typed by hand. The s.ssid textinput itself is never focused or rendered (activeTextInput never returns it); it is only a hidden value holder.",
+            "failure_scenario": "Not user-visible today, but it is a live trap: anyone who later routes stepIdentity through the generic path (or calls moveField on it) gets a 3-row cursor over a list that actually has 1+N+1 rows, immediately producing out-of-range cursor states in updateIdentity/networkAt.",
+            "severity": "low"
+          }
+        ],
+        "recommendations": [
+          "panel/view_setup.go:411 — guard the stepInstall branch of advance() with `if s.installSuccess { reboot now }` (or reset s.cursor and route Enter to the reboot path) so the success screen's \"Hemen Yeniden Başlat  Enter\" button actually reboots instead of re-running mcos-install.",
+          "Decide what the disk install means for the wizard: either move stepInstall to the end (after stepConfirm) so doSetupSave runs first and mcos-install can copy a real config.json into MCOS-DATA, or call doSetupSave before doInstallOS. As it stands every setting collected after step 5 is discarded whenever the user installs.",
+          "panel/view_setup.go:436 — change back() to `if s.step > stepIntro { s.step--; ... }` (with an explicit rule for stepIdentity/stepInstall if re-entering them is undesirable), or stop rendering the \"Geri\" action on steps where it is a no-op (panel/view_setup.go:639).",
+          "Persist the PC name: add a hostname field to model.Config, set it in buildConfig() from s.pcName, and have the daemon apply it (sethostname + /etc/hostname). Otherwise drop the field and its mandatory validation from the wizard.",
+          "panel/view_setup.go:192-197 — do not consume left/right/h/l/space when activeTextInput() != nil. Move the adjust() cases behind a `if s.activeTextInput() == nil` check so the nodeName field can receive ordinary characters and caret movement.",
+          "panel/view_setup.go:228 / 873 — make identityRows() and viewIdentity agree: either cap identityRows at 1+min(len(networks),8)+1, or scroll/window the rendered list around the cursor so the selected row is always visible.",
+          "panel/messages.go:177 — either implement the dlPlugins pre-download or remove the checkbox; and move the dlJava downloads out of doInstallOS so the option is honoured on the \"Atla\" path too. Surface JavaInstall errors instead of `_, _ =`.",
+          "panel/app.go:151 — handle disksMsg.err (set setup.errMsg, e.g. \"disk listesi alınamadı: …\") so an RPC failure is not rendered as \"no disks found\".",
+          "panel/view_setup.go:1064 — return the UpdateConfig and Persist failures into the setup model (a dedicated setupErrMsg that sets s.errMsg) rather than errMsg{}, which app.go routes to a.statusErr that View() never renders while a.setup != nil. Also guard against repeated Enter presses firing multiple saves.",
+          "panel/view_setup.go:493 — seed buildConfig() from the currently loaded a.config (when one exists) instead of model.DefaultConfig(), so re-running the wizard from Ayarlar does not silently reset Turbo, AutostartServers, WAN, Features and Tier.",
+          "panel/view_setup.go:513 — make handleJavaSetup clear only javaDetecting, not s.loading, so a late javaSetupMsg cannot unlock the keyboard during a disk install.",
+          "Either implement the documented gate (block/warn on the Java and install steps while `!s.status.Net.Internet || !s.status.ClockSynced`) or delete the s.status field and fix the two comments that claim the gate exists (panel/view_setup.go:63 and internal/daemon/handlers_system.go:236).",
+          "Add an explicit confirmation before doInstallOS (a yes/no row or a typed device name), given that Enter is the universal \"continue\" key everywhere else in the wizard and back() from stepTheme lands on stepInstall with the cursor on the first disk."
+        ]
+      },
+      {
+        "key": "offline",
+        "summary": "MCOS has no offline install path at all: every server flavour, every mod/plugin, and the JRE itself are fetched live over HTTP at install time, with no on-disk artifact cache, no bundled fallback, and no \"offline mode\" flag anywhere in the tree. Making offline Fabric 1.21.11 + ViaVersion work requires four separate additions (a local Fabric provider path, a pre-seeded .mcos-launch.json or equivalent, a bundled JRE that gets registered into /data/java/index.json without java.detect being called manually, and a ViaFabric jar in mods/ since installViaVersion hard-skips all non-plugin flavours) plus a decision to put the payload in the MCOS-DATA seed partition rather than the 122 MB initramfs.",
+        "facts": [
+          {
+            "claim": "The provider contract is a 2-method interface; every flavour must implement Software() and Install(), and Install receives an *http.Client — there is no filesystem/offline parameter.",
+            "evidence": "internal/server/providers/provider.go:35-38 — `type Provider interface {\\n\\tSoftware() model.Software\\n\\tInstall(ctx context.Context, mcVersion, dir, javaBin string, client *http.Client, lg *log.Logger) (*InstallResult, error)\\n}`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "InstallResult is the only thing persisted about how to launch: JarFile / ArgsFile / Script / LaunchArgs / Notes, all JSON-tagged.",
+            "evidence": "internal/server/providers/provider.go:21-28 — `type InstallResult struct { JarFile string `json:\"jarFile,omitempty\"`; ArgsFile ...; Script ...; LaunchArgs []string `json:\"launchArgs,omitempty\"`; Notes ... }`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Providers are registered in a package-level map by an init() function; there is no way to inject or override a provider from outside the package.",
+            "evidence": "internal/server/providers/provider.go:41-43 `var registry = map[model.Software]Provider{}` / `func register(p Provider)` / `func Get(s model.Software) (Provider, bool)`, populated in `func init()` at provider.go:50-61.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "All provider downloads funnel through exactly two unexported helpers, both plain HTTP GETs with no cache, no retry, and no local-file fallback.",
+            "evidence": "internal/server/providers/provider.go:66 `func getJSON(ctx, client, url, v any) error` and provider.go:83 `func downloadTo(ctx, client, url, dir, filename string) (string, error)`; both build `http.NewRequestWithContext(ctx, http.MethodGet, url, nil)` and error out on any non-200.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The Fabric provider makes 3 network calls and writes exactly one file, server.jar, into the server data dir.",
+            "evidence": "internal/server/providers/fabric.go:30 GET https://meta.fabricmc.net/v2/versions/loader/<mcVersion>; fabric.go:39 GET https://meta.fabricmc.net/v2/versions/installer; fabric.go:49 `dlURL := fmt.Sprintf(\"%s/versions/loader/%s/%s/%s/server/jar\", fabricMeta, mcVersion, loader, installer)`; fabric.go:53 `downloadTo(ctx, client, dlURL, dir, \"server.jar\")`; fabric.go:56 returns `&InstallResult{JarFile: \"server.jar\", LaunchArgs: []string{\"nogui\"}}`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The Fabric server launcher jar MCOS downloads is not self-contained — the code's own comment states it resolves its remaining libraries on first run, which is a second, un-cached network dependency at server START time, not install time.",
+            "evidence": "internal/server/providers/fabric.go:47-48 — \"// Fabric serves a self-contained server launcher jar that resolves the rest\\n// of its libraries on first run — no installer execution required.\"",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The exact Fabric-launcher first-run fetch set (vanilla server jar from Mojang piston-data, fabric-loader + intermediary + ASM/mixin from maven.fabricmc.net and Maven Central, into .fabric/) is standard Fabric behaviour but is nowhere modelled in this codebase — MCOS has no code that pre-populates it.",
+            "evidence": "No references to `.fabric`, `maven.fabricmc.net`, `libraries`, or `intermediary` anywhere in internal/server/; the only fabricMeta constant is `https://meta.fabricmc.net/v2` (fabric.go:12).",
+            "confidence": "unverified"
+          },
+          {
+            "claim": "The launch record is <serverData>/.mcos-launch.json and is an embedded InstallResult plus an `installed` boolean. Writing this file by hand is enough to make IsInstalled() true and skip the provider entirely.",
+            "evidence": "internal/server/install.go:18-23 — `type launchInfo struct { providers.InstallResult; Installed bool `json:\"installed\"` }` and `const launchFile = \".mcos-launch.json\"`; install.go:30-33 `IsInstalled` returns `err == nil && li.Installed`; manager.go:269 `if m.IsInstalled(srv) { return nil }`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Install() resolves Java first but tolerates failure, then calls the provider (which is the hard network dependency), then writes eula/properties, then optionally ViaVersion, then saves the launch file.",
+            "evidence": "internal/server/install.go:61-105 — `m.java.Ensure(srv.JavaMajor)` at :73 with the error path only logging \"java %d not ready (%v); jar-only flavors can still install\" (:78); `prov.Install(...)` at :82 with `return err` on failure; `writeEULA`/`applyProperties` :87-92; `if srv.AllowOldVersions { m.installViaVersion(...) }` :95-97; `m.saveLaunch(srv.ID, li)` :100.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Start() order is EnsureInstalled -> loadLaunch -> java.BindForServer -> buildLaunchArgs -> supervisor.Add/Start, and the install-failure message already blames the internet connection.",
+            "evidence": "internal/server/manager.go:138-201; the StageInstall error at :139-142 reads \"%s %s sunucu yazılımı indirilemedi veya kurulamadı. İnternet bağlantısını kontrol edin, sonra tekrar deneyin.\"",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The final launch command is `java <jvmFlags> -jar server.jar nogui` for Fabric.",
+            "evidence": "internal/server/launch.go:7-21 `buildLaunchArgs` — `case li.JarFile != \"\": args = append(args, \"-jar\", li.JarFile); args = append(args, li.LaunchArgs...)`; the supervisor Spec at manager.go:176-188 sets `Path: javaBin, Args: args, Dir: dataDir`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "MC 1.21.x maps to Java 21.",
+            "evidence": "internal/java/version.go:21 `RequiredJavaMajor`; for major==1 the switch at :29-43 ends `default: // minor >= 21 \\n return 21`. Unknown/blank versions also default to 21 (:23).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Java is obtained only from Adoptium over HTTPS; the URL is built per-platform and there is no mirror, checksum, or local-archive option.",
+            "evidence": "internal/java/download.go:37-43 `temurinURL` returns `https://api.adoptium.net/v3/binary/latest/%d/ga/%s/%s/jdk/hotspot/normal/eclipse?project=jdk` with os=linux, arch=x64 from `adoptiumOSArch()` (download.go:18-34). Note it requests **jdk**, not jre.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Installed JDKs are recorded in a JSON index at <dataRoot>/java/index.json and extracted to <dataRoot>/java/temurin-<major>.",
+            "evidence": "internal/store/paths.go:20-21 `JavaDir() = <Root>/java`, `JavaIndex() = <JavaDir>/index.json`; internal/java/manager.go:161 `dest := filepath.Join(m.store.Paths.JavaDir(), fmt.Sprintf(\"temurin-%d\", major))`; registration via `m.register(rt)` -> `m.store.SaveJavaIndex(ix)` (manager.go:250-267).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "There IS one latent offline hook for Java: Detect() scans /opt/mcos/java (plus /usr/lib/jvm and /opt/java) and registers what it finds into the same index — so a JDK bundled at /opt/mcos/java/<jdk>/bin/java would be usable.",
+            "evidence": "internal/java/detect.go:101-115 `candidateDirs()` returns `[]string{\"/usr/lib/jvm\", \"/opt/java\", \"/opt/mcos/java\"}` on the default (linux) branch at detect.go:114; detect.go:19-152 `Detect()` calls `consider(base)` on each subdirectory and `m.register(rt)` on the best per major.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "That hook is dead today: nothing in the repo creates or populates /opt/mcos/java, and Detect() is never called automatically — only via the java.detect RPC, which no panel view invokes.",
+            "evidence": "Repo-wide grep for \"/opt/mcos\" returns exactly one hit: internal/java/detect.go:114. Grep for `Detect()` returns only internal/java/detect.go:19 (definition), internal/daemon/handlers_java.go:56 (`rts, err := d.java.Detect()`), panel/client.go:161 (wrapper definition) and cmd/mcosctl/java.go:88. Grep for `JavaDetect` in panel/*.go returns only the two lines of its own definition — no caller.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "With no internet, server start fails before the server package is even reached: the daemon's start handler calls java.Install() synchronously and returns a hard error.",
+            "evidence": "internal/daemon/handlers.go:400-413 — after `rts, _ := d.java.List()`, `if !installed { ... if _, err := d.java.Install(srv.JavaMajor); err != nil { return nil, &ipc.Error{Code: ipc.CodeConflict, Message: fmt.Sprintf(\"java %d indirme hatası: %v\", srv.JavaMajor, err)} } }`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "ViaVersion is NEVER installed for Fabric. installViaVersion returns immediately for any non-plugin flavour, and the code comment says mod loaders need ViaFabric instead.",
+            "evidence": "internal/server/compat.go:15-19 — `func (m *Manager) installViaVersion(...) { if !srv.SupportsPlugins { m.logf(\"server: ViaVersion not applicable for %s (%s is not plugin-based)\", ...); return } }`; comment at compat.go:13-14: \"mod loaders use a different project (ViaFabric) and are left untouched with a log note\". model.go:35-41 `SupportsPlugins()` excludes SoftwareFabric.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Even when it does run, installViaVersion hardcodes plugins/ and the slugs viaversion + viabackwards, fetched from Modrinth.",
+            "evidence": "internal/server/compat.go:22-23 — `pluginsDir := filepath.Join(dataDir, \"plugins\")` and `for _, slug := range []string{\"viaversion\", \"viabackwards\"}` calling `cat.InstallByID(ctx, slug, loader, srv.MCVersion, pluginsDir)`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "For Fabric, the manual catalog install path targets <serverData>/mods/ — that is where a bundled ViaFabric jar must land.",
+            "evidence": "internal/daemon/handlers_catalog.go:31-40 `contentDirFor` returns \"mods\" for `s.SupportsMods()`; handlers_catalog.go:84 `dir := filepath.Join(d.store.Paths.ServerData(srv.ID), contentDirFor(srv.Software))`. model.go:44-51 `SupportsMods()` includes SoftwareFabric.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Modrinth is the only mod/plugin source and it is fully online: search, version listing, and download are all live HTTPS calls to api.modrinth.com with no cache.",
+            "evidence": "internal/catalog/catalog.go:21 `const apiBase = \"https://api.modrinth.com/v2\"`; `Versions` (:141) GETs /project/<slug>/version; `BestFile` (:158) picks the first Primary file; `DownloadTo` (:178) GETs file.URL and writes `filepath.Base(file.Filename)` into destDir; `InstallByID` (:216) chains the two.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "There is NO offline mode, NO artifact cache, and NO bundled-jar concept anywhere in the daemon.",
+            "evidence": "Repo-wide grep over internal/ cmd/ panel/ for offline|çevrimdışı|cache|önbellek|bundled|local artifact yields only: a font glyph cache (internal/fbfont/font.go), PeerOffline (model/cluster.go), an in-memory version-list cache (handlers_net.go:93-121), and comments. No disk cache of jars or JDKs exists.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The one existing offline-ish fallback is a hardcoded Minecraft version list used when the Mojang manifest is unreachable — and it does not contain 1.21.11.",
+            "evidence": "internal/daemon/handlers_net.go:87-91 — `var fallbackVersions = []string{\"1.21.4\", \"1.21.1\", \"1.20.6\", \"1.20.4\", \"1.20.1\", \"1.19.4\", \"1.18.2\", \"1.16.5\", \"1.12.2\", \"1.8.8\"}`; used at handlers_net.go:114 when fetchMojangVersions fails. The successful-fetch cache (verCache, :93-99) is in-memory only and lost on reboot.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "A working offline import path for mods/plugins already exists (new, uncommitted): USB jar scan + copy into the flavour's content dir. It cannot supply server.jar or a JRE.",
+            "evidence": "internal/files/usb_linux.go:52 `func ScanUSBJars() ([]model.USBJar, error)` and :93 `func InstallUSBJars(items []model.USBJar, destDir string) (int, error)`; wired at internal/daemon/handlers_catalog.go:138 `handleServerScanUSBMods` and :146 `handleServerInstallUSBMods`, which computes `targetFolder := filepath.Join(d.store.Paths.ServerData(srv.ID), contentDirFor(srv.Software))` (:159).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The rootfs is a gzip-compressed initramfs, measured at 122,175,213 bytes compressed / 268,892,160 bytes uncompressed, with a 262 MB target tree. Everything added to it costs both image size AND boot-time RAM, because an initramfs is fully resident.",
+            "evidence": "os/buildroot/external/configs/mcos_defconfig:102-103 `BR2_TARGET_ROOTFS_CPIO=y` / `BR2_TARGET_ROOTFS_CPIO_GZIP=y`; `ls -la os/buildroot/output/images/` shows rootfs.cpio.gz 122175213 and rootfs.cpio 268892160; `du -sh os/buildroot/output/target` = 262M.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The daemon's data root on the appliance is /data (not the Go default /var/lib/mcos), passed explicitly by the init script.",
+            "evidence": "os/buildroot/external/board/mcos/rootfs-overlay/etc/init.d/S99mcos:105 — `\"$MCOSD\" --data-root \"$MCOS_DATA\" --listen \"$SOCK\" >/run/mcos/mcosd.log 2>&1 &` with `MCOS_DATA=/data`. cmd/mcosd/main.go:21-26 `defaultDataRoot()` returns \"/var/lib/mcos\" on linux, overridden by the -data-root flag (main.go:37).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Baking files into the rootfs at /data is useless: S99mcos mounts the MCOS-DATA partition over /data at boot, masking whatever the initramfs put there.",
+            "evidence": "S99mcos:17 `mount_persistent()` — `mkdir -p \"$MCOS_DATA\"`, locates the partition with `/usr/bin/mcos-findfs MCOS-DATA`, then `mount \"$part\" \"$MCOS_DATA\"`. post-build.sh:56 only does `mkdir -p \"${TARGET_DIR}/data\"`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The correct seeding point for /data content already exists and is currently empty: mkusb.sh builds the ext4 MCOS-DATA partition from a seed directory using mke2fs -d, without mounting.",
+            "evidence": "scripts/mkusb.sh:206-212 — `SEED=\"$WORK/seed\"`, `mkdir -p \"$SEED/servers\" \"$SEED/java\" \"$SEED/log\"`, `mke2fs -q -t ext4 -L MCOS-DATA -d \"$SEED\" -F \"$DATAIMG\" \"${DATA_MB}M\"`. Comment at :209: \"Boş bir /data iskeleti\".",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Anything seeded into the live /data survives the permanent install to disk.",
+            "evidence": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:312-314 — `mkdir -p \"$TARGET_MNT/servers\" \"$TARGET_MNT/java\" \"$TARGET_MNT/log\"` then `cp -a /data/. \"$TARGET_MNT/\"`.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The ISO route has no data partition: the ISO is just kernel + initrd, so an ISO-booted machine can only see a bundle that lives inside the 122 MB initramfs.",
+            "evidence": "Makefile `iso:` target — `cp \"$(BR_OUTPUT)/images/rootfs.cpio.gz\" \"$$D/boot/initrd.img\"` and a grub.cfg with `linux /boot/bzImage` + `initrd /boot/initrd.img`; no third file is copied. os/buildroot/external/board/mcos/genimage.cfg is documented in its own header as dead config (BR2_TARGET_ROOTFS_EXT2 is not enabled, no post-image script).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The mechanism for shipping prebuilt binary blobs into the rootfs already exists and has a working template: a BR2_EXTERNAL package with SITE_METHOD=local.",
+            "evidence": "os/buildroot/external/package/nerd-font/nerd-font.mk — `NERD_FONT_SITE = $(BR2_EXTERNAL_MCOS_PATH)/board/mcos/rootfs-overlay/usr/share/fonts/truetype`, `NERD_FONT_SITE_METHOD = local`, `define NERD_FONT_INSTALL_TARGET_CMDS ... cp $(@D)/FiraCodeNerdFont-Regular.ttf $(TARGET_DIR)/usr/share/fonts/truetype/nerd-font/ ... endef`, `$(eval $(generic-package))`. external.mk globs `package/*/*.mk`; external/Config.in sources each package's Config.in. mcos.mk uses the same pattern for the Go binaries.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Buildroot upstream ships openjdk and openjdk-bin packages that are available in this checkout but not enabled.",
+            "evidence": "`ls os/buildroot/buildroot/package/ | grep -i jdk` -> `openjdk`, `openjdk-bin`; `package/openjdk/Config.in` exists. No BR2_PACKAGE_OPENJDK line appears in os/buildroot/external/configs/mcos_defconfig (114 lines, grepped).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The Go tree compiles cleanly as read, so these findings reflect buildable current code.",
+            "evidence": "`go build ./cmd/... ./internal/... ./panel/...` -> no output, BUILD_EXIT=0",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Size estimates for the bundle: Temurin 21 JDK ~180-200 MB extracted (~190 MB tar.gz is what temurinURL fetches today since it requests jdk not jre), a jlink'd headless JRE ~45-60 MB, MC 1.21.x server jar ~50-60 MB, Fabric loader libs ~10 MB, ViaFabric/ViaVersion jar ~4-8 MB.",
+            "evidence": "No JDK is installed on this machine (`which java` -> not found, /usr/lib/jvm empty) and no network access was used, so none of these figures were measured here. They are recalled magnitudes, not measurements.",
+            "confidence": "unverified"
+          }
+        ],
+        "problems": [
+          {
+            "title": "No offline path exists at any layer — install is a hard network dependency with no fallback",
+            "location": "internal/server/providers/provider.go:66,83",
+            "why_wrong": "getJSON and downloadTo are the only ways any provider obtains bytes. Both do a bare http GET and return an error on connection failure. There is no cache lookup, no local-file probe, no bundled-artifact directory, and the Provider interface has no parameter through which one could be supplied.",
+            "failure_scenario": "Box boots with no uplink -> user creates a Fabric 1.21.x server -> handlers.go:410 java.Install fails first with `java 21 indirme hatası: download: dial tcp: no such host`; if a JDK were somehow present, fabric.go:30 then fails with `fabric: loaders for \"1.21.11\": Get \"https://meta.fabricmc.net/v2/versions/loader/1.21.11\": dial tcp ...`. Server never installs, never starts.",
+            "severity": "critical"
+          },
+          {
+            "title": "Bundling server.jar alone is not sufficient for Fabric — the launcher fetches its libraries at first RUN",
+            "location": "internal/server/providers/fabric.go:47",
+            "why_wrong": "MCOS downloads Fabric's server *launcher* jar, not a fully materialised server. The code's own comment states it \"resolves the rest of its libraries on first run\". Those runtime fetches (vanilla server jar, fabric-loader, intermediary, mixin/ASM) go out over the network from inside the JVM, where MCOS has no visibility or control, and are not recorded in .mcos-launch.json.",
+            "failure_scenario": "A bundle ships server.jar and a hand-written .mcos-launch.json, so EnsureInstalled is skipped and Start succeeds in spawning `java -jar server.jar nogui`. The JVM then tries to download the 1.21.x server jar and loader libs, fails offline, and exits non-zero. onExit (manager.go:411) flips the state to Error with `[MCOS HATA] Sunucu süreci beklenmeyen bir şekilde durdu` and the user sees no actionable cause.",
+            "severity": "critical"
+          },
+          {
+            "title": "The only Java offline hook (/opt/mcos/java) is never triggered automatically, so a bundled JRE would sit unused",
+            "location": "internal/java/detect.go:114",
+            "why_wrong": "candidateDirs() includes /opt/mcos/java, which is clearly the intended bundle location, but Detect() runs only from the java.detect RPC (handlers_java.go:56). Nothing calls it at daemon startup, and panel/client.go:161's JavaDetect wrapper has zero callers in the panel. Meanwhile handlers.go:405 decides whether Java is present purely by reading the index (java.List()), which a never-run Detect never populates.",
+            "failure_scenario": "Image ships a JRE at /opt/mcos/java/temurin-21/bin/java. User creates a server. handlers.go:405 iterates java.List() -> index.json is empty -> handlers.go:410 calls java.Install(21) -> Adoptium download fails offline -> CodeConflict error. The perfectly good bundled JRE 30 cm away on disk is never looked at.",
+            "severity": "critical"
+          },
+          {
+            "title": "ViaVersion is unreachable for Fabric by design — the requested feature combination is not implementable with the current compat code",
+            "location": "internal/server/compat.go:16",
+            "why_wrong": "installViaVersion returns immediately when !srv.SupportsPlugins, and model.go:35-41 excludes Fabric from SupportsPlugins(). So even ONLINE, ticking AllowOldVersions on a Fabric server installs nothing; it only logs \"ViaVersion not applicable\". The user's stated goal (Fabric + ViaVersion preinstalled) has no code path at all, offline or online.",
+            "failure_scenario": "User creates Fabric 1.21.x with AllowOldVersions=true. install.go:95 calls installViaVersion, which logs the not-applicable line and returns. No jar lands in mods/ or plugins/. A 1.20 client connects and is rejected with a protocol-version mismatch.",
+            "severity": "high"
+          },
+          {
+            "title": "Bundling into the initramfs would roughly double or triple both image size and boot RAM footprint",
+            "location": "os/buildroot/external/configs/mcos_defconfig:102",
+            "why_wrong": "BR2_TARGET_ROOTFS_CPIO + _GZIP means the whole rootfs is a gzip cpio that the kernel unpacks into tmpfs at boot. The measured cost today is 122 MB compressed / 269 MB resident. JDK/JRE + MC server jar + loader libs + Via jar are all already-compressed or poorly-compressible content, so they add close to their raw size to rootfs.cpio.gz and their full size to RAM.",
+            "failure_scenario": "Adding a full Temurin 21 JDK (what temurinURL fetches today — note it requests /jdk/, not a JRE) plus a 1.21.x server jar to the overlay pushes rootfs.cpio.gz past ~350 MB and the resident tmpfs past ~500 MB. On a 1 GB target the kernel OOMs during initramfs unpack, or boots with too little RAM left for a Minecraft server that wants 1-2 GB heap. mkusb.sh:30 BOOT_MB=768 (sized for a ~122 MB initrd) also becomes too small and mkusb.sh:111 dies with \"boot bölümü küçük\".",
+            "severity": "high"
+          },
+          {
+            "title": "Offline, the panel cannot even offer the target version — 1.21.11 is not in the fallback list",
+            "location": "internal/daemon/handlers_net.go:88",
+            "why_wrong": "When the Mojang manifest is unreachable, handleServerVersions returns the hardcoded fallbackVersions slice, whose newest entry is 1.21.4. The in-memory verCache is not persisted, so even a machine that was once online offers the fallback list after a reboot.",
+            "failure_scenario": "Offline box, user opens the create-server wizard (panel/messages.go:204 -> cl.ServerVersions). The version picker lists 1.21.4 at newest. The user cannot select 1.21.11 at all, so the bundled artifacts would never be requested even if everything else worked.",
+            "severity": "medium"
+          },
+          {
+            "title": "Nothing seeds /data, and rootfs content at /data is masked by the persistent mount",
+            "location": "scripts/mkusb.sh:210",
+            "why_wrong": "The seed directory that becomes the MCOS-DATA ext4 partition contains only three empty dirs (servers/, java/, log/). Meanwhile post-build.sh:56 creates /data in the rootfs, but S99mcos:17 mount_persistent() mounts MCOS-DATA on top of it, so any file the initramfs placed at /data becomes invisible the moment the partition is found.",
+            "failure_scenario": "A developer bundles a JRE by dropping it into rootfs-overlay/data/java/. On a USB-installed box the MCOS-DATA partition mounts over /data and the JRE vanishes; on a box where mcos-findfs fails, /data stays in RAM and the JRE works — so the bundle appears to work in QEMU and silently disappears on real hardware.",
+            "severity": "medium"
+          }
+        ],
+        "recommendations": [
+          "Do NOT put the payload in the initramfs. Put it in the MCOS-DATA seed: extend scripts/mkusb.sh:206-212 so $SEED is populated from a new bundle/ directory before mke2fs -d runs. That costs zero initramfs bytes, zero boot RAM, survives install via mcos-install:314's `cp -a /data/. \\\"$TARGET_MNT/\\\"`, and needs no Buildroot change. The only case it does not cover is a pure-ISO boot (Makefile iso: ships only bzImage + initrd.img), which has no data partition at all.",
+          "Seed Java as a ready-registered runtime, not as files to be discovered: place the JRE at /data/java/temurin-21/ in the seed AND write /data/java/index.json containing a model.JavaRuntime with Major:21, Vendor:\"temurin\", Path:\"/data/java/temurin-21\", JavaBin:\"/data/java/temurin-21/bin/java\". That satisfies java.Manager.Get -> Ensure (manager.go:100) and handlers.go:405's java.List() check with no code change at all. If you instead bundle to /opt/mcos/java (inside the initramfs), you MUST also add a `d.java.Detect()` call to daemon startup — today detect.go:114's /opt/mcos/java entry is dead code because Detect() only runs from the java.detect RPC.",
+          "Ship a headless jlink'd JRE 21, not the JDK. temurinURL (download.go:37-43) currently requests `/jdk/`; a full JDK is several times the size of a `jlink --add-modules java.base,java.logging,java.management,java.naming,java.desktop,jdk.unsupported --strip-debug --no-header-files --no-man-pages` image, which is what a Minecraft server actually needs. Verify the resulting bin/java runs against the glibc toolchain in mcos_defconfig (BR2_TOOLCHAIN_BUILDROOT_GLIBC) — a distro JRE built against a newer glibc will not start on this rootfs.",
+          "For Fabric, bundling server.jar is NOT enough. Either (a) run the Fabric server launcher once at image-build time inside a prepared server directory and bundle the whole resulting tree (server.jar + the .fabric/ library cache + the vanilla server jar + libraries/), or (b) add a new provider path that lays out a fully-materialised server dir. Option (a) is far cheaper and needs no Go change, because install.go's launchInfo is just JSON — see the next item.",
+          "Seed the whole server directory plus its .mcos-launch.json so the provider is never invoked. Write /data/servers/<id>/data/.mcos-launch.json containing {\"jarFile\":\"server.jar\",\"launchArgs\":[\"nogui\"],\"installed\":true}; IsInstalled (install.go:30) then returns true and EnsureInstalled (manager.go:269) short-circuits before any network call. You must also seed the matching /data/servers/<id>/server.json manifest so store.GetServer finds it, plus eula.txt and server.properties (install.go:159-200 normally writes these).",
+          "ViaVersion cannot work on Fabric — bundle ViaFabric (or ViaFabricPlus) into <serverData>/mods/ instead. compat.go:16's `if !srv.SupportsPlugins { return }` guard means Fabric is skipped unconditionally; compat.go:13-14 says so explicitly. If you want MCOS to handle this itself rather than via a seeded directory, extend installViaVersion with a SupportsMods branch that calls catalog.InstallByID with slug \"viafabric\" and destDir filepath.Join(dataDir, \"mods\") — mirroring contentDirFor in handlers_catalog.go:31-40.",
+          "Add 1.21.11 (or whatever the bundled version is) to fallbackVersions in internal/daemon/handlers_net.go:88, and ideally persist the successful Mojang fetch to disk instead of the in-memory verCache (handlers_net.go:93-99) so a once-online box keeps a real list across reboots. Without this the offline wizard cannot even offer the bundled version.",
+          "Add an explicit offline/local-artifact lookup rather than relying on pre-seeded launch files: give providers.downloadTo (provider.go:83) a check for a local cache dir (e.g. /opt/mcos/artifacts/<sha or filename>) before the HTTP GET, and give catalog.DownloadTo (catalog.go:178) the same. This is a small, contained change that makes every flavour and every mod bundleable, instead of special-casing Fabric.",
+          "If you do choose the initramfs route, copy the nerd-font pattern exactly: a new os/buildroot/external/package/mcos-java/ with *_SITE pointing at a local directory, *_SITE_METHOD = local, and *_INSTALL_TARGET_CMDS copying into $(TARGET_DIR)/opt/mcos/java/, plus a Config.in sourced from external/Config.in and a BR2_PACKAGE_MCOS_JAVA=y line in mcos_defconfig. external.mk already globs package/*/*.mk so no wiring beyond that is needed. Also bump mkusb.sh:30 BOOT_MB (currently 768, sized for a ~122 MB initrd) or mkusb.sh:111 will abort.",
+          "Alternative worth evaluating before hand-rolling: os/buildroot/buildroot/package/openjdk and openjdk-bin already exist in this checkout and are simply not enabled in mcos_defconfig. Enabling BR2_PACKAGE_OPENJDK* would give a cross-built JVM in the rootfs at a standard prefix — but it lands in the initramfs (same size problem) and detect.go's candidateDirs would need to cover wherever Buildroot installs it.",
+          "Improve the offline diagnostics regardless of which route is chosen: manager.go:139-142 already tells the user to check the internet, but handlers.go:411's `java %d indirme hatası` fires first and is the message users will actually see, and a Fabric launcher that dies fetching its own libraries surfaces only as onExit's generic `süreç beklenmeyen bir şekilde durdu` (manager.go:422). Detect a no-network condition once (sysmon already tracks online state) and say so plainly in all three places."
+        ]
+      },
+      {
+        "key": "ui",
+        "summary": "The framebuffer groundwork is further along than the task description assumed: three packages exist (internal/fbdev, internal/fbfont, and internal/fbdraw — the last two created after the git-status snapshot), all build, and all 22 tests pass under -race. The pixel/vector/text foundation is genuinely solid and well-tested, but nothing is wired into cmd/ or panel/ yet, and the surrounding system is not ready: no VT takeover, no keyboard-input path, no mode setting, GRUB caps the framebuffer at 1024x768, and no native KMS driver is compiled in, so 1920x1080 on real hardware is not currently achievable.",
+        "facts": [
+          {
+            "claim": "internal/fbdev has 4 files totalling 463 lines and both builds and passes its tests.",
+            "evidence": "`wc -l internal/fbdev/*.go` -> canvas.go 64, device_linux.go 285, device_linux_test.go 83, device_other.go 31. `go build ./internal/fbdev/` -> BUILD_OK. `go test -count=1 -v ./internal/fbdev/` -> '--- PASS: TestStructLayout', '--- PASS: TestOpenMissingDeviceFails', 'ok mcos/internal/fbdev 0.002s'",
+            "confidence": "verified"
+          },
+          {
+            "claim": "fbdev DONE: open /dev/fb0, FBIOGET_VSCREENINFO/FBIOGET_FSCREENINFO ioctls without cgo, mmap, format validation (packed-pixels + truecolor + 16/24/32bpp only), stride-correct Flip that reads channel shifts from the driver's own fb_bitfield rather than assuming XRGB, Close/munmap, plus a portable image.RGBA canvas and SavePNG that work off-Linux.",
+            "evidence": "internal/fbdev/device_linux.go:106 `func Open(path string)`; :158 `func (d *Device) check()` rejecting Type!=0/Visual!=2; :126 `d.row = int(d.finf.LineLength)`; :138-140 `d.rShift = uint(d.vinf.Red.Offset)` etc.; :191 `func (d *Device) Flip(img *image.RGBA)`; canvas.go:25 NewCanvas / :46 SavePNG; device_other.go:21 non-Linux stub returning an explicit error",
+            "confidence": "verified"
+          },
+          {
+            "claim": "fbdev's C-struct layout assumptions are correct for amd64: fb_var_screeninfo=160 bytes, fb_fix_screeninfo=80 bytes, fb_bitfield=12 bytes, with LineLength at offset 48 and MmioStart at 56.",
+            "evidence": "internal/fbdev/device_linux_test.go:20-74 asserts these; `go test` reports '--- PASS: TestStructLayout'. I re-derived the C offsets by hand from <linux/fb.h> field order and they match.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "fbdev MISSING: no mode setting at all — FBIOPUT_VSCREENINFO (0x4601) is not defined or used, so the Go code cannot change resolution or bit depth.",
+            "evidence": "`grep -rn '0x4601|FBIOPUT|PutVScreen' internal/fbdev/` -> '(none - no mode setting)'. Only fbioGetVScreenInfo=0x4600 and fbioGetFScreenInfo=0x4602 are declared at device_linux.go:17-18.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "fbdev MISSING: no double-buffering/page-flip (FBIOPAN_DISPLAY), no vsync wait (FBIO_WAITFORVSYNC), and no dirty-rectangle tracking — Flip always converts and writes the whole visible area every call.",
+            "evidence": "internal/fbdev/device_linux.go:205 `for y := 0; y < h; y++ {` iterates the full clipped height unconditionally; no other ioctl constants exist in the package (grep above).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "fbdev MISSING tests: Flip() and scale8() are never exercised, and canvas.go has no test file at all — the only two tests are a struct-layout test and a missing-device test.",
+            "evidence": "`grep -n '^func Test' internal/fbdev/device_linux_test.go` -> only TestStructLayout (:19) and TestOpenMissingDeviceFails (:78). `ls internal/fbdev/` shows no canvas_test.go.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "internal/fbfont is NOT just an embedded TTF — it is a 236-line rasteriser (font.go) with a 203-line test file, plus the font.",
+            "evidence": "`find internal/fbfont -type f -printf '%s  %p\\n'` -> 7401 internal/fbfont/font.go, 5262 internal/fbfont/font_test.go, 2642616 internal/fbfont/fonts/FiraCodeNerdFont-Regular.ttf. `wc -l` -> font.go 236, font_test.go 203.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The embedded font file exists and is 2,642,616 bytes (2.52 MiB): internal/fbfont/fonts/FiraCodeNerdFont-Regular.ttf, embedded via go:embed.",
+            "evidence": "`ls -la internal/fbfont/fonts/` -> '-rw-r--r-- 1 kkekerem kkekerem 2642616 Sep 10 15:45 FiraCodeNerdFont-Regular.ttf'; internal/fbfont/font.go:39 `//go:embed fonts/FiraCodeNerdFont-Regular.ttf`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The x/image module version is golang.org/x/image v0.46.0, and it builds. x/sys is v0.48.0.",
+            "evidence": "go.mod: 'golang.org/x/image v0.46.0 // indirect' and 'golang.org/x/sys v0.48.0 // indirect'; go.sum: 'golang.org/x/image v0.46.0 h1:b1+oYj0Jbp6K5MDT4i4/eZpYlk3V8SJhhDKh6LBHAyQ='. `go build ./internal/fbfont/` -> FBFONT_BUILD_OK",
+            "confidence": "verified"
+          },
+          {
+            "claim": "fbfont provides cell-grid metrics, an alpha-mask glyph cache, and explicit missing-glyph reporting. At 16px the cell is 10x20 with baseline 15, giving a 192x54 character grid at 1920x1080.",
+            "evidence": "internal/fbfont/font.go:45 type Face, :61 type Glyph{Mask *image.Alpha, OffX/OffY, Missing}, :149 Glyph() with RWMutex cache, :215 Grid(). `go test -v ./internal/fbfont/` -> 'font_test.go:202: 1920x1080 @ 16px hücre=10x20 taban=15 -> 192 sütun x 54 satır'",
+            "confidence": "verified"
+          },
+          {
+            "claim": "A THIRD package exists that the task brief did not mention: internal/fbdraw (painter.go 341 lines + painter_test.go 262 lines), which draws real anti-aliased vector graphics via golang.org/x/image/vector — rounded rects as single-piece Bezier rings, circles, polygons, crisp lines, colour blending.",
+            "evidence": "internal/fbdraw/painter.go:1 'Package fbdraw draws the MCOS interface as REAL VECTOR GRAPHICS.'; :47 imports golang.org/x/image/vector; :169 StrokeRoundRect draws outer clockwise + inner counter-clockwise contour in one rasterisation; `go build ./internal/fbdraw/` -> FBDRAW_BUILD_OK",
+            "confidence": "verified"
+          },
+          {
+            "claim": "All three fb packages pass their tests cleanly, including under -race: 2 tests in fbdev, 8 in fbfont, 12 in fbdraw. go vet is clean.",
+            "evidence": "`go test -count=1 -race ./internal/fbdev/ ./internal/fbfont/ ./internal/fbdraw/ ./panel/...` -> 'ok mcos/internal/fbdev 1.010s / ok mcos/internal/fbfont 1.024s / ok mcos/internal/fbdraw 1.045s / ok mcos/panel 2.902s / ok mcos/panel/theme 1.010s'. `go vet ./internal/fbdev/ ./internal/fbfont/ ./internal/fbdraw/` -> VET CLEAN",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Nothing in cmd/, panel/ or the rest of internal/ imports fbdev, fbfont or fbdraw — the groundwork is entirely unwired.",
+            "evidence": "`grep -rn 'fbdev|fbfont|fbdraw' --include=*.go cmd/ internal/ panel/` returns only matches inside internal/fbdraw itself (painter.go:1,14,39 and painter_test.go:1); no hits in cmd/ or panel/.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "KEY PORT-STRATEGY FACT CONFIRMED: the entire UI is produced by a single View() string call. panel/app.go:634 `func (a *App) View() string` is the only View() in the package, and Screenshot() renders a complete frame by calling it directly with no TTY.",
+            "evidence": "`grep -n 'func.*View() string' panel/*.go` -> single hit 'panel/app.go:634'. panel/screenshot.go:43 `return a.View()`. app.go:682 `return lipgloss.JoinVertical(lipgloss.Left, a.renderTopBar(), body, a.renderHelp())`. Sub-views (setup/wizard/detail) are called from View() and also return strings (app.go:642, :646, :675).",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Panel size: 7,624 lines across panel/*.go + panel/theme/*.go, of which 596 are tests, so ~7,028 non-test lines would be affected by a port. Largest files: view_setup.go 1089, app.go 916, view_detail.go 892, view_wizard.go 760.",
+            "evidence": "`wc -l panel/*.go panel/theme/*.go` -> '7624 total'; test files app_test.go 197 + view_setup_test.go 53 + view_wizard_test.go 115 + theme/theme_test.go 231 = 596",
+            "confidence": "verified"
+          },
+          {
+            "claim": "lipgloss feature inventory across panel/ (counting both '.M(' and line-leading chained 'M('): Foreground 29, Width 26, Bold 23, BorderForeground 11, Padding 9, Border 7, Height 3, Faint 1, BorderBackground 1, Background 1.",
+            "evidence": "Output of /tmp/count2.sh over panel/ with regex '(\\.M\\()|(^[[:space:]]+M\\()'. Chained calls span lines, so a naive '\\.M\\(' grep undercounts — this regex catches both forms.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "lipgloss package-level usage: NewStyle 29, Style (type) 28, Width (string measurement) 17, Color 15, Left 8, JoinVertical 8, RoundedBorder 7, Center 7, JoinHorizontal 5, WithWhitespaceChars 3, Top 3, SetColorProfile 3, Place 3.",
+            "evidence": "`grep -rhoE 'lipgloss\\.[A-Za-z]+' --include=*.go panel/ | sort | uniq -c | sort -rn`",
+            "confidence": "verified"
+          },
+          {
+            "claim": "RoundedBorder is the ONLY border style used anywhere in the panel — no Normal/Thick/Double/Hidden borders. A custom renderer only has to reproduce one frame style.",
+            "evidence": "`grep -rhoE 'lipgloss\\.(Rounded|Normal|Thick|Double|Hidden|Block|InnerHalfBlock|OuterHalfBlock|ASCII|Markdown)[A-Za-z]*' --include=*.go panel/ | sort | uniq -c` -> '7 lipgloss.RoundedBorder' and nothing else",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Only 3 lipgloss.Place call sites exist (all Center/Center full-screen modals) and 13 Join sites — the layout surface a custom renderer must reproduce is small.",
+            "evidence": "`grep -rn 'lipgloss.Place|lipgloss.JoinHorizontal|lipgloss.JoinVertical' --include=*.go panel/` -> Place at app.go:650, view_setup.go:658, view_wizard.go:627; JoinVertical at view_servers.go:51, view_wizard.go:616,618, view_dashboard.go:121, view_detail.go:528,674, view_setup.go:656, app.go:682; JoinHorizontal at components.go:160,330,531, app.go:681",
+            "confidence": "verified"
+          },
+          {
+            "claim": "No Align/AlignHorizontal/AlignVertical, MaxWidth, MaxHeight, Margin, Italic, Underline, Strikethrough, Reverse, Blink, Inline or Copy calls exist anywhere in panel/ — these need not be reproduced.",
+            "evidence": "/tmp/count2.sh tested all of these names explicitly and printed only the 10 non-zero entries listed above; every other name scored 0.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "ANSWER TO Q4 — under termenv.ANSI (what MCOS pins), lipgloss v1.1.0 emits ONLY the form ESC[<params>m, where each param comes from a closed set of ~30 integers: attributes {0 reset, 1 bold, 2 faint, 3 italic, 4 underline, 5 blink, 7 reverse, 9 crossout, 53 overline}, foreground {30-37, 90-97}, background {40-47, 100-107}. NO ESC[38;5;Nm and NO ESC[38;2;R;G;Bm are ever produced.",
+            "evidence": "Empirical dump (ran a program against lipgloss v1.1.0 + termenv v0.16.0): Foreground(Color(\"4\")) -> \"\\x1b[34mAb\\x1b[0m\"; Foreground(Color(\"12\")) -> \"\\x1b[94m\"; Background(Color(\"0\")) -> \"\\x1b[40m\"; Fg+Bg+Bold -> \"\\x1b[1;36;40m\"; Faint -> \"\\x1b[2m\"; Foreground(Color(\"#23a99c\")) -> \"\\x1b[36m\" (degraded). Source confirms: termenv@v0.16.0/style.go:12-20 defines the attribute constants and :56 `return fmt.Sprintf(\"%s%sm%s%sm\", CSI, seq, s, CSI+ResetSeq)`; color.go:76-90 ANSIColor.Sequence returns bgMod(col)+30 for col<8 and bgMod(col-8)+90 otherwise.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Under termenv.TrueColor lipgloss additionally emits ESC[38;2;R;G;Bm / ESC[48;2;R;G;Bm for hex colours and ESC[38;5;Nm / ESC[48;5;Nm for numeric indices 16-255.",
+            "evidence": "Empirical: TrueColor Foreground(Color(\"#23a99c\")) -> \"\\x1b[38;2;35;169;156mAb\\x1b[0m\"; Background(Color(\"#0f1216\")) -> \"\\x1b[48;2;15;18;22m\"; Color(\"200\") -> \"\\x1b[38;5;200m\". Source: termenv color.go:101-113 RGBColor.Sequence -> fmt.Sprintf(\"%s;2;%d;%d;%d\", prefix, ...), :92-99 ANSI256Color.Sequence -> fmt.Sprintf(\"%s;5;%d\", prefix, c), with Foreground=\"38\"/Background=\"48\" at color.go:17-19.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "DECISIVE NUANCE for the ANSI parser: because MCOS's entire palette is addressed by bare numeric slot names \"0\"-\"7\" (theme/palette.go:44-53), those colours emit 30-37/40-47 in EVERY profile — including TrueColor. A 16-colour SGR parser is therefore sufficient regardless of which profile is selected, unless the theme is rewritten to use hex colours.",
+            "evidence": "panel/theme/palette.go:44-53 defines SlotBg=\"0\" .. SlotText=\"7\". Empirical: under termenv.TrueColor, Foreground(Color(\"4\")) still produced \"\\x1b[34mAb\\x1b[0m\" and Background(Color(\"0\")) still produced \"\\x1b[40m\".",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Every styled run emitted by lipgloss is self-terminated with ESC[0m, so no SGR state carries across runs — the parser needs no persistent attribute stack.",
+            "evidence": "Empirical rendering of the real pane() box produced: 'ESC[34;40m╭──────╮ESC[0m' then 'ESC[34;40m│ESC[0mESC[40m ESC[0mESC[37;40mhiESC[0mESC[40m ESC[0mESC[40m  ESC[0mESC[34;40m│ESC[0m' — each segment opens and closes.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "MCOS pins termenv.ANSI deliberately, because fbterm cannot parse ESC[38;5;Nm (it treats SGR 38 as underline) and would otherwise fall back to Ascii and lose all colour.",
+            "evidence": "panel/theme/terminal.go:36 `lipgloss.SetColorProfile(termenv.ANSI)`; terminal.go:21-25 comment 'fbterm 256 renk SGR'sini (ESC[38;5;Nm) desteklemez ... profil Ascii'ye düşer ve tüm renkler kaybolur'; palette.go:21-22 cites fbterm src/lib/vterm_action.cpp:522",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Under termenv.Ascii, lipgloss emits a degenerate empty 'ESC[;m' for bordered styles rather than nothing — worth knowing if a parser ever sees Ascii output.",
+            "evidence": "Empirical: Ascii-profile box rendered as 'ESC[;m╭──────╮ESC[0m'. This matches the comment at cmd/mcos-panel/main.go:31-34 describing stray 'ESC[;m' sequences.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "ANSWER TO Q5 — framebuffer options enabled in kernel.config: CONFIG_FB, FB_EFI, FB_VESA, SYSFB, SYSFB_SIMPLEFB, FB_SIMPLE, DRM, DRM_FBDEV_EMULATION, DRM_SIMPLEDRM, DRM_VIRTIO_GPU, DRM_VBOXVIDEO, DRM_VMWGFX, DRM_BOCHS, FRAMEBUFFER_CONSOLE, FRAMEBUFFER_CONSOLE_DETECT_PRIMARY, LOGO, plus VGA_CONSOLE, VT, VT_CONSOLE, DUMMY_CONSOLE and EFI/EFI_STUB/EFI_EARLYCON.",
+            "evidence": "os/buildroot/external/board/mcos/kernel.config lines 71-94 and 100-103, 216 (CONFIG_FB_SIMPLE=y)",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The BUILT kernel is 6.6.32 and confirms FB=y, FB_CORE=y, FB_DEVICE=y, FB_EFI=y, FB_VESA=y, SYSFB=y, SYSFB_SIMPLEFB=y, DRM=y, DRM_FBDEV_EMULATION=y, DRM_SIMPLEDRM=y, DRM_BOCHS/VBOXVIDEO/VIRTIO_GPU/VMWGFX=y, FRAMEBUFFER_CONSOLE=y, VGA_CONSOLE=y. So /dev/fb0 will exist.",
+            "evidence": "grep over os/buildroot/output/build/linux-6.6.32/.config",
+            "confidence": "verified"
+          },
+          {
+            "claim": "CONFIG_VT_HW_CONSOLE_BINDING=y is enabled in the built kernel — this is the mechanism that lets fbcon be unbound at runtime so a pixel renderer can own the framebuffer.",
+            "evidence": "`grep -E '^(CONFIG_VT_HW_CONSOLE_BINDING=|# CONFIG_VT_HW_CONSOLE_BINDING is not set)' output/build/linux-6.6.32/.config` -> 'CONFIG_VT_HW_CONSOLE_BINDING=y'",
+            "confidence": "verified"
+          },
+          {
+            "claim": "NO native KMS driver is compiled in: DRM_I915, DRM_AMDGPU, DRM_NOUVEAU, DRM_RADEON, DRM_AST, DRM_MGAG200, DRM_QXL, DRM_CIRRUS_QEMU are all explicitly 'not set'. On real hardware the only framebuffer sources are efifb (UEFI GOP), vesafb (BIOS VBE) and simpledrm — all fixed-mode handoff drivers that cannot mode-set.",
+            "evidence": "output/build/linux-6.6.32/.config contains '# CONFIG_DRM_I915 is not set', '# CONFIG_DRM_AMDGPU is not set', '# CONFIG_DRM_NOUVEAU is not set', '# CONFIG_DRM_RADEON is not set', '# CONFIG_DRM_AST is not set', '# CONFIG_DRM_MGAG200 is not set'",
+            "confidence": "verified"
+          },
+          {
+            "claim": "1920x1080 is NOT achievable as currently configured: GRUB requests 'set gfxmode=1024x768,800x600,auto' and hands that mode to the kernel with gfxpayload=keep.",
+            "evidence": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:243 `set gfxmode=1024x768,800x600,auto`; :247 `set gfxpayload=keep`; kernel.config:78 comment 'sysfb/simpledrm consume the framebuffer GRUB hands over (gfxpayload=keep)'",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The current boot UI runs the panel inside fbterm on tty2, i.e. a terminal emulator on the framebuffer — exactly the layer the plan intends to delete. fbterm is present in the built rootfs.",
+            "evidence": "mcos-launch:119-126 `run_panel_fbterm()` ... `/usr/bin/fbterm --font-names=\"$MCOS_FONT_NAMES\" -s \"$FONT_SIZE\" -- sh -c \"... exec /usr/bin/mcos-panel --connect '$SOCK'\"`; `ls output/target/usr/bin/fbterm` -> 112856 bytes",
+            "confidence": "verified"
+          },
+          {
+            "claim": "I independently confirmed the claim embedded in fbfont/fbdraw's comments: the embedded FiraCode Nerd Font genuinely lacks all 11 named icon glyphs (▸ ◂ ▴ ▾ ◈ ◍ ★ ⚑ ⚙ ⚠ ✗), while box-drawing (╭ ─ ╮ │ ╰ ╯ █ ░ ▌), ✓, arrows and Turkish letters ARE present.",
+            "evidence": "Standalone probe against the TTF via x/image/font/opentype: 'U+25B8 present=false', 'U+25C2 present=false', 'U+25B4 present=false', 'U+25BE present=false', 'U+25C8 present=false', 'U+25CD present=false', 'U+2605 present=false', 'U+2691 present=false', 'U+2699 present=false', 'U+26A0 present=false', 'U+2717 present=false'; versus 'U+256D present=true', 'U+2500 present=true', 'U+2713 present=true', 'U+0131 present=true'",
+            "confidence": "verified"
+          },
+          {
+            "claim": "A full audit of panel/ source finds 13 distinct codepoints it renders that are missing from the embedded font: ↻ U+21BB, ⌁ U+2301, ▸ U+25B8, ◂ U+25C2, ◈ U+25C8, ◍ U+25CD, ★ U+2605, ⚑ U+2691, ⚙ U+2699, ⚠ U+26A0, ✗ U+2717, ✦ U+2726, and ℹ U+2139.",
+            "evidence": "Scanned every .go file under panel/ for non-ASCII runes and tested each against the TTF. Output: 'NON-LETTER SYMBOLS MISSING FROM EMBEDDED FONT (12)' listing U+21BB x1 (app.go), U+2301 x1 (tokens.go), U+25B8 x3 (components.go), U+25C2 x1, U+25C8 x6, U+25CD x1, U+2605 x5, U+2691 x2, U+2699 x2, U+26A0 x4 (app.go), U+2717 x1, U+2726 x1 (view_setup.go); plus 'LETTERS MISSING (1): \"ℹ\"'",
+            "confidence": "verified"
+          },
+          {
+            "claim": "At runtime the panel draws separators and progress bars from box-drawing characters in 8 places — these are precisely what fbdraw.HLine/FillRoundRect would replace.",
+            "evidence": "`grep -rn 'strings.Repeat' --include=*.go panel/` -> view_misc.go:67-68 (█ and ─), components.go:362-363 (theme.BarFill/BarEmpty), components.go:403 (theme.SepHoriz), view_detail.go:674 (─), view_setup.go:712-713 (█ and ─), app.go:851 (─)",
+            "confidence": "verified"
+          },
+          {
+            "claim": "The 2,032 raw occurrences of U+2500 in panel/*.go are almost entirely Go source-comment section dividers, not rendered UI — only 40 source lines contain the character at all.",
+            "evidence": "`grep -c '─' panel/*.go panel/theme/*.go` -> app.go:1, client.go:9, components.go:12, view_detail.go:1, view_misc.go:1, view_setup.go:1, theme.go:6, tokens.go:9 (40 lines total); sample context 'panel/client.go:97:// ── Network (Wi-Fi) ────────…'. I am flagging this because the raw rune count is misleading as a UI metric.",
+            "confidence": "verified"
+          },
+          {
+            "claim": "Bubble Tea is created with no options — no alt screen, no WithInput/WithOutput — so it reads stdin and writes stdout of the fbterm-hosted tty.",
+            "evidence": "cmd/mcos-panel/main.go:55 `p := tea.NewProgram(app)`; :53-54 comment 'Avoid an alternate screen because some framebuffer terminals enter it but fail to repaint'",
+            "confidence": "verified"
+          }
+        ],
+        "problems": [
+          {
+            "title": "fbfont.Face documents itself as concurrency-safe but has a genuine data race",
+            "location": "internal/fbfont/font.go:44 (false claim) and font.go:157 (rasterise called outside the lock)",
+            "why_wrong": "The doc says 'Eşzamanlı kullanım güvenlidir: Glyph() önbelleğini kendi kilidiyle korur.' The RWMutex protects only the map. Glyph() releases the read lock, then calls rasterise(), which touches the SHARED font.Face via GlyphBounds() and font.Drawer.DrawString(). opentype.Face wraps a single sfnt.Buffer that LoadGlyph mutates, so two goroutines rasterising different runes corrupt each other's state.",
+            "failure_scenario": "A render goroutine drawing a frame while a prefetch/warm-up goroutine primes the cache: both call Glyph() for uncached runes, both enter rasterise(), and sfnt.(*Font).LoadGlyph races on its shared buffer -> corrupted or wrong glyph masks, or a panic. I reproduced the exact pattern outside the repo (shared opentype.Face, cache guarded by RWMutex, rasterise outside it) and Go's race detector reported: 'WARNING: DATA RACE / Read at 0x00c000139568 by goroutine 10: golang.org/x/image/font/sfnt.(*Font).LoadGlyph() sfnt.go:1439 ... Previous write at 0x00c000139568 by goroutine 16: ... LoadGlyph() sfnt.go:1439'. The package's own tests are single-goroutine so they never surface it.",
+            "severity": "high"
+          },
+          {
+            "title": "GRUB caps the framebuffer at 1024x768 — the 1920x1080 goal is unreachable today",
+            "location": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:243",
+            "why_wrong": "`set gfxmode=1024x768,800x600,auto` lists 1024x768 first and never mentions any 1080p mode. With `set gfxpayload=keep` (:247) the kernel simply inherits whatever GRUB selected, and since no native KMS driver is built in, nothing can change it afterwards.",
+            "failure_scenario": "On a 1080p monitor the appliance boots, GRUB picks 1024x768, efifb/simpledrm hands the kernel a 1024x768 surface, and the new framebuffer UI renders at 1024x768 stretched/letterboxed by the display. fbfont.Grid(1024,768) at 16px yields 102x38 cells instead of the 192x54 the design assumes.",
+            "severity": "high"
+          },
+          {
+            "title": "No VT takeover: fbcon will repaint over anything drawn to /dev/fb0",
+            "location": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-launch (whole file) — no KDSETMODE anywhere in the repo",
+            "why_wrong": "CONFIG_FRAMEBUFFER_CONSOLE=y means fbcon owns the console and keeps drawing (cursor blink, kernel messages, echoed keystrokes) into the same memory a pixel renderer writes. Nothing in the tree puts the VT into KD_GRAPHICS or unbinds fbcon. Today this is masked because fbterm does that work; removing fbterm removes the protection.",
+            "failure_scenario": "mcos-panel opens /dev/fb0 and draws a frame; the console cursor blinks a character cell into the middle of a rounded card, a printk at loglevel<=4 scrolls the whole screen, and every keypress echoes as text over the UI. `grep -rn 'KDSETMODE|KD_GRAPHICS|VT_ACTIVATE|KDGETMODE' cmd/ internal/ panel/ os/buildroot/external/` returns nothing.",
+            "severity": "high"
+          },
+          {
+            "title": "No keyboard input path exists for a framebuffer UI",
+            "location": "cmd/mcos-panel/main.go:55",
+            "why_wrong": "The panel is keyboard-only and currently receives keys through Bubble Tea reading the tty's stdin, which fbterm provides. A renderer that draws pixels directly and puts the VT in graphics mode must source key events itself (evdev, or raw/K_MEDIUMRAW tty mode), and no such code exists anywhere in the Go tree.",
+            "failure_scenario": "The framebuffer panel renders a perfect first frame and then accepts no input at all — arrow keys and Enter do nothing, because nothing is reading /dev/input/event* and the tty is no longer in a cooked line mode Bubble Tea understands. `grep -rn '/dev/input|evdev|EVIOCG|linux/input' --include=*.go cmd/ internal/ panel/` returns nothing.",
+            "severity": "high"
+          },
+          {
+            "title": "No mode setting anywhere: fbdev cannot change resolution and no KMS driver could honour it",
+            "location": "internal/fbdev/device_linux.go:16-22",
+            "why_wrong": "Only the two GET ioctls are declared (fbioGetVScreenInfo 0x4600, fbioGetFScreenInfo 0x4602). FBIOPUT_VSCREENINFO (0x4601) is absent, so Device can only accept the mode it is handed. Combined with I915/AMDGPU/NOUVEAU/RADEON all being '# not set' in the built .config, there is no layer in the stack that can select 1920x1080 on real hardware.",
+            "failure_scenario": "Someone fixes the GRUB gfxmode line but the firmware's GOP does not offer 1080p (common on BIOS/VESA, which typically tops out at 1024x768 or 1280x1024). There is no fallback: the Go code cannot request a mode, and no KMS driver exists to set one, so the appliance is stuck at whatever the firmware chose.",
+            "severity": "medium"
+          },
+          {
+            "title": "Device.Flip never sets the alpha/transparency channel at 32bpp",
+            "location": "internal/fbdev/device_linux.go:212-219",
+            "why_wrong": "The packed value is built from only the R/G/B shifts (`v := ...Red<<rShift | Green<<gShift | Blue<<bShift`) and then `d.mem[o+3] = byte(v >> 24)` writes the top byte. The fb_var_screeninfo Transp bitfield is parsed into the struct but never read — `grep -rn 'Transp' internal/fbdev/` matches only the struct field declaration (device_linux.go:37) and a test offset assertion. On an XRGB8888 surface the byte is ignored, but on a surface reporting transp.length=8 (ARGB8888) this writes alpha 0.",
+            "failure_scenario": "A driver or firmware handoff that reports transp.offset=24/transp.length=8 gets a fully transparent (or black, depending on the compositor path) screen even though every RGB value is correct — a silent, very hard-to-diagnose blank display.",
+            "severity": "medium"
+          },
+          {
+            "title": "13 codepoints the panel renders are absent from the embedded font, with no fallback",
+            "location": "panel/theme/tokens.go (majority), panel/app.go, panel/components.go, panel/view_setup.go",
+            "why_wrong": "fbfont embeds exactly one face and has no fallback chain; Glyph() returns Missing=true and the caller is expected to draw a placeholder. The panel currently emits ↻ ⌁ ▸ ◂ ◈ ◍ ★ ⚑ ⚙ ⚠ ✗ ✦ ℹ, none of which the TTF contains. fbdraw exists precisely to replace these, but the token definitions still reference the characters.",
+            "failure_scenario": "Porting the panel as-is to the framebuffer renderer leaves 13 glyphs rendering as tofu/placeholder boxes — including ⚠ (used 4x in app.go) and ◈ (6x in tokens.go). This is the same class of bug the fbterm font-fallback chain caused, just relocated.",
+            "severity": "medium"
+          },
+          {
+            "title": "The recovery boot entry disables the framebuffer entirely",
+            "location": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:252-254",
+            "why_wrong": "The recovery menuentry sets `gfxpayload=text` and passes `nomodeset vga=normal`. That yields an 80x25 VGA text console with no /dev/fb0 at all. Once the UI is pure framebuffer drawing, recovery mode has no UI.",
+            "failure_scenario": "A user boots recovery to diagnose a problem; fbdev.Open('/dev/fb0') fails with 'fbdev: /dev/fb0 açılamadı', and the graphical panel cannot start — so the mode intended for troubleshooting is the one mode with no interface.",
+            "severity": "medium"
+          },
+          {
+            "title": "CONFIG_FB_SIMPLE=y in kernel.config is dead configuration",
+            "location": "os/buildroot/external/board/mcos/kernel.config:216",
+            "why_wrong": "The comment above it claims it is needed for 'BIOS/UEFI VM compatibility', but FB_SIMPLE is mutually exclusive with DRM_SIMPLEDRM, which is enabled at line 87. The built config confirms the option was silently dropped.",
+            "failure_scenario": "Not a runtime failure, but actively misleading: anyone debugging a missing framebuffer will read line 216, believe simplefb is active, and look in the wrong place. Evidence: `grep -E '^(CONFIG_FB_SIMPLE=|# CONFIG_FB_SIMPLE is not set)' output/build/linux-6.6.32/.config` -> '<absent from .config>'; and linux-6.6.32/drivers/video/fbdev/Kconfig shows 'config FB_SIMPLE / tristate \"Simple framebuffer support\" / depends on FB / depends on !DRM_SIMPLEDRM'.",
+            "severity": "low"
+          },
+          {
+            "title": "go.mod marks directly-imported modules as indirect",
+            "location": "go.mod (require block, 'golang.org/x/image v0.46.0 // indirect' and 'golang.org/x/sys v0.48.0 // indirect')",
+            "why_wrong": "internal/fbfont imports golang.org/x/image/font, .../font/opentype and .../math/fixed; internal/fbdraw imports golang.org/x/image/vector; internal/fbdev imports golang.org/x/sys/unix. All are direct dependencies but are still tagged // indirect, meaning the new packages were added without a `go mod tidy`.",
+            "failure_scenario": "A future `go mod tidy` silently rewrites go.mod (promoting both to direct), producing unrelated diff noise in a commit; and until then the module graph misrepresents what the project actually depends on.",
+            "severity": "low"
+          },
+          {
+            "title": "fbdev's rendering hot path and canvas helpers are untested",
+            "location": "internal/fbdev/device_linux_test.go (only 2 tests) and internal/fbdev/canvas.go (no test file)",
+            "why_wrong": "Flip() is the one function that converts pixels for real hardware — it contains the stride arithmetic, the 16/24/32bpp branches and scale8() — and nothing exercises it. canvas.go (NewCanvas, Fill, SavePNG) has no test file at all. By contrast fbdraw has 12 pixel-level tests and fbfont has 8, so the weakest-tested package is the one closest to the hardware.",
+            "failure_scenario": "A stride or channel-shift regression in Flip (e.g. swapping rShift/bShift, or using xres instead of LineLength) produces a skewed or colour-swapped screen that only appears on real hardware, with a green test suite. Flip cannot be tested against /dev/fb0 in CI, but it can be tested by injecting a fake mem slice + vinf/finf.",
+            "severity": "medium"
+          }
+        ],
+        "recommendations": [
+          "Port strategy — do NOT write an ANSI parser. The decisive fact is that panel/app.go:634 View() returns the whole UI as one string, so an fbui layer can call a.View() directly and never involve a terminal. But fbdraw's entire reason for existing (painter.go:1-26) is that box-drawing characters cannot produce single-piece rounded corners. Parsing View()'s output would faithfully reproduce the character-cell look the user explicitly wants to get rid of. Treat an ANSI parser only as a throwaway bring-up scaffold, if at all.",
+          "If a bring-up scaffold IS wanted, it is genuinely cheap: under the pinned termenv.ANSI profile lipgloss emits only ESC[<params>m with params drawn from {0,1,2,3,4,5,7,9,53} u {30-37,90-97} u {40-47,100-107} — no 38;5 and no 38;2 forms — and every styled run self-terminates with ESC[0m, so no attribute stack is needed. That is roughly a 60-line SGR parser. It stays valid even under TrueColor as long as the theme keeps addressing colours by numeric slot ('0'-'7', panel/theme/palette.go:44-53).",
+          "Fix the resolution chain before any renderer work, in this order: (1) change mcos-install:243 to `set gfxmode=1920x1080,1600x900,1366x768,1024x768,auto`; (2) keep gfxpayload=keep; (3) accept that without a native KMS driver the mode is fixed at boot. If real 1080p on Intel/AMD hardware is a hard requirement, enable CONFIG_DRM_I915/CONFIG_DRM_AMDGPU (currently '# not set') and budget for the firmware blobs and kernel size that brings.",
+          "Add VT takeover before drawing a single pixel in production: ioctl KDSETMODE/KD_GRAPHICS on the panel VT (and KD_TEXT on exit, including on signal), or unbind fbcon via /sys/class/vtconsole/vtcon*/bind — CONFIG_VT_HW_CONSOLE_BINDING=y is already enabled in the built kernel, so the sysfs route is available. Also keep the existing `echo 0 > /proc/sys/kernel/printk` from mcos-launch:36.",
+          "Design the input path now, as it is a peer of the renderer, not an afterthought: read /dev/input/event* (evdev) and translate to the key events panel/app.go already handles, or put the tty in raw/K_MEDIUMRAW mode. Nothing in the tree reads input today outside Bubble Tea's stdin reader.",
+          "Fix the fbfont concurrency claim one of two ways: either hold a plain sync.Mutex across rasterise() (simplest, and fine because glyphs are cached after first use), or delete the 'Eşzamanlı kullanım güvenlidir' sentence at font.go:44 and document Face as single-goroutine. Do not leave a false safety claim in place. Add a -race test that calls Glyph() from several goroutines.",
+          "Use the Transp bitfield in Flip, or explicitly document why it is ignored: at 32bpp set the transparency bits to full opacity when d.vinf.Transp.Length > 0 instead of writing byte(v>>24), which is currently always 0 for standard XRGB layouts.",
+          "Add tests for the one untested hardware-facing function: Flip() can be tested without /dev/fb0 by making Device's mem/vinf/finf injectable, then asserting exact byte output for XRGB8888, BGRX8888, RGB565 and a padded stride. canvas.go needs a test file too.",
+          "Reconcile panel/theme/tokens.go with the fbdraw contract: the 13 codepoints that are missing from the embedded font (↻ ⌁ ▸ ◂ ◈ ◍ ★ ⚑ ⚙ ⚠ ✗ ✦ ℹ) should become fbdraw shape calls, and the token constants should stop naming characters that cannot be drawn. Also replace the runtime strings.Repeat(\"─\"/\"█\") sites (app.go:851, components.go:362-363,403, view_detail.go:674, view_misc.go:67-68, view_setup.go:712-713) with fbdraw.HLine / FillRoundRect.",
+          "Delete or correct kernel.config:216 (CONFIG_FB_SIMPLE=y) and its comment — it is silently dropped because FB_SIMPLE depends on !DRM_SIMPLEDRM, and DRM_SIMPLEDRM=y at line 87 already provides the same capability through DRM_FBDEV_EMULATION.",
+          "Give the recovery boot entry (mcos-install:252-254) a usable UI, or accept it as a serial/text-only shell. As written, `nomodeset vga=normal` leaves no /dev/fb0, so the graphical panel cannot run in the exact mode meant for troubleshooting.",
+          "Run `go mod tidy` so golang.org/x/image v0.46.0 and golang.org/x/sys v0.48.0 are recorded as direct requirements, since fbfont/fbdraw/fbdev import them directly.",
+          "Scope note for planning: the port surface is ~7,028 non-test lines across panel/ + panel/theme/, but the lipgloss feature surface a custom renderer must reproduce is small and well-bounded — RoundedBorder is the ONLY border style used, there are just 3 Place sites and 13 Join sites, and Align/MaxWidth/Margin/Italic/Underline/Inline are used nowhere. The real work is layout and content, not exotic lipgloss features."
+        ]
+      }
+    ],
+    "plan": {
+      "critical_findings": [
+        {
+          "area": "ui",
+          "finding": "A complete vector widget layer already exists and is wired to the drawing primitives: internal/fbui/widgets.go imports mcos/internal/fbdraw and mcos/internal/fbfont and provides Panel, Button, ButtonRow, Radio, Check, Chevron, Row, Divider, Progress, StatusDot, Badge, Text/TextCenter/TextRight — all single-piece vector shapes, no box-drawing characters. internal/fbui/mockup_test.go renders four full-screen PNGs (01-secim-ekrani, 02-kurulum-disk, 03-ana-ekran, 04-ekran-ayarlari) at 1280x800 with an 18px face.",
+          "implication": "Do NOT start a new renderer and do NOT write an ANSI parser over panel/app.go View(). The request-1 work is: bridge fbui to fbdev, then reimplement each panel screen as a Draw(u *fbui.UI) function. The existing mockups are the visual contract and the PNG harness is the automated verification mechanism — extend it, do not replace it."
+        },
+        {
+          "area": "ui",
+          "finding": "The blockers for a pixel UI are not drawing — they are VT ownership and input. grep for KDSETMODE|KD_GRAPHICS|/dev/input|vtcon across cmd/ internal/ panel/ returns nothing. fbcon is compiled in (CONFIG_FRAMEBUFFER_CONSOLE=y) and today fbterm is the only thing keeping the console off the framebuffer; mcos-launch runs the panel inside fbterm on tty2.",
+          "implication": "Two new packages are mandatory before any pixel is drawn in production: a VT-takeover package (KDSETMODE/KD_GRAPHICS with restore on exit and signals, CONFIG_VT_HW_CONSOLE_BINDING=y is available as the sysfs alternative) and an evdev input package feeding the existing Bubble Tea key handling. Removing fbterm without both produces a UI that is overwritten by the console cursor and accepts no keystrokes."
+        },
+        {
+          "area": "boot",
+          "finding": "The UEFI kernel-panic root cause is ALREADY FIXED in the uncommitted working tree. mcos-install now writes BOOTX64.EFI only from $BOOTLIB/BOOTX64.EFI (line 269, the grub-mkimage output), the kernel goes only to /boot/boot/bzImage (line 226), and startup.nsh appears nowhere in the repo. The EFISTUB block still exists at git HEAD.",
+          "implication": "Request 4 is not 'fix the panic', it is 'lock the fix in before it regresses and harden the surrounding path'. This must be the first commit: the fix currently lives only in an uncommitted working tree and no test can detect its removal."
+        },
+        {
+          "area": "boot",
+          "finding": "Nothing can detect a regression of that exact fix. test-install-logic.sh passes today and never mentions BOOTX64, EFI/BOOT, startup.nsh or the GRUB prefix; verify-usb.sh only greps a recursive FAT listing for a name matching 'BOOTX64' and for 'grub *cfg' at any path; and an MZ magic check cannot distinguish a raw bzImage from a GRUB EFI image (both start with MZ, measured).",
+          "implication": "Add explicit assertions in scripts/test-install-logic.sh: zero lines copying $KERNEL/bzImage to BOOTX64.EFI, zero occurrences of startup.nsh, and a cross-check that the grub.cfg destination path in mcos-install equals the -p prefix in post-build.sh. This is the cheapest high-value step in the whole plan."
+        },
+        {
+          "area": "boot",
+          "finding": "Resolution is a bootloader-only property on this system. mcos-install:243 sets gfxmode=1024x768,800x600,auto with gfxpayload=keep; the kernel has no native KMS driver (I915/AMDGPU/RADEON/NOUVEAU/AST/MGAG200 all '# not set' in the built 6.6.32 .config), only efifb/vesafb/simpledrm handoff; internal/fbdev declares only FBIOGET_VSCREENINFO (0x4600) and FBIOGET_FSCREENINFO (0x4602) — FBIOPUT_VSCREENINFO is absent.",
+          "implication": "Request 2 splits in two: raising resolution is a one-line grub.cfg change replicated in three places (mcos-install:243, Makefile:179, scripts/mkusb.sh:159, which currently disagree). The display-settings screen cannot mode-set at runtime; it must rewrite grub.cfg and require a reboot. Its 'Uygula' button must be labelled as reboot-required."
+        },
+        {
+          "area": "boot",
+          "finding": "The FAT boot/ESP partition is never mounted at runtime: etc/fstab has no /boot entry and S99mcos mount_persistent() mounts only MCOS-DATA at /data.",
+          "implication": "The display-settings screen must itself locate the boot partition (/usr/bin/mcos-findfs MCOS-BOOT), mount it, rewrite BOTH /boot/grub/grub.cfg and /EFI/BOOT/grub.cfg, sync and unmount. That is privileged filesystem work in the daemon, not the panel — it needs a new IPC method, not a UI-only change."
+        },
+        {
+          "area": "oobe",
+          "finding": "Confirmed by reading panel/view_setup.go:411-416: the stepInstall branch of advance() has no installSuccess guard, while installSuccess is set at :527 and only read at :664 for rendering. After a successful install the cursor still points at the installed disk, so the 'Hemen Yeniden Başlat  Enter' button re-runs doInstallOS on the disk that was just installed.",
+          "implication": "Request 5 has a concrete, reproducible data-loss bug at the top of the list. Fix it with an explicit installSuccess branch that reboots, and add a panel unit test that drives the model to installDoneMsg and asserts Enter does not emit doInstallOS."
+        },
+        {
+          "area": "oobe",
+          "finding": "The disk install happens at step 5 of 10 and hard-reboots on success, so stepTheme/Budget/Cluster/FirstServer/Confirm never run — and doSetupSave (the only caller of UpdateConfig) runs exclusively from stepConfirm. Meanwhile mcos-install:305-325 does 'cp -a /data/. $TARGET_MNT/' on the assumption that OOBE settings already exist in /data as config.json.",
+          "implication": "The wizard's step order is structurally wrong and must be reordered as part of the rewrite: either move stepInstall after stepConfirm, or call doSetupSave before doInstallOS. Without this, every setting the user enters is discarded on the install path and the installed machine reruns the full wizard."
+        },
+        {
+          "area": "offline",
+          "finding": "Fabric offline needs four separate things, not one. (a) internal/server/providers/fabric.go makes three live HTTP calls and its own comment at :47-48 admits the downloaded launcher 'resolves the rest of its libraries on first run' — bundling server.jar alone still fails at server START. (b) internal/server/compat.go:16 returns immediately for any flavour where !SupportsPlugins, and Fabric is excluded from SupportsPlugins, so ViaVersion is never installed for Fabric even online. (c) Java comes only from Adoptium over HTTPS. (d) internal/daemon/handlers.go:400-413 calls java.Install() synchronously and hard-errors before the server package is reached.",
+          "implication": "Request 3 requires a pre-materialised server directory (run the Fabric launcher once at build time and capture the whole tree including .fabric/ and libraries/), a ViaFabric jar dropped in mods/ (not plugins/), a jlink'd JRE registered in /data/java/index.json, and a seeded .mcos-launch.json + server.json so EnsureInstalled short-circuits. No single-point fix exists."
+        },
+        {
+          "area": "offline",
+          "finding": "The correct delivery vehicle already exists and is empty: scripts/mkusb.sh:207-213 builds the MCOS-DATA ext4 partition from $SEED with mke2fs -d (currently just empty servers/, java/, log/ dirs), and mcos-install:312-314 does 'cp -a /data/.' so anything seeded survives the permanent install. The initramfs is the wrong place: rootfs.cpio.gz is 122 MB compressed / 269 MB resident, and anything added costs both image size and boot RAM. Baking into rootfs /data is useless because S99mcos mounts MCOS-DATA over it.",
+          "implication": "Put the entire offline bundle in the MCOS-DATA seed. Zero Buildroot changes, zero initramfs growth. The one case it does not cover is the pure-ISO boot path (Makefile iso: ships only bzImage + initrd.img, no data partition) — that must be documented as 'offline bundle requires the USB/installed image'."
+        },
+        {
+          "area": "boot",
+          "finding": "The built Buildroot output tree is stale: os/buildroot/output/target/usr/lib/mcos does not exist and rootfs.cpio.gz contains zero usr/lib/mcos entries, so mcos-install would abort at its own guard with 'önyükleyici dosyaları imajda yok'.",
+          "implication": "A full rebuild is a hard prerequisite for any boot/QEMU verification step. Schedule it before the first end-to-end test, not after."
+        },
+        {
+          "area": "ui",
+          "finding": "internal/fbfont/font.go claims concurrency safety at :44 but releases the RWMutex before calling rasterise() at :157, which touches the shared opentype.Face / sfnt.Buffer. The ui survey reproduced the exact race outside the repo with the race detector.",
+          "implication": "Fix before the render loop grows a second goroutine (prefetch, async redraw). A sync.Mutex held across rasterise costs nothing since glyphs are cached after first use. Add a -race test calling Glyph() from several goroutines."
+        }
+      ],
+      "contradictions": [
+        "FALSE CLAIM in the ui survey: 'Nothing in cmd/, panel/ or the rest of internal/ imports fbdev, fbfont or fbdraw — the groundwork is entirely unwired.' I verified internal/fbui/widgets.go:8-9 imports both mcos/internal/fbdraw and mcos/internal/fbfont, and internal/fbui/mockup_test.go imports them too. The ui survey enumerated three packages (fbdev/fbfont/fbdraw) and missed the fourth and most important one — fbui, 480 non-test lines plus a 387-line mockup harness. The boot survey did find fbui. Consequence: the ui survey's scope estimate ('~7,028 non-test lines would be affected by a port') and its port-strategy discussion are both anchored on a false premise that no widget layer exists. The real gap is narrower: fbui has no fbdev binding, no VT takeover and no input source.",
+        "RESOLUTION TARGET conflict: the ui survey recommends 'set gfxmode=1920x1080,1600x900,...' first, but every existing fbui mockup is authored at exactly 1280x800 with an 18px face (verified: four `const W, H = 1280, 800` / `newScreen(t, W, H, 18)` sites). Picking 1080p as the first mode means the mockups' hand-placed panel sizes (760x470, 880x560) no longer match the screen they were designed for. Also, the boot survey notes BIOS/VESA typically tops out near 1024x768-1280x1024, so 1080p is not reliably obtainable. Decide explicitly: target 1280x800/1280x1024 as the design resolution and make fbui.MetricsFor scale layout from the actual fb size, rather than hardcoding a 1080p assumption into either the grub.cfg or the layout code.",
+        "THREE-WAY gfxmode disagreement that both surveys noticed but neither resolved: mcos-install:243 = '1024x768,800x600,auto', Makefile:179 = '1024x768,800x600,auto', scripts/mkusb.sh:159 = 'auto', scripts/mkiso.sh:29 = 'auto' plus a kernel 'video=1024x768' at :33. The same machine therefore gets a different resolution from a mkusb image than from an installed disk. mkiso.sh is dead (referenced by nothing) yet is the only file carrying a video= parameter, which will mislead anyone grepping for the resolution knob. One policy, applied to all live sites, and delete or wire up mkiso.sh.",
+        "MISLEADING SOURCE COMMENT, confirmed by reading it: internal/server/providers/fabric.go:47-48 says 'Fabric serves a self-contained server launcher jar that resolves the rest of its libraries on first run'. 'Self-contained' and 'resolves the rest of its libraries on first run' are contradictory in the same sentence, and the second half is the operative fact. Anyone planning the offline bundle from this comment will bundle server.jar, see IsInstalled return true, and discover the failure only when the JVM dies offline — surfacing as the generic onExit message 'süreç beklenmeyen bir şekilde durdu'. Rewrite the comment as part of the offline work.",
+        "TERMINOLOGY/FEASIBILITY gap in the user request itself: 'Fabric 1.21.11 with ViaVersion preinstalled'. ViaVersion in its plugin form cannot run on Fabric — compat.go:13-14 says so and compat.go:16's `if !srv.SupportsPlugins { return }` enforces it. The Fabric deliverable is ViaFabric (which bundles ViaVersion/ViaBackwards) installed into <serverData>/mods/, not plugins/. Confirm with the user that ViaFabric satisfies the intent before building the bundle.",
+        "UNVERIFIABLE VERSION: I could not confirm that Minecraft 1.21.11 exists (no network access from this environment). The daemon's offline fallback list tops out at 1.21.4 (internal/daemon/handlers_net.go:88-91, verified). Pin the exact bundled version at bundle-build time from what the Fabric meta API actually returns, then add that exact string to fallbackVersions — otherwise the offline version picker cannot even offer the version that was bundled, and the whole bundle is unreachable through the UI.",
+        "The boot survey states the recovery GRUB entry 'can never display the TUI panel' (gfxpayload=text + nomodeset => no /dev/fb0), and the ui survey independently agrees. This gets strictly worse once the UI is pure framebuffer drawing: today recovery at least reaches show_recovery() in mcos-launch; after the port, the mode intended for troubleshooting is the only mode with no interface at all. Note also that the user's word 'recovery' in request 3 means offline server creation, not this GRUB entry — do not conflate them, but do decide what the GRUB recovery entry becomes (serial/text shell is an acceptable answer, but it must be a decision, not an accident).",
+        "The boot survey lists CONFIG_FB_SIMPLE=y in kernel.config:216 as enabled, while the ui survey verified against the BUILT .config that FB_SIMPLE is absent because it depends on !DRM_SIMPLEDRM and DRM_SIMPLEDRM=y at line 87. The ui survey is right; kernel.config:216 and its comment are dead, misleading configuration. Low stakes, but delete it while touching the kernel config so nobody debugs a missing framebuffer from a false lead.",
+        "The oobe survey says the Java step is not a dead end offline (verified: viewJava always advances), while quoting code comments at panel/view_setup.go:63 and internal/daemon/handlers_system.go:236 that claim the OOBE gates Java behind internet + ClockSynced. The gate does not exist — s.status is written once at panel/app.go:129 and read nowhere, and a hardcoded time.Sleep(2*time.Second) stands in for NTP. Either implement the gate or delete the field and both comments; leaving the comments is how the next person plans around a feature that is not there."
+      ],
+      "ordered_plan": [
+        {
+          "step": "Commit the existing UEFI fix and add regression assertions that would catch its removal",
+          "rationale": "The panic fix (no raw kernel at BOOTX64.EFI, no startup.nsh) currently exists only in an uncommitted working tree, and no test in the repo can detect a regression — verify-usb.sh only greps for a filename, and an MZ magic check cannot tell a bzImage from a GRUB EFI image. Everything else in this plan is tested by booting, so the boot path must be nailed down first.",
+          "files": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install (commit as-is); scripts/test-install-logic.sh (add: zero lines copying $KERNEL/bzImage to BOOTX64.EFI; zero occurrences of startup.nsh; the grub.cfg write path must equal the -p prefix extracted from post-build.sh)",
+          "risk": "The prefix cross-check is a string-matching test over two shell scripts and can rot. Keep it narrow: extract '-p <path>' from post-build.sh's two grub-mkimage calls and assert mcos-install writes '<path>/grub.cfg'. Verified by: sh scripts/test-install-logic.sh exit 0."
+        },
+        {
+          "step": "Harden the installed grub.cfg: fail loudly on the EFI write, add search --label, restore the console terminal fallback",
+          "rationale": "/EFI/BOOT/grub.cfg is the only config UEFI GRUB reads and its write at mcos-install:260 ends in '|| true' while the verification block never checks for it — a silent boot-to-grub-prompt. The BIOS core.img prefix hardcodes (hd0,msdos1), and the generated menu has no search command unlike the ISO config. terminal_output gfxterm alone means an unusable graphics mode yields an invisible menu.",
+          "files": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:241-260 (terminal_input console / terminal_output console gfxterm; 'search --no-floppy --set=root --label MCOS-BOOT' as the first line of each menuentry; '|| fail' on the EFI grub.cfg write) and :346-351 (add the /EFI/BOOT/grub.cfg existence check)",
+          "risk": "search/search_label/search_fs_file are already embedded in both core.img and BOOTX64.EFI (verified), and mkfs.vfat already sets MCOS-BOOT, so the change is inert if it works and fails loudly if it does not. Verified by: test-install-logic.sh plus a real UEFI and a real BIOS boot in step 4."
+        },
+        {
+          "step": "Unify gfxmode across all three live image paths and pick one design resolution",
+          "rationale": "Resolution is set exclusively by GRUB (no KMS driver is built in, fbdev has no FBIOPUT), and the three paths currently disagree, so the same machine renders differently from a USB than from an installed disk. This must land before UI layout work so the renderer is developed against the resolution it will actually get.",
+          "files": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:243; Makefile:179; scripts/mkusb.sh:159; delete-or-wire scripts/mkiso.sh (dead, and the only file with a kernel video= parameter)",
+          "risk": "Listing 1920x1080 first does not guarantee it: BIOS/VESA often has no 1080p mode, and the fbui mockups are authored at 1280x800. Keep a descending list ending in 'auto' and make the UI layout resolution-independent (step 9) rather than betting on one mode. Verified by: booting UEFI and BIOS and reading /sys/class/graphics/fb0/virtual_size."
+        },
+        {
+          "step": "Full Buildroot rebuild, then a two-firmware boot test",
+          "rationale": "os/buildroot/output/target/usr/lib/mcos does not exist and rootfs.cpio.gz contains zero usr/lib/mcos entries, so an install from the current image aborts at mcos-install's own guard. No later step can be verified on hardware until this is redone.",
+          "files": "make (buildroot); os/buildroot/output/images/{bzImage,rootfs.cpio.gz}; scripts/mkusb.sh; scripts/verify-usb.sh",
+          "risk": "verify-usb.sh currently infers firmware mode from the partition-table label (gpt=uefi, dos=bios) while mcos-install always writes msdos and installs both bootloaders — so it takes the BIOS branch, demands syslinux artifacts that never exist, and never checks BOOTX64.EFI. Fix verify-usb.sh in this step (derive mode from what is on the FAT partition, use path-exact mdir lookups, and validate BOOTX64.EFI with grub-file --is-x86_64-efi rather than MZ magic) or its output is worse than useless."
+        },
+        {
+          "step": "Fix internal/fbfont's data race and add the missing fbdev tests",
+          "rationale": "font.go:44 claims concurrency safety while rasterise() is called outside the lock and mutates the shared opentype.Face/sfnt.Buffer. fbdev.Flip — the one function that converts pixels for real hardware, containing all the stride and channel-shift arithmetic — has no test, and canvas.go has no test file at all. Both are foundations for everything above them.",
+          "files": "internal/fbfont/font.go:44,149-157 (hold a sync.Mutex across rasterise; add a -race Glyph test); internal/fbdev/device_linux.go:191-219 (make mem/vinf/finf injectable; honour the Transp bitfield at 32bpp instead of writing byte(v>>24)); new internal/fbdev/canvas_test.go",
+          "risk": "Making Device's internals injectable is a small API change; keep it unexported and test-only. Verified by: go test -race ./internal/fbdev/ ./internal/fbfont/ ./internal/fbdraw/ ./internal/fbui/ with exact-byte assertions for XRGB8888, BGRX8888, RGB565 and a padded stride."
+        },
+        {
+          "step": "Write the VT-takeover package",
+          "rationale": "fbcon owns the console (CONFIG_FRAMEBUFFER_CONSOLE=y) and will repaint over anything drawn to /dev/fb0 — cursor blink, printk, echoed keystrokes. Today fbterm hides this; deleting fbterm removes the protection. Nothing in the tree does KDSETMODE (verified: zero hits for KDSETMODE|KD_GRAPHICS|vtcon across cmd/ internal/ panel/).",
+          "files": "new internal/fbvt/ (KDSETMODE KD_GRAPHICS on the panel VT, KD_TEXT restore on normal exit, panic and SIGTERM/SIGINT; optional /sys/class/vtconsole/vtcon*/bind unbind — CONFIG_VT_HW_CONSOLE_BINDING=y is enabled in the built kernel); os/buildroot/.../usr/bin/mcos-launch (keep the existing printk silencing)",
+          "risk": "Failing to restore KD_TEXT on a crash leaves the machine with a blank, unrecoverable console. Register the restore in a defer AND a signal handler AND a recover; test by killing the process with SIGKILL in QEMU and confirming the machine is still usable after the watchdog/respawn path."
+        },
+        {
+          "step": "Write the evdev input package and bind it to the existing key handling",
+          "rationale": "The panel is keyboard-only and currently gets keys via Bubble Tea reading fbterm's stdin. Once the VT is in graphics mode there is no such stream. Nothing in the tree reads /dev/input (verified). This is a peer of the renderer, not an afterthought — a perfect first frame that accepts no input is the likeliest failure of this whole project.",
+          "files": "new internal/fbinput/ (read /dev/input/event*, decode EV_KEY, map to the key strings panel/app.go already switches on, including arrows, Enter, Esc, Shift+Tab, and Turkish layout characters); cmd/mcos-panel/main.go:55 (feed events into the tea.Program in place of stdin, or replace the tea loop entirely)",
+          "risk": "Keyboard layout and modifier handling are where this silently breaks (the OOBE needs to type Wi-Fi passwords and node names). Verify with a unit test that decodes recorded evdev frames into expected key strings, plus a manual QEMU pass typing a password containing Turkish characters."
+        },
+        {
+          "step": "Bridge fbui to fbdev: the screen driver and render loop",
+          "rationale": "This is the single missing link between the finished widget layer and the hardware. fbui draws into an *image.RGBA; fbdev.Device.Flip pushes an *image.RGBA to /dev/fb0. Neither knows about the other.",
+          "files": "new internal/fbui/screen.go or cmd/mcos-panel (open /dev/fb0, size the canvas from the driver's actual xres/yres, fbfont.Load at a px size derived from screen height, fbui.NewUI, render, Flip); internal/fbui/theme.go:112 MetricsFor (make layout scale from the real cell size)",
+          "risk": "The mockups hardcode panel geometry (760x470, 880x560) at 1280x800. If layout does not scale, 1024x768 clips and 1920x1080 leaves a postage stamp. Verified by: golden-PNG tests that render every screen at 1024x768, 1280x800 and 1920x1080 and assert no widget crosses the canvas bounds."
+        },
+        {
+          "step": "Port the panel screens from lipgloss strings to fbui Draw calls, screen by screen, with golden PNGs",
+          "rationale": "This is the bulk of request 1 and the largest single chunk of work (~7,000 non-test lines across panel/ and panel/theme/). Do NOT parse View()'s ANSI output — that would faithfully reproduce the character-cell look the user explicitly asked to remove. Keep the Bubble Tea model and state machine; replace only the rendering.",
+          "files": "panel/app.go:634 View() (becomes Draw), panel/view_dashboard.go, view_servers.go, view_detail.go, view_misc.go, components.go, panel/theme/tokens.go (the 13 codepoints the embedded font does not contain — ↻ ⌁ ▸ ◂ ◈ ◍ ★ ⚑ ⚙ ⚠ ✗ ✦ ℹ — become fbdraw/fbui shape calls); the strings.Repeat('─'/'█') sites at app.go:851, components.go:362-363,403, view_detail.go:674, view_misc.go:67-68, view_setup.go:712-713 become fbui.Divider / fbui.Progress",
+          "risk": "Largest scope, highest chance of stalling half-done. Mitigate by porting one screen per commit with a golden PNG test each, and by keeping the lipgloss path alive behind a flag until the last screen lands. The lipgloss surface to reproduce is small and already covered by fbui: RoundedBorder is the only border style used, there are 3 Place sites and 13 Join sites, and Align/MaxWidth/Margin/Italic/Underline are used nowhere."
+        },
+        {
+          "step": "Drop fbterm from the launch path and decide what the GRUB recovery entry becomes",
+          "rationale": "fbterm is the layer being deleted; leaving it in place means the new renderer never actually runs on the appliance. The recovery entry (gfxpayload=text, nomodeset) has no /dev/fb0, so after the port it has no UI at all — that must be a decision, not an accident.",
+          "files": "os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-launch (replace run_panel_fbterm with a direct framebuffer launch; keep a text fallback for serial and for the no-fb case); os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-install:252-256 (either give recovery a framebuffer or relabel the menu entry honestly as a text/serial shell); os/buildroot/external/configs/mcos_defconfig (fbterm can be dropped once nothing uses it)",
+          "risk": "Removing fbterm removes the safety net that made a broken renderer merely ugly instead of fatal. Keep show_recovery() reachable and make the panel binary exit non-zero with a readable tty message when fbdev.Open fails, so a graphics failure degrades to a shell rather than a black screen."
+        },
+        {
+          "step": "Build the display-settings screen: daemon-side grub.cfg rewrite plus the fbui screen",
+          "rationale": "Request 2's second half. The mockup already exists (internal/fbui/mockup_test.go TestMockupDisplaySettings, with a mode list). The privileged part is that nothing mounts the boot partition at runtime (fstab has no /boot entry; S99mcos mounts only MCOS-DATA), so the daemon must locate it, mount it, rewrite both configs, and unmount.",
+          "files": "new internal/daemon handler + internal/ipc method (display.modes / display.set); it must use /usr/bin/mcos-findfs MCOS-BOOT, mount, rewrite the gfxmode line in BOTH $ESP/boot/grub/grub.cfg and $ESP/EFI/BOOT/grub.cfg, sync, unmount; a new panel screen modelled on the existing mockup",
+          "risk": "Writing a bad grub.cfg bricks boot. Mitigate: never regenerate the file from scratch — rewrite only the 'set gfxmode=' line, always keep the trailing ',auto' fallback, write to a temp file on the same filesystem and rename, and verify the file parses and both menuentries survive before unmounting. Verified by: a script that runs the rewrite against a loopback disk image and diffs the result, plus a real reboot test. The Apply button must say a reboot is required — no runtime mode change is possible."
+        },
+        {
+          "step": "Rewrite the OOBE install/selection screens on fbui and fix the logic defects",
+          "rationale": "Request 5. Doing this after the fbui port means writing each screen once instead of twice. The two must-fix defects are verified: Enter on the success screen re-runs mcos-install on the just-installed disk (panel/view_setup.go:411-416 has no installSuccess guard), and the install hard-reboots at step 5/10 so doSetupSave never runs and the installed system has no config.json despite mcos-install:305-325 assuming one.",
+          "files": "panel/view_setup.go — :411-416 (installSuccess guard that reboots; step reordering so config is saved before the install), :436-443 + :639 (Geri is a no-op on steps 2-5 while still being advertised), :192-197 (do not consume left/right/h/l/space when activeTextInput() != nil — the node-name field currently cannot accept h, l or space), :228 vs :873-880 (the Wi-Fi cursor can move onto rows the view never draws), :493-511 (seed buildConfig from the live config instead of DefaultConfig, which currently silently resets Turbo/AutostartServers/WAN/Features/Tier), :513-519 (a late javaSetupMsg clears s.loading mid-install), :1064-1072 (surface UpdateConfig and Persist failures — errMsg is routed to a.statusErr which View never renders while a.setup != nil); panel/app.go:151-156 (handle disksMsg.err instead of rendering an RPC failure as 'no disks found'); panel/messages.go:177-194 (dlPlugins is accepted and ignored; dlJava is honoured only on the install path and its errors are discarded)",
+          "risk": "Reordering the wizard steps touches the one flow that repartitions disks. Add panel unit tests (panel/view_setup_test.go already exists) that drive the state machine through both the install and the Atla path and assert exactly which commands are emitted. Add an explicit confirmation before doInstallOS — Enter is the universal continue key everywhere else, and back() from stepTheme lands on stepInstall with the cursor on the first disk."
+        },
+        {
+          "step": "Add a generic local-artifact cache to the download helpers",
+          "rationale": "Foundation for request 3, and far better than special-casing Fabric. Every provider and every mod install funnels through exactly two functions, so one change makes all flavours bundleable and makes a second install of the same artifact work offline.",
+          "files": "internal/server/providers/provider.go:66 getJSON and :83 downloadTo (check a local artifact dir — e.g. /data/artifacts or /opt/mcos/artifacts — before the HTTP GET, and populate it after a successful GET); internal/catalog/catalog.go:178 DownloadTo (same)",
+          "risk": "Cache-key correctness. Key on the full URL (hashed) rather than the filename, or a 1.21.x server.jar will satisfy a request for a different version. Verified by a unit test with a stubbed HTTP transport that fails all requests and a pre-populated cache dir."
+        },
+        {
+          "step": "Build the offline bundle and seed it into MCOS-DATA",
+          "rationale": "Request 3 proper. The seed mechanism already exists and is empty (mkusb.sh:207-213 mke2fs -d), costs zero initramfs bytes, and survives the permanent install via mcos-install:314's 'cp -a /data/.'.",
+          "files": "new scripts/mkbundle.sh (build-time, online: pin the exact MC version from the Fabric meta API; run the Fabric server launcher once in a scratch dir so .fabric/ and libraries/ are fully materialised; jlink a headless JRE 21 against the glibc toolchain; fetch the ViaFabric jar into mods/; emit .mcos-launch.json {jarFile:server.jar, launchArgs:[nogui], installed:true}, the matching server.json manifest, eula.txt, server.properties, and java/index.json with a model.JavaRuntime pointing at /data/java/temurin-21/bin/java); scripts/mkusb.sh:207-213 (populate $SEED from bundle/ before mke2fs -d); internal/daemon/handlers_net.go:88 (add the pinned version to fallbackVersions)",
+          "risk": "Three specific traps. (1) A jlink'd JRE built against a newer glibc will not start on this rootfs (BR2_TOOLCHAIN_BUILDROOT_GLIBC) — test bin/java inside the actual image, not on the build host. (2) If the bundled version is missing from fallbackVersions, the offline wizard cannot offer it and the bundle is unreachable. (3) The pure-ISO path (Makefile iso: ships only bzImage + initrd.img) has no data partition and therefore no bundle — document this, do not try to fix it by growing the 122 MB initramfs."
+        },
+        {
+          "step": "Make the daemon actually find the bundled Java and install ViaFabric for mod loaders",
+          "rationale": "Without these two small changes the bundle sits on disk unused: handlers.go:400-413 decides Java presence purely from the index and then hard-errors on a failed Adoptium download, and compat.go:16 skips Via entirely for Fabric. detect.go:114 already lists /opt/mcos/java as a candidate but Detect() is only ever called from the java.detect RPC, which no panel view invokes.",
+          "files": "internal/daemon/daemon.go (call d.java.Detect() at startup); internal/server/compat.go:15-19 (add a SupportsMods branch installing viafabric into filepath.Join(dataDir, \"mods\"), mirroring contentDirFor in internal/daemon/handlers_catalog.go:31-40, and fix the misleading 'self-contained' comment at internal/server/providers/fabric.go:47-48); internal/daemon/handlers.go:400-413 and internal/server/manager.go:139-142 (say 'no network' plainly instead of surfacing a raw download error)",
+          "risk": "Calling Detect() at startup adds process spawns (java -version per candidate) to the boot path; bound it with a timeout and run it asynchronously so a hung binary cannot delay the daemon."
+        },
+        {
+          "step": "End-to-end offline acceptance test in QEMU with no network",
+          "rationale": "This is the only verification that request 3 actually works, and it exercises the whole chain: seeded partition, Java index registration, IsInstalled short-circuit, mods/ contents, and server start. Every prior offline step is individually plausible and collectively easy to get wrong.",
+          "files": "new scripts/test-offline-boot.sh (boot the mkusb image in QEMU with -net none; assert the daemon registers the bundled JRE, that the create-server flow offers the pinned version, that the server reaches Running, and that the ViaFabric jar is present in mods/)",
+          "risk": "A pass here can still hide a first-run network fetch if QEMU is accidentally given a network device — assert '-net none' explicitly and grep the server log for connection attempts. Also re-run scripts/test-install-logic.sh and the full go test -race suite at this point, since the OOBE reordering and the UI port both touch code paths this test walks through."
+        }
+      ]
+    }
+  },
+  "workflowProgress": [
+    {
+      "type": "workflow_phase",
+      "index": 1,
+      "title": "Survey"
+    },
+    {
+      "type": "workflow_phase",
+      "index": 2,
+      "title": "Synthesis"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 1,
+      "label": "survey:uefi-boot",
+      "phaseIndex": 1,
+      "phaseTitle": "Survey",
+      "agentId": "a5458dffbdc3f5937",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1789113031884,
+      "queuedAt": 1789113031864,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "The EFISTUB fallback is fully gone from the current install…",
+      "promptPreview": "You are investigating the MCOS project at /home/kkekerem/mcos (a Buildroot-based Linux appliance\nthat runs ONLY Minecraft servers; Go daemon 'mcosd' + Bubble Tea TUI panel).\n\nUse the Bash tool. IMPORTANT environment notes:\n- The repo is at /home/kkekerem/mcos on a WSL Ubuntu filesystem. cd there first.\n- Go is available. Use 'go build ./cmd/... ./internal/... ./panel/...' (NEVER './...' —\n  os/bui…",
+      "lastProgressAt": 1789114501545,
+      "tokens": 137442,
+      "toolCalls": 41,
+      "durationMs": 1469649,
+      "resultPreview": "{\"summary\":\"The EFISTUB fallback is fully gone from the current installer — no path anywhere in the repo copies a raw kernel to BOOTX64.EFI, no startup.nsh is written, and every boot path goes through GRUB with an explicit `linux` command line; both GRUB prefixes (UEFI `/EFI/BOOT`, BIOS `(hd0,msdos1)/boot/grub`) match where mcos-install actually writes grub.cfg, and I verified the BIOS dd mechanic…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 2,
+      "label": "survey:oobe-logic",
+      "phaseIndex": 1,
+      "phaseTitle": "Survey",
+      "agentId": "ae294d801b1e6ee08",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1789113031885,
+      "queuedAt": 1789113031864,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "The OOBE wizard has several concrete logic defects, the wor…",
+      "promptPreview": "You are investigating the MCOS project at /home/kkekerem/mcos (a Buildroot-based Linux appliance\nthat runs ONLY Minecraft servers; Go daemon 'mcosd' + Bubble Tea TUI panel).\n\nUse the Bash tool. IMPORTANT environment notes:\n- The repo is at /home/kkekerem/mcos on a WSL Ubuntu filesystem. cd there first.\n- Go is available. Use 'go build ./cmd/... ./internal/... ./panel/...' (NEVER './...' —\n  os/bui…",
+      "lastProgressAt": 1789114620396,
+      "tokens": 135595,
+      "toolCalls": 52,
+      "durationMs": 1587043,
+      "resultPreview": "{\"summary\":\"The OOBE wizard has several concrete logic defects, the worst being that pressing Enter on the \\\"KURULUM BAŞARILI\\\" screen re-runs the disk install instead of rebooting, and that a successful disk install hard-reboots at step 5/10 so the wizard's last five steps and the entire config save (doSetupSave) never run. Additional verified defects: \\\"Geri\\\" is advertised but is a no-op on ste…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 3,
+      "label": "survey:offline-server",
+      "phaseIndex": 1,
+      "phaseTitle": "Survey",
+      "agentId": "a016f1537c28a6780",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1789113031886,
+      "queuedAt": 1789113031865,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "MCOS has no offline install path at all: every server flavo…",
+      "promptPreview": "You are investigating the MCOS project at /home/kkekerem/mcos (a Buildroot-based Linux appliance\nthat runs ONLY Minecraft servers; Go daemon 'mcosd' + Bubble Tea TUI panel).\n\nUse the Bash tool. IMPORTANT environment notes:\n- The repo is at /home/kkekerem/mcos on a WSL Ubuntu filesystem. cd there first.\n- Go is available. Use 'go build ./cmd/... ./internal/... ./panel/...' (NEVER './...' —\n  os/bui…",
+      "lastProgressAt": 1789114757759,
+      "tokens": 157496,
+      "toolCalls": 59,
+      "durationMs": 1724406,
+      "resultPreview": "{\"summary\":\"MCOS has no offline install path at all: every server flavour, every mod/plugin, and the JRE itself are fetched live over HTTP at install time, with no on-disk artifact cache, no bundled fallback, and no \\\"offline mode\\\" flag anywhere in the tree. Making offline Fabric 1.21.11 + ViaVersion work requires four separate additions (a local Fabric provider path, a pre-seeded .mcos-launch.js…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 4,
+      "label": "survey:framebuffer-ui",
+      "phaseIndex": 1,
+      "phaseTitle": "Survey",
+      "agentId": "ad42396a233da62f1",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1789113031887,
+      "queuedAt": 1789113031865,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "lastToolSummary": "The framebuffer groundwork is further along than the task d…",
+      "promptPreview": "You are investigating the MCOS project at /home/kkekerem/mcos (a Buildroot-based Linux appliance\nthat runs ONLY Minecraft servers; Go daemon 'mcosd' + Bubble Tea TUI panel).\n\nUse the Bash tool. IMPORTANT environment notes:\n- The repo is at /home/kkekerem/mcos on a WSL Ubuntu filesystem. cd there first.\n- Go is available. Use 'go build ./cmd/... ./internal/... ./panel/...' (NEVER './...' —\n  os/bui…",
+      "lastProgressAt": 1789114964895,
+      "tokens": 168434,
+      "toolCalls": 77,
+      "durationMs": 1931542,
+      "resultPreview": "{\"summary\":\"The framebuffer groundwork is further along than the task description assumed: three packages exist (internal/fbdev, internal/fbfont, and internal/fbdraw — the last two created after the git-status snapshot), all build, and all 22 tests pass under -race. The pixel/vector/text foundation is genuinely solid and well-tested, but nothing is wired into cmd/ or panel/ yet, and the surroundin…"
+    },
+    {
+      "type": "workflow_agent",
+      "index": 5,
+      "label": "synthesize",
+      "phaseIndex": 2,
+      "phaseTitle": "Synthesis",
+      "agentId": "aa4704818eb3e841d",
+      "model": "claude-opus-5",
+      "state": "done",
+      "startedAt": 1789114964947,
+      "queuedAt": 1789114964906,
+      "attempt": 1,
+      "lastToolName": "StructuredOutput",
+      "promptPreview": "You are investigating the MCOS project at /home/kkekerem/mcos (a Buildroot-based Linux appliance\nthat runs ONLY Minecraft servers; Go daemon 'mcosd' + Bubble Tea TUI panel).\n\nUse the Bash tool. IMPORTANT environment notes:\n- The repo is at /home/kkekerem/mcos on a WSL Ubuntu filesystem. cd there first.\n- Go is available. Use 'go build ./cmd/... ./internal/... ./panel/...' (NEVER './...' —\n  os/bui…",
+      "lastProgressAt": 1789115592923,
+      "tokens": 117151,
+      "toolCalls": 12,
+      "durationMs": 627976,
+      "resultPreview": "{\"critical_findings\":[{\"area\":\"ui\",\"finding\":\"A complete vector widget layer already exists and is wired to the drawing primitives: internal/fbui/widgets.go imports mcos/internal/fbdraw and mcos/internal/fbfont and provides Panel, Button, ButtonRow, Radio, Check, Chevron, Row, Divider, Progress, StatusDot, Badge, Text/TextCenter/TextRight — all single-piece vector shapes, no box-drawing characters…"
+    }
+  ],
+  "totalTokens": 716118,
+  "totalToolCalls": 241
+}
