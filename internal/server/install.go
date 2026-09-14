@@ -191,6 +191,11 @@ func applyProperties(dir string, srv *model.Server) error {
 	if d := strings.TrimSpace(srv.Difficulty); d != "" {
 		kv = append(kv, [2]string{"difficulty", d})
 	}
+	// Tohum: ortak dünyada her düğüm AYNI araziyi üretmek zorunda.
+	// Boşsa yazılmaz — Minecraft kendi rastgele tohumunu seçer.
+	if s := strings.TrimSpace(srv.LevelSeed); s != "" {
+		kv = append(kv, [2]string{"level-seed", s})
+	}
 	for _, p := range kv {
 		if err := setProperty(dir, p[0], p[1]); err != nil {
 			return err

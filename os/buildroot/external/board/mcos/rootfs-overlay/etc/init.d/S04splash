@@ -1,0 +1,134 @@
+#!/bin/sh
+# MCOS acilis animasyonu — EKRANI EN ERKEN dolduran sey budur.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# COZDUGU GERCEK SIKAYET
+# ════════════════════════════════════════════════════════════════════════════
+#
+# "virtualbox'ta grub menusu geliyor, enter'a basiyorum, sonra siyah ekran."
+#
+# Olculdu (QEMU, donanim hizlandirmasiz — kullanicinin VirtualBox'i da oyle):
+#
+#   t=2..6 sn    GRUB menusu gorunuyor
+#   t=8..20 sn   TAMAMEN SIYAH  <-- sikayet edilen yer
+#   t=25 sn      acilis animasyonu nihayet basliyor
+#   t=42 sn      panel
+#
+# Siyah pencerenin sebebi basitti: acilis animasyonunu YALNIZCA mcos-launch
+# baslatiyordu, o da inittab'deki "tty2::respawn" girdisinden geliyor. busybox
+# init, respawn girdilerini BUTUN sysinit girdileri (yani rcS'in tamami)
+# bittikten SONRA calistirir. Yani animasyon, sshd anahtar uretimi dahil her
+# servisin arkasinda kuyruga giriyordu.
+#
+# Olculen dagilim (rcS icinde, saniye):
+#   S01seedrng 0.14   S01syslogd 0.14   S02klogd 0.14   S02sysctl 0.23
+#   S40network 0.62   S50sshd 3.77      S99mcos 1.69
+#
+# Bu betik animasyonu rcS'in BASINA alir: ekran ~8. saniyede doluyor, 15.
+# saniyede degil. Donanim hizlandirmasi olmayan bir sanal makinede bu fark
+# "birkac saniye" degil, "bir dakika siyah ekran" ile "logo" arasindaki
+# farktir.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# mcos-launch ILE ILISKISI
+# ════════════════════════════════════════════════════════════════════════════
+#
+# mcos-launch'in start_splash'i "$SPLASH_STARTED duruyorsa hicbir sey yapma"
+# der; yani ikinci bir animasyon BASLAMAZ. Kapatma isi yine mcos-launch'in
+# finish_splash'ine aittir: "hazirim" bayragini yazar, surecin cikmasini
+# bekler, gerekirse oldurur. PID'i buradan ogrenebilsin diye
+# /run/mcos-splash.pid dosyasina yaziyoruz — pkill'e gore hem daha kesin hem
+# de baska bir mcos-splash surecini (ornegin --restore) vurma riski yok.
+
+PANEL_VT="2"
+PANEL_DEVICE="/dev/tty${PANEL_VT}"
+SPLASH="/usr/bin/mcos-splash"
+SPLASH_MSG="/run/mcos-splash.msg"
+SPLASH_FRAME="/run/mcos-splash.rgba"
+BOOT_READY="/run/mcos-boot.ready"
+SPLASH_STARTED="/run/mcos-splash.started"
+SPLASH_PIDFILE="/run/mcos-splash.pid"
+
+# ZAMAN ASIMI: acilis ne kadar surerse sursun animasyon kendiliginden bitmeli,
+# yoksa panel hic acilmadiginda kullanici sonsuza kadar logoya bakar. 180 sn,
+# olculen en yavas acilisin (42 sn) dort katindan fazla; normal akista bu sure
+# hic dolmaz cunku finish_splash animasyonu cok daha once kapatir.
+SPLASH_TIMEOUT="180s"
+
+# has_framebuffer, gercekten cizebilecegimiz bir cerceve arabellegi var mi?
+#
+# Iki kosul da gerekli: aygit dugumu (mcos-splash onu acacak) ve sysfs girdisi
+# (cekirdek surucusunun GERCEKTEN baglandigini yalnizca o kanitlar; /dev/fb0
+# devtmpfs'te oylece durabilir).
+has_framebuffer() {
+    [ -c /dev/fb0 ] || return 1
+    [ -e /sys/class/graphics/fb0 ] || return 1
+    return 0
+}
+
+# animations_enabled, kullanicinin animasyonu kapatip kapatmadigina bakar.
+#
+# JSON ayristirmak icin bir arac yok; tek bir anahtarin degerini aramak yeterli
+# ve kirilgan degil: alan yoksa VARSAYILAN ACIK'tir.
+#
+# UC AYRI YOL DENENIYOR cunku yapilandirmanin yeri surumler arasinda degisti:
+#   /data/config.json       — mcosd'nin kalici depodaki dosyasi (bugunku yer)
+#   /etc/mcos/config.json   — eski varsayilan (kurulu sistemlerde hala olabilir)
+#   /data/mcos/config.json  — daha eski bir yerlesim
+# Hicbiri yoksa animasyon acilir. Bu liste mcos-launch'taki ile AYNI olmalidir.
+animations_enabled() {
+    for cfg in /data/config.json /etc/mcos/config.json /data/mcos/config.json; do
+        [ -r "$cfg" ] || continue
+        if grep -q '"bootAnimation"[[:space:]]*:[[:space:]]*false' "$cfg" 2>/dev/null; then
+            return 1
+        fi
+    done
+    # Cekirdek komut satirindan kapatma: kurtarma girdisi ve teshis icin.
+    if grep -q 'mcos\.noanim' /proc/cmdline 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+start() {
+    [ -x "$SPLASH" ] || return 0
+    has_framebuffer || return 0
+    [ -e "$SPLASH_STARTED" ] && return 0
+    animations_enabled || return 0
+
+    mkdir -p /run/mcos 2>/dev/null || true
+    : > "$SPLASH_STARTED" 2>/dev/null || true
+    rm -f "$BOOT_READY" "$SPLASH_FRAME" 2>/dev/null || true
+    echo "Sistem baslatiliyor..." > "$SPLASH_MSG" 2>/dev/null || true
+
+    # Panel VT'sini ON PLANA al. Bu SART: cerceve arabellegi tektir, ama
+    # etkin VT'nin konsolu her yeni satirda uzerine yeniden cizer. Gecmeden
+    # animasyon ile acilis metni birbirini silerdi.
+    chvt "$PANEL_VT" >/dev/null 2>&1 || true
+
+    # --keep: cikarken konsolu METIN kipine DONDURME; panel hemen ardindan
+    # devralacak ve son kareden yakinlasarak acilacak.
+    "$SPLASH" \
+        --fb /dev/fb0 --tty "$PANEL_DEVICE" \
+        --until "$BOOT_READY" --stage "$SPLASH_MSG" --save "$SPLASH_FRAME" \
+        --timeout "$SPLASH_TIMEOUT" --keep >/dev/null 2>&1 &
+    echo "$!" > "$SPLASH_PIDFILE" 2>/dev/null || true
+    return 0
+}
+
+stop() {
+    : > "$BOOT_READY" 2>/dev/null || true
+    if [ -r "$SPLASH_PIDFILE" ]; then
+        kill "$(cat "$SPLASH_PIDFILE")" 2>/dev/null || true
+    fi
+    rm -f "$SPLASH_PIDFILE" 2>/dev/null || true
+    return 0
+}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart|reload) stop; rm -f "$SPLASH_STARTED"; start ;;
+    *) echo "Kullanim: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0

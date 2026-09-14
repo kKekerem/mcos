@@ -1,0 +1,87 @@
+#!/bin/sh
+# MCOS kalici depolama — /data'yi acilisin EN BASINDA baglar.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# NEDEN AYRI BIR BETIK VE NEDEN BU KADAR ERKEN
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Bu is eskiden S99mcos'un icindeydi, yani rcS'in EN SONUNDA calisiyordu.
+# Iki somut zarari vardi:
+#
+#   1. Acilis animasyonunu (S04splash) ondan once baslatamiyorduk. Animasyonun
+#      acik mi kapali mi oldugu /data/config.json icinde yaziyor; /data
+#      baglanmadan o dosya okunamaz. Animasyon da bu yuzden 15. saniyeye kadar
+#      bekliyordu ve kullanici o sureyi SIYAH EKRAN olarak goruyordu.
+#
+#   2. Kalici bolumun bulunamamasi ancak acilisin sonunda anlasiliyordu.
+#
+# Baglama isi ag gerektirmez, birkac yuz milisaniye surer ve basarisiz olsa
+# bile acilisi engellemez: bu yuzden en basa alinmasi tamamen guvenlidir.
+#
+# S99mcos bu betigi "restart" yolunda tekrar cagirir; islem fikir birligiyle
+# tekrarlanabilir (idempotent) yazilmistir.
+
+MCOS_DATA=/data
+
+# mount_persistent, MCOS-DATA etiketli bolumu /data'ya baglar.
+mount_persistent() {
+    if grep -qs " $MCOS_DATA " /proc/mounts; then
+        return 0
+    fi
+    mkdir -p "$MCOS_DATA"
+
+    # Kalici bolumu ETIKETLE bul. Eskiden burada
+    #     [ -b /dev/disk/by-label/MCOS-DATA ]
+    # vardi; imajda udev OLMADIGI icin o sembolik bag hic olusmuyor ve kosul
+    # her zaman false donuyordu. Sonuc: /data hicbir zaman kalici bolumden
+    # mount edilmiyor, kurulan Java ve olusturulan sunucular her reboot'ta
+    # kayboluyordu. mcos-findfs dort ayri yontemi sirayla dener.
+    part="$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)"
+    if [ -z "$part" ]; then
+        printf "Kalici bolum (MCOS-DATA) bulunamadi; /data RAM'de kalacak.\n"
+        return 0
+    fi
+
+    if mount "$part" "$MCOS_DATA"; then
+        printf "Kalici depolama baglandi: %s -> %s\n" "$part" "$MCOS_DATA"
+    else
+        printf "UYARI: %s baglanamadi; /data RAM'de kalacak.\n" "$part"
+    fi
+    return 0
+}
+
+# ensure_config, ilk acilista bir dugum kimligi uretir; boylece kume, sihirbaz
+# hic calismadan once bile kalici bir kimlige sahip olur. Diger tum
+# varsayilanlari daemon yukleme sirasinda doldurur.
+ensure_config() {
+    cfg="$MCOS_DATA/config.json"
+    [ -f "$cfg" ] && return 0
+    mkdir -p "$MCOS_DATA"
+    if [ -r /proc/sys/kernel/random/uuid ]; then
+        nid="node_$(tr -d '-' < /proc/sys/kernel/random/uuid | head -c 16)"
+    else
+        nid="node_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    fi
+    printf '{"setupComplete":false,"nodeId":"%s"}\n' "$nid" > "$cfg"
+    return 0
+}
+
+case "$1" in
+    start)
+        mount_persistent
+        ensure_config
+        ;;
+    stop)
+        # /data'yi cozmuyoruz: kapanis sirasinda daemon hala yaziyor olabilir.
+        # Gercek cozme isini "umount -a -r" (inittab shutdown) yapar.
+        ;;
+    restart|reload)
+        mount_persistent
+        ensure_config
+        ;;
+    *)
+        echo "Kullanim: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+exit 0

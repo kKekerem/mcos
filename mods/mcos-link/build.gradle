@@ -1,0 +1,75 @@
+plugins {
+    // Fabric Loom: Minecraft'ı indirir, eşlemeleri uygular, mod jar'ını üretir.
+    id 'fabric-loom' version '1.11-SNAPSHOT'
+    id 'maven-publish'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    // Fabric API buradan gelir.
+    maven { url = 'https://maven.fabricmc.net/' }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+    // Fabric API'nin TAMAMI değil, yalnızca gereken modülleri isteseydik
+    // daha küçük olurdu; ama MCOS sunucularında Fabric API zaten kuruludur
+    // (ViaFabric onu istiyor), bu yüzden tamamına bağlanmak ek bir indirme
+    // yükü getirmiyor.
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+
+    filesMatching("fabric.mod.json") {
+        // Sürüm numarası TEK YERDE (gradle.properties) dursun: fabric.mod.json
+        // içine elle yazılan bir sürüm, er ya da geç gradle.properties'ten
+        // ayrılır ve kullanıcı hangi sürümü çalıştırdığını bilemez.
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // Minecraft 1.20.5+ Java 21 ister.
+    it.options.release = 21
+    it.options.encoding = "UTF-8"
+}
+
+java {
+    withSourcesJar()
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_${project.base.archivesName.get()}" }
+    }
+}
+
+// ── MCOS'a teslim ───────────────────────────────────────────────────────────
+//
+// Daemon, modu SABİT bir adla arar (mcos-link.jar); sürüm numarası içeren bir
+// dosya adı, her yükseltmede daemon'un arama yolunu güncellemeyi gerektirirdi.
+tasks.register('deployToMcos', Copy) {
+    dependsOn tasks.remapJar
+    from tasks.remapJar.archiveFile
+    into rootProject.file("../../dist/mods")
+    rename { "mcos-link.jar" }
+    doLast {
+        println "mcos-link.jar -> dist/mods/"
+    }
+}
+
+tasks.named('build') { finalizedBy 'deployToMcos' }

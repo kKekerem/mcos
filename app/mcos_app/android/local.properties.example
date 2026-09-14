@@ -1,0 +1,8 @@
+# Bu dosyayi "local.properties" olarak kopyalayip yollari kendi
+# makinenize gore duzeltin. local.properties SURUM KONTROLUNE GIRMEZ:
+# icinde kisisel dosya yollari vardir.
+#
+# flutter create . --platforms=android
+# komutu bu dosyayi kendiliginden uretir; elle yazmak zorunda degilsiniz.
+flutter.sdk=/opt/flutter
+sdk.dir=/opt/android-sdk

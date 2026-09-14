@@ -23,11 +23,36 @@ makeexec() {
 # Overlay dosyaları git'te 0644 olarak durabildiği için (rsync -a modu aynen
 # kopyalar) bu chmod olmadan "permission denied" alınır. mcos-install eskiden
 # bu listede YOKTU: temiz bir derlemede kurulum betiği çalıştırılamıyordu.
-for s in etc/init.d/S99mcos usr/bin/mcos-launch usr/bin/mcos-persist usr/bin/mcos-install usr/bin/mcos-findfs; do
+for s in etc/init.d/S03mcosdata etc/init.d/S04splash etc/init.d/S99mcos \
+         usr/bin/mcos-launch usr/bin/mcos-persist usr/bin/mcos-install \
+         usr/bin/mcos-findfs usr/bin/mcos-display; do
     normalize "$s"
     makeexec "$s"
 done
 normalize etc/inittab
+normalize init
+makeexec init
+
+# ── openssh'in kendi acilis betigi KALDIRILIYOR ────────────────────────────
+#
+# Buildroot'un S50sshd'si her acilista kosulsuz "ssh-keygen -A" calistirir ve
+# sshd'yi ayaga kaldirir. Uc ayri sorun cikariyordu:
+#
+#   1. HIZ. Olculdu (QEMU, donanim hizlandirmasiz): rcS'in toplam 7 saniyesinin
+#      3.77 saniyesi yalnizca bu betikti — RSA/ECDSA/ED25519 anahtar uretimi.
+#      Canli sistemde /etc RAM'de oldugu icin anahtarlar kalici da degil: ayni
+#      bedel HER acilista yeniden odeniyordu.
+#
+#   2. DOGRULUK. SSH artik daemon'a ait (internal/sshd): kendi sshd_config'ini
+#      yaziyor, host anahtarlarini kalici veri dizininde tutuyor, portu ve
+#      authorized_keys'i kullanicinin ayarindan aliyor. Iki sshd ayni portu
+#      dinleyemez; ikincisi sessizce basarisiz olurdu.
+#
+#   3. BEKLENTI. Panel "SSH: kapali" derken sistemde stok yapilandirmali bir
+#      sshd calisiyordu. Kullanicinin gordugu durum ile gercek ayni olmali.
+#
+# SSH'i acan tek yer artik ayarlar ekranidir.
+rm -f "${TARGET_DIR}/etc/init.d/S50sshd"
 
 # Install keymaps and console fonts
 KEYMAP_DST="${TARGET_DIR}/usr/share/keymaps/i386/qwerty"
@@ -316,4 +341,61 @@ rm -f "${TARGET_DIR}/boot/initrd.img" "${TARGET_DIR}/boot/rootfs.cpio.gz" 2>/dev
 # Copy bzImage into target boot directory for installed systems to use
 if [ -n "${BINARIES_DIR:-}" ]; then
     [ -f "${BINARIES_DIR}/bzImage" ] && cp "${BINARIES_DIR}/bzImage" "${TARGET_DIR}/boot/bzImage" || true
+fi
+
+# ── Çevrimdışı sunucu paketi ────────────────────────────────────────────────
+#
+# Java, Fabric çalışma zamanı ve Via modları imaja gömülür. Böylece internet
+# olmadan da sunucu kurulabilir.
+#
+# DİKKAT: Minecraft sunucu jar'ı BURADA YOK ve OLAMAZ — Mojang EULA'sı
+# dağıtımını açıkça yasaklıyor (bkz. offline-manifest.txt). O tek dosya bir
+# kez Mojang'dan indirilir ve /data/artifacts içine önbelleklenir; sonraki
+# kurulumlar tamamen çevrimdışı çalışır.
+#
+# Paket ROOTFS'E DEĞİL ayrı bir dizine konur: initramfs tamamen RAM'e açılır,
+# 65 MB'ı oraya koymak her açılışta 65 MB RAM demektir. mcos-install bunu
+# kalıcı bölüme tohumlar.
+MCOS_OFFLINE_SRC=""
+d="$(cd "$(dirname "$0")" && pwd)"
+while [ "$d" != "/" ]; do
+    if [ -d "$d/dist/offline" ]; then
+        MCOS_OFFLINE_SRC="$d/dist/offline"
+        break
+    fi
+    d="$(dirname "$d")"
+done
+
+if [ -n "$MCOS_OFFLINE_SRC" ] && [ -n "$(ls -A "$MCOS_OFFLINE_SRC" 2>/dev/null)" ]; then
+    mkdir -p "${TARGET_DIR}/usr/lib/mcos/offline"
+    cp -a "$MCOS_OFFLINE_SRC"/. "${TARGET_DIR}/usr/lib/mcos/offline/"
+    sz="$(du -sh "$MCOS_OFFLINE_SRC" | cut -f1)"
+    echo "post-build: cevrimdisi paket gomuldu ($sz)"
+else
+    echo "post-build: cevrimdisi paket yok - 'make offline-bundle' ile indirin."
+    echo "post-build:          o olmadan sunucu kurulumu internet gerektirir."
+fi
+
+# ── playit tünel ajanı ──────────────────────────────────────────────────────
+#
+# İki ikili de statik-pie musl derlemesidir: hiçbir libc bağımlılığı yok,
+# rootfs'e olduğu gibi düşüyor. CA sertifikası da gerekmiyor (rustls kök
+# sertifikaları ikiliye gömülü).
+#
+# Bunlar çevrimdışı paketten AYRI olarak /usr/bin'e kurulur: tünel, kalıcı
+# bölüm olmadan da (canlı ISO'da) çalışabilmeli.
+#
+# DİKKAT: "playit-linux-amd64" CLI DEĞİL, arka plan servisidir (playitd).
+# playit 1.0 mimarisi servis + CLI olarak ikiye bölünmüştür; ikisi de gerekir.
+if [ -d "${TARGET_DIR}/usr/lib/mcos/offline" ]; then
+    for f in "${TARGET_DIR}/usr/lib/mcos/offline"/*playit-linux-amd64; do
+        [ -f "$f" ] || continue
+        install -D -m 0755 "$f" "${TARGET_DIR}/usr/bin/playitd"
+        echo "post-build: playitd kuruldu"
+    done
+    for f in "${TARGET_DIR}/usr/lib/mcos/offline"/*playit-cli-linux-amd64; do
+        [ -f "$f" ] || continue
+        install -D -m 0755 "$f" "${TARGET_DIR}/usr/bin/playit-cli"
+        echo "post-build: playit-cli kuruldu"
+    done
 fi

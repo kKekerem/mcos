@@ -614,7 +614,7 @@ func (d *detailModel) tabContent(w, h int) string {
 		return strings.Join([]string{
 			kv(th, "Sunucu IP (Yerel)", sysmon.Net().LocalIP),
 			kv(th, "Port", itoa(s.Port)),
-			kv(th, "WAN (Serveo)", yesno(s.WAN.Enabled)),
+			kv(th, "WAN (playit)", yesno(s.WAN.Enabled)),
 		}, "\n")
 	case tabWAN:
 		lines := []string{

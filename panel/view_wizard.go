@@ -720,7 +720,7 @@ func (w *wizardModel) viewLocation(th *theme.Theme) string {
 		w.row("Kurulum dizini", w.dataDir.View(), w.cursor == 0),
 		w.row("Otomatik başlat", w.toggle(w.autostart), w.cursor == 1),
 		w.row("Otomatik yedek", w.toggle(w.autoBackup), w.cursor == 2),
-		w.row("WAN (Serveo)", w.toggle(w.wan), w.cursor == 3),
+		w.row("WAN (playit)", w.toggle(w.wan), w.cursor == 3),
 		"",
 		th.Muted.Render("(dizin boş = varsayılan daemon data-root)"),
 	}, "\n")

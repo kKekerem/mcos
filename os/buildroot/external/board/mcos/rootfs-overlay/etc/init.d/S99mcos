@@ -13,46 +13,17 @@ MCOSD=/usr/bin/mcosd
 PANEL=/usr/bin/mcos-panel
 SOCK=unix:///run/mcos/mcosd.sock
 
-# Mount persistent data partition if not already mounted.
-mount_persistent() {
-    if grep -qs "$MCOS_DATA" /proc/mounts; then
-        return
-    fi
-    mkdir -p "$MCOS_DATA"
-
-    # Kalici bolumu ETIKETLE bul. Eskiden burada
-    #     [ -b /dev/disk/by-label/MCOS-DATA ]
-    # vardi; imajda udev OLMADIGI icin o sembolik bag hic olusmuyor ve kosul
-    # her zaman false donuyordu. Sonuc: /data hicbir zaman kalici bolumden
-    # mount edilmiyor, kurulan Java ve olusturulan sunucular her reboot'ta
-    # kayboluyordu. mcos-findfs dort ayri yontemi sirayla dener.
-    part="$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)"
-    if [ -z "$part" ]; then
-        printf "Kalici bolum (MCOS-DATA) bulunamadi; /data RAM'de kalacak.\n"
-        return
-    fi
-
-    if mount "$part" "$MCOS_DATA"; then
-        printf "Kalici depolama baglandi: %s -> %s\n" "$part" "$MCOS_DATA"
-    else
-        printf "UYARI: %s baglanamadi; /data RAM'de kalacak.\n" "$part"
-    fi
-}
-
-# Generate a node id on first boot so the cluster has a stable identity even
-# before the wizard runs. The daemon fills in every other default on load.
-ensure_config() {
-    local cfg="$MCOS_DATA/config.json"
-    if [ ! -f "$cfg" ]; then
-        mkdir -p "$MCOS_DATA"
-        local nid
-        if [ -r /proc/sys/kernel/random/uuid ]; then
-            nid="node_$(tr -d '-' < /proc/sys/kernel/random/uuid | head -c 16)"
-        else
-            nid="node_$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-        fi
-        printf '{"setupComplete":false,"nodeId":"%s"}\n' "$nid" > "$cfg"
-    fi
+# Kalici depolama ve ilk yapilandirma artik S03mcosdata icinde.
+#
+# NEDEN TASINDI: acilis animasyonunun (S04splash) "animasyon kapali mi" ayarini
+# okuyabilmesi icin /data'nin ONDAN ONCE bagli olmasi gerekiyor. Bu betik
+# rcS'in EN SONUNDA calisiyor; oraya bagimli kalinsaydi animasyon da en sona
+# kalirdi - kullanicinin sikayet ettigi siyah ekran penceresi tam olarak oydu.
+#
+# Cagri burada duruyor cunku "S99mcos restart" tek basina da calismali.
+ensure_data() {
+    [ -x /etc/init.d/S03mcosdata ] && /etc/init.d/S03mcosdata start
+    return 0
 }
 
 # Restart any persisted Serveo tunnels (codes -> ssh commands). Per-server WAN
@@ -88,8 +59,7 @@ start() {
         loadkeys trq 2>/dev/null || true
     fi
 
-    mount_persistent
-    ensure_config
+    ensure_data
     mkdir -p /run/mcos
 
     # Start the daemon in the BACKGROUND only. The panel is launched separately
@@ -103,7 +73,10 @@ start() {
     # full-screen TUI, and daemon log lines on the same tty would scribble over
     # the OOBE so it never appears. Logs live in /run/mcos/mcosd.log for debug.
     "$MCOSD" --data-root "$MCOS_DATA" --listen "$SOCK" >/run/mcos/mcosd.log 2>&1 &
-    sleep 1
+    # "sleep 1" KALDIRILDI. Daemon soketi acsin diye konmustu, ama start_tunnels
+    # zaten mcosctl ile konusuyor ve baglanamazsa sessizce vazgeciyor: bekleme
+    # HICBIR SEYI garanti etmiyordu. Bedeli olculdu — her acilista tam bir
+    # saniye, hem de panelin gorunmesinden tam once.
     start_tunnels
 }
 

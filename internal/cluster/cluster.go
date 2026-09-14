@@ -38,6 +38,10 @@ const (
 // beacon is the UDP multicast payload. Yalnızca genel bilgi taşır; hiçbir
 // gizli değer (cluster anahtarı dahil) yayınlanmaz.
 type beacon struct {
+	// NodeID, makinenin KARARLI kimligidir. NodeName yalnizca bir etikettir
+	// ve iki makinede ayni olabilir (varsayilan "mcos-1"), bu yuzden kimlik
+	// icin KULLANILAMAZ. Bkz. identity.go.
+	NodeID     string `json:"nodeId"`
 	NodeName   string `json:"nodeName"`
 	Version    string `json:"version"`
 	ListenAddr string `json:"listenAddr"`
@@ -52,6 +56,11 @@ type peerRequest struct {
 	Method string      `json:"method"`
 	Token  string      `json:"token,omitempty"` // cluster anahtarı (assignTask için zorunlu)
 	Task   *model.Task `json:"task,omitempty"`
+	// Link, ortak dünya kurulumunu taşır (linkSpec metodu).
+	//
+	// İşaretçi: çoğu istekte YOKTUR ve boş bir yapı göndermek, alıcı
+	// tarafta "mod kapalı" ile "alan gönderilmedi" ayrımını siler.
+	Link *model.LinkSpec `json:"link,omitempty"`
 }
 
 // Executor performs the real work behind a task. The daemon implements it so
@@ -75,20 +84,28 @@ type Manager struct {
 	store      *store.Store
 	exec       Executor
 
-	mu      sync.RWMutex
-	secret  string // önceden paylaşılmış cluster anahtarı
-	peers   map[string]*model.Peer
-	tasks   []model.Task
-	running bool
-	conn    *net.UDPConn
-	ln      net.Listener
-	ctx     context.Context
-	cancel  context.CancelFunc
+	// link, ortak dünya koordinatörüdür. nil olabilir: ortak dünya
+	// özelliği kapalıyken hiç kurulmaz.
+	link *LinkCoordinator
+
+	mu     sync.RWMutex
+	nodeID string // kararli makine kimligi (identity.go)
+	// openPairing: dogru anahtari sunan bir cagiriciyi kendiliginden
+	// eslestir. YALNIZCA masaustu dugum uygulamasi (cmd/mcos-node) acar.
+	openPairing bool
+	secret      string // önceden paylaşılmış cluster anahtarı
+	peers       map[string]*model.Peer
+	tasks       []model.Task
+	running     bool
+	conn        *net.UDPConn
+	ln          net.Listener
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 // NewManager creates a cluster manager. exec may be nil (tasks then no-op).
 func NewManager(cfg model.ClusterConfig, version string, st *store.Store, lg *log.Logger, exec Executor) *Manager {
-	return &Manager{
+	m := &Manager{
 		cfg:        cfg,
 		nodeName:   cfg.NodeName,
 		version:    version,
@@ -99,6 +116,28 @@ func NewManager(cfg model.ClusterConfig, version string, st *store.Store, lg *lo
 		secret:     cfg.Secret,
 		peers:      map[string]*model.Peer{},
 	}
+	m.nodeID = ensureNodeID(st, lg)
+	// Eslestirmeler yeniden baslatmaya dayanmali; aksi halde her guncelleme
+	// ortak dunyayi sessizce durdururdu.
+	m.loadPeers()
+	return m
+}
+
+// AttachLink installs the shared-world coordinator.
+//
+// Ayrı bir çağrı çünkü koordinatör, Manager'a İHTİYAÇ DUYAR (eş listesi,
+// düğüm adı) — ikisini tek kurucuda örmek döngüsel bir kurulum olurdu.
+func (m *Manager) AttachLink(c *LinkCoordinator) {
+	m.mu.Lock()
+	m.link = c
+	m.mu.Unlock()
+}
+
+// LinkCoord returns the attached coordinator, or nil.
+func (m *Manager) LinkCoord() *LinkCoordinator {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.link
 }
 
 // Secret returns the local cluster key so the panel can show it for pairing.
@@ -175,6 +214,7 @@ func (m *Manager) Start() error {
 		go m.readBeaconLoop()
 	}
 	go m.janitorLoop()
+	go m.healthLoop()
 	go m.taskConsumerLoop()
 
 	if m.log != nil {
@@ -230,6 +270,9 @@ func (m *Manager) Pair(id string) {
 	if p, ok := m.peers[id]; ok {
 		p.Paired = true
 	}
+	// Eslestirme degisikligi diske yazilmali: yalnizca bellekte
+	// tutulursa ilk yeniden baslatmada kaybolur.
+	go m.savePeers()
 }
 
 // Unpair removes a peer.
@@ -237,6 +280,9 @@ func (m *Manager) Unpair(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.peers, id)
+	// Eslestirme degisikligi diske yazilmali: yalnizca bellekte
+	// tutulursa ilk yeniden baslatmada kaybolur.
+	go m.savePeers()
 }
 
 // Tasks returns the local task queue snapshot.
@@ -288,6 +334,7 @@ func (m *Manager) sendBeacon() {
 	t := tier.Classify(mem, cpu)
 
 	b := beacon{
+		NodeID:     m.nodeID,
 		NodeName:   m.nodeName,
 		Version:    m.version,
 		ListenAddr: fmt.Sprintf(":%d", m.listenPort),
@@ -325,7 +372,7 @@ func (m *Manager) readBeaconLoop() {
 		if err := json.Unmarshal(buf[:n], &b); err != nil {
 			continue
 		}
-		if b.NodeName == m.nodeName {
+		if m.isSelf(b.NodeID, b.NodeName) {
 			continue // ignore self
 		}
 		m.upsertPeer(b, src.IP.String())
@@ -335,10 +382,14 @@ func (m *Manager) readBeaconLoop() {
 func (m *Manager) upsertPeer(b beacon, ip string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	id := b.NodeName + "@" + ip
+	id := peerKey(b.NodeID, b.NodeName, ip)
 	if p, ok := m.peers[id]; ok {
 		p.LastSeen = time.Now()
 		p.State = model.PeerAvailable
+		// Kimlik kararli oldugu icin ayni es DHCP yenilemesinden sonra
+		// yeni bir IP ile gelebilir; kaydi tasiyoruz, ikizlemiyoruz.
+		p.IP = ip
+		p.Name = b.NodeName
 		p.Cores = b.Cores
 		p.RAMMB = b.RAMMB
 		p.ActiveJobs = 0 // will be refreshed via status RPC
@@ -425,9 +476,65 @@ func (m *Manager) authorizeTask(remoteIP, token string) error {
 		return fmt.Errorf("geçersiz cluster anahtarı")
 	}
 	if !m.isPairedIP(remoteIP) {
-		return fmt.Errorf("eş eşleştirilmemiş: %s", remoteIP)
+		// -- Neden bir istisna var --------------------------------------
+		// Masaustu dugum uygulamasinda kullanici karsisinda bir panel
+		// yoktur: "su makineyi eslestir" diyecegi bir ekran yok. Elindeki
+		// tek sey, MCOS panelinde gorunen EŞLEŞTIRME ANAHTARI. O anahtari
+		// uygulamaya girmis olmasi, eslestirme niyetinin kendisidir.
+		//
+		// Bu yol yalnizca SetOpenPairing(true) ile acilir ve yalnizca
+		// anahtar denetimi ZATEN GECTIKTEN sonra calisir: anahtari
+		// bilmeyen hicbir cagirici buraya ulasamaz.
+		if !m.openPairingEnabled() {
+			return fmt.Errorf("eş eşleştirilmemiş: %s", remoteIP)
+		}
+		m.pairByIP(remoteIP)
 	}
 	return nil
+}
+
+// SetOpenPairing lets a correct pairing key stand in for a prior pairing.
+//
+// Yalnizca cmd/mcos-node kullanir. MCOS kutusunda KAPALIDIR: orada kullanici
+// eslestirmeyi panelden acikca yapar.
+func (m *Manager) SetOpenPairing(on bool) {
+	m.mu.Lock()
+	m.openPairing = on
+	m.mu.Unlock()
+}
+
+func (m *Manager) openPairingEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.openPairing
+}
+
+// pairByIP records a caller that proved it knows the pairing key.
+func (m *Manager) pairByIP(ip string) {
+	m.mu.Lock()
+	for _, p := range m.peers {
+		if p.IP == ip {
+			p.Paired = true
+			p.LastSeen = time.Now()
+			p.State = model.PeerAvailable
+			m.mu.Unlock()
+			go m.savePeers()
+			return
+		}
+	}
+	id := "ip:" + ip
+	// Port TAHMINDIR: cagiricinin kendi dinleme portunu bilmiyoruz, yalnizca
+	// bize hangi adresten baglandigini biliyoruz. Standart eslestirme portu
+	// en iyi tahmin; yoklama zaten birden fazla portu deniyor.
+	m.peers[id] = &model.Peer{
+		ID: id, Name: "host", IP: ip, Port: model.PairingPort,
+		Paired: true, State: model.PeerAvailable, LastSeen: time.Now(),
+	}
+	m.mu.Unlock()
+	if m.log != nil {
+		m.log.Infof("cluster: %s anahtarla eşleşti", ip)
+	}
+	go m.savePeers()
 }
 
 // isPairedIP reports whether any user-paired peer is reachable at ip.
@@ -498,6 +605,38 @@ func (m *Manager) handlePeerConn(conn net.Conn) {
 				m.log.Infof("cluster: %s eşinden gelen görev %s (%s) çalıştırıldı", remoteIP, t.ID, t.Kind)
 			}
 			_ = enc.Encode(resp)
+		case "linkSpec":
+			// Ortak dünya kurulumu. assignTask ile AYNI yetkilendirmeden
+			// geçer: bu istek karşı makinede sunucu oluşturup başlatır —
+			// kimliksiz kabul etmek, LAN'daki herkese sunucu kurdurmak olurdu.
+			if err := m.authorizeTask(remoteIP, msg.Token); err != nil {
+				if m.log != nil {
+					m.log.Warnf("cluster: %s adresinden yetkisiz linkSpec reddedildi: %v",
+						remoteIP, err)
+				}
+				_ = enc.Encode(map[string]any{"accepted": false, "error": "yetkisiz"})
+				return
+			}
+			coord := m.LinkCoord()
+			if coord == nil || msg.Link == nil {
+				_ = enc.Encode(map[string]any{"accepted": false,
+					"error": "ortak dünya bu düğümde kapalı"})
+				continue
+			}
+			result, mcPort, err := coord.applyRemoteSpec(msg.Link.Normalize())
+			if err != nil {
+				_ = enc.Encode(map[string]any{"accepted": false, "error": err.Error()})
+				continue
+			}
+			if m.log != nil {
+				m.log.Infof("cluster: %s ortak dünya kurulumunu gönderdi: %s",
+					remoteIP, result)
+			}
+			// port ALANI SART: gonderen makine oyuncuyu buraya aktarirken
+			// bizim gercekten kullandigimiz portu bilmek zorunda.
+			_ = enc.Encode(map[string]any{
+				"accepted": true, "result": result, "port": mcPort})
+
 		default:
 			_ = enc.Encode(map[string]any{"error": "bilinmeyen metot"})
 		}
@@ -508,6 +647,7 @@ func (m *Manager) localStatus() map[string]any {
 	cpu := sysmon.CPU()
 	mem := sysmon.Memory()
 	return map[string]any{
+		"nodeId":   m.nodeID,
 		"nodeName": m.nodeName,
 		"version":  m.version,
 		"tier":     string(tier.Classify(mem, cpu)),

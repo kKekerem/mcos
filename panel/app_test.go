@@ -105,7 +105,7 @@ func TestTurboBadge(t *testing.T) {
 func TestSidebarRender(t *testing.T) {
 	a := testApp()
 	out := a.renderSidebar(22, 38)
-	for _, name := range []string{"Sistem Durumu", "Sunucular", "Tünel (Serveo)"} {
+	for _, name := range []string{"Sistem Durumu", "Sunucular", "Tünel (playit)"} {
 		if !strings.Contains(out, name) {
 			t.Fatalf("sidebar missing %q", name)
 		}

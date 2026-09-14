@@ -132,6 +132,104 @@ for pkg in fbui fbdraw fbfont fbvt fbinput; do
     fi
 done
 
+echo "== 6. Her bölüm gerçekten uygulanmış mı =="
+
+# Kullanıcı "yeni panelde çoğu şey bitirilmemiş, ekran sekmesi yok" dedi:
+# bazı bölümler yer tutucu gösteriyordu. Artık hepsinin bir çizim
+# fonksiyonu olmak ZORUNDA; eksik olan boş ekran olarak görünürdü.
+# TÜM fbpanel kaynaklarında aranır, yalnızca screens.go'da değil: büyüyen
+# ekranlar (Tünel, MCOS Paylaşım, Ayarlar) kendi dosyalarına taşındı ve tek
+# bir dosyaya bakan bir test, taşımayı "eksik ekran" sanırdı.
+PANELDIR="$ROOT/internal/fbpanel"
+for fn in drawDashboard drawServers drawUSB drawSoftware drawPerformance \
+          drawDevices drawNetwork drawDisplay drawTunnel drawPeers \
+          drawPower drawSettings drawSetup drawLock drawWizard; do
+    if grep -rq "func (a \*App) $fn(" "$PANELDIR"; then
+        pass "$fn var"
+    else
+        fail "$fn yok — o bölüm boş çizilir"
+    fi
+done
+
+if grep -rq 'drawPlaceholder' "$ROOT/internal/fbpanel/" 2>/dev/null; then
+    fail "yer tutucu ekran hâlâ var — bir bölüm taşınmamış"
+else
+    pass "yer tutucu ekran kalmamış"
+fi
+
+# "henüz taşınmadı" uyarıları tamamen kalkmış olmalı: kullanıcı
+# "yeni panelde çoğu şey bitirilmemiş" dedi ve hepsi taşındı.
+if grep -rq 'bu arayüze taşınmadı' "$ROOT/internal/fbpanel/" 2>/dev/null; then
+    fail "hâlâ 'bu arayüze taşınmadı' diyen bir yer var"
+else
+    pass "'taşınmadı' uyarısı kalmamış"
+fi
+
+# Sunucu oluşturma sihirbazı YENİ arayüzde olmalı.
+if grep -rq 'func (a \*App) StartWizard' "$ROOT/internal/fbpanel/" 2>/dev/null; then
+    pass "sunucu oluşturma sihirbazı yeni arayüzde"
+else
+    fail "sunucu sihirbazı yeni arayüzde yok"
+fi
+
+# Sihirbazda eş cihaz SEÇTİRİLMEMELİ (kullanıcının bildirdiği mantık hatası).
+if grep -q 'ClusterPeers()' "$ROOT/internal/fbpanel/wizard.go" 2>/dev/null; then
+    fail "sunucu sihirbazı eş listesi çekiyor — eşleştirme MAKİNEYE aittir"
+else
+    pass "sunucu sihirbazı eş seçtirmiyor"
+fi
+
+echo "== 7. Seçim pencereleri arka planı bulanıklaştırıyor mu =="
+
+# "sadece wifi secme değil herhangi bisi secme ekranı gelince arkası
+# blurlanacak": tüm seçimler TEK modal altyapısını kullanmalı, yoksa bir
+# ekran yanlışlıkla bulanıklık olmadan liste gösterebilir.
+MODAL="$ROOT/internal/fbpanel/modal.go"
+if [ -f "$MODAL" ] && grep -q 'type ListModal' "$MODAL"; then
+    pass "ortak seçim penceresi (ListModal) var"
+else
+    fail "ortak seçim penceresi yok"
+fi
+if grep -q 'a.scrim.Capture' "$ROOT/internal/fbpanel/draw.go"; then
+    pass "açılır pencere arkası perdeleniyor"
+else
+    fail "açılır pencere arkası perdelenmiyor"
+fi
+
+echo "== 8. Ekran ayarları gerçekten uygulanıyor mu =="
+
+DISP="$ROOT/os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/mcos-display"
+if [ -x "$DISP" ]; then
+    pass "mcos-display var ve çalıştırılabilir"
+else
+    fail "mcos-display yok veya çalıştırılabilir değil"
+fi
+if grep -q 'mcos-display' "$ROOT/internal/fbpanel/keys.go"; then
+    pass "panel çözünürlüğü mcos-display ile değiştiriyor"
+else
+    fail "panel çözünürlük değişikliğini uygulamıyor"
+fi
+if sh "$DISP" set 9999x9999 >/dev/null 2>&1; then
+    fail "mcos-display geçersiz modu kabul etti"
+else
+    pass "mcos-display geçersiz modu reddediyor"
+fi
+
+echo "== 9. Odak görsel olarak ayırt ediliyor mu =="
+
+# Kullanıcının bildirdiği tasarım hatası: "soldaki menüden sağa gecince
+# hangisinin aktif olduğu belli olmuyor".
+if grep -q 'RowDimmed' "$ROOT/internal/fbui/widgets.go"; then
+    pass "soluk satır vurgusu (RowDimmed) var"
+else
+    fail "odaksız sütun için soluk vurgu yok"
+fi
+if grep -q 'contentFocused' "$ROOT/internal/fbpanel/draw.go"; then
+    pass "paneller odağa göre çiziliyor"
+else
+    fail "paneller odağı yok sayıyor"
+fi
+
 echo
 if [ "$fails" -gt 0 ]; then
     printf '\033[31m%d test başarısız\033[0m\n' "$fails"

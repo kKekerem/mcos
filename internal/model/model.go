@@ -156,6 +156,16 @@ type Server struct {
 	Hardcore     bool   `json:"hardcore,omitempty"`
 	Whitelist    bool   `json:"whitelist,omitempty"`
 
+	// LevelSeed pins the world seed.
+	//
+	// ORTAK DÜNYA İÇİN ŞART: iki düğüm aynı tohumu kullanmazsa aynı araziyi
+	// üretmez ve sınırı geçen oyuncu bambaşka bir dünyaya düşer. Tek makinede
+	// de yararlı: kullanıcı sevdiği bir dünyayı yeniden kurabilir.
+	LevelSeed string `json:"levelSeed,omitempty"`
+
+	// Link holds the shared-world (MCOS Link) setup for this server.
+	Link LinkConfig `json:"link,omitempty"`
+
 	// ClusterShare opts this server's heavy side-work (backups, log analysis)
 	// into LAN work-sharing when a paired helper node is available.
 	ClusterShare bool `json:"clusterShare,omitempty"`

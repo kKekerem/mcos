@@ -185,6 +185,15 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 		OnExit:      func(code int, err error) { m.onExit(srv.ID, code, err) },
 		Nice:        niceForServer(srv),
 		CPUAffinity: srv.CPUAffinity,
+
+		// ISLETIM SISTEMI duzeyinde kaynak tavani. Eskiden CPUQuota yalnizca
+		// saklaniyordu ve HICBIR YERDE uygulanmiyordu; artik cgroup v2 ile
+		// gercekten uygulaniyor.
+		ID:     srv.ID,
+		Limits: limitsForServer(srv),
+		OnLimits: func(desc string) {
+			m.logf("server: %q kaynak sinirlari uygulandi: %s", srv.Name, desc)
+		},
 	}
 	policy := supervisor.RestartPolicy{OnCrash: srv.RestartOnCrash, MaxRestarts: 10, Backoff: 5 * time.Second}
 
@@ -256,6 +265,45 @@ func niceForServer(srv *model.Server) int {
 		n = -10
 	}
 	return n
+}
+
+// limitsForServer maps a server's configured caps to OS-level limits.
+//
+// ── Neden var ───────────────────────────────────────────────────────────────
+// CPUQuota alani modelde, IPC sozlesmesinde ve UC ayri ekranda vardi ama
+// hicbir yerde UYGULANMIYORDU. Kullanici "%50 CPU" secip kaydediyor, sunucu
+// yine tum makineyi kullaniyordu. Bu fonksiyon o bosluğu kapatir.
+//
+// Turbo acikken sinirlar BILEREK kaldirilir: "turbo" tam olarak bunu
+// vaat ediyor.
+func limitsForServer(srv *model.Server) supervisor.Limits {
+	if srv.FullPerf {
+		// Turbo: hicbir tavan yok. nice -10 ile birlikte, sunucu makinenin
+		// tamamini kullanabilir.
+		return supervisor.Limits{IOWeight: 1000}
+	}
+	lim := supervisor.Limits{CPUPercent: srv.CPUQuota}
+
+	// Bellek tavani yigindan (-Xmx) %25 fazla verilir.
+	//
+	// NEDEN FAZLA: JVM yigin disinda da bellek kullanir - metaspace, kod
+	// onbellegi, dogrudan arabellekler, is parcacigi yiginlari. Tavani tam
+	// -Xmx'e esitlemek, sunucuyu yigin dolmadan cekirdek tarafindan
+	// oldurtur (OOM) ve kullanici sebebini anlayamaz.
+	if srv.RAMMB > 0 {
+		lim.MemoryMB = srv.RAMMB + srv.RAMMB/4 + 256
+	}
+
+	// Dusuk oncelikli sunucular disk bant genisliginde de geri cekilsin.
+	switch srv.Priority {
+	case model.PriorityLow:
+		lim.IOWeight = 50
+	case model.PriorityHigh:
+		lim.IOWeight = 500
+	default:
+		lim.IOWeight = 100
+	}
+	return lim
 }
 
 // EnsureInstalled installs the server software if it has not been prepared yet.

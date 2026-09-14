@@ -144,13 +144,18 @@ echo "== 5. Çekirdek komut satırında root= yok =="
 
 # Sistem initramfs'ten çalışır. root= verilirse çekirdek olmayan bir aygıtı
 # bağlamaya çalışır ve yine VFS paniği alırız.
+#
+# DİKKAT — "mcos.root=" BAŞKA BİR ŞEYDİR ve serbesttir: o bizim kendi
+# parametremizdir. Çekirdek onu yok sayar; initramfs'teki /init okuyup diske
+# switch_root yapar (kalıcılık). Bu yüzden yalnızca SÖZCÜK BAŞINDAKİ root=
+# aranır, aksi halde "mcos.root=" de yanlışlıkla eşleşirdi.
 cmdline="$(code "$INSTALL" | grep -E '^CMDLINE=' | head -1)"
 if [ -z "$cmdline" ]; then
     fail "CMDLINE tanımı bulunamadı"
-elif echo "$cmdline" | grep -q 'root='; then
-    fail "CMDLINE içinde root= var — initramfs tabanlı sistemde VFS paniği yapar: $cmdline"
+elif echo "$cmdline" | grep -qE '(^|[[:space:]"])root='; then
+    fail "CMDLINE içinde ÇEKİRDEK root= var — initramfs sisteminde VFS paniği: $cmdline"
 else
-    pass "CMDLINE root= içermiyor"
+    pass "CMDLINE çekirdek root= içermiyor"
 fi
 
 echo "== 6. grub-mkimage gerçekten bu argümanlarla çalışıyor mu =="

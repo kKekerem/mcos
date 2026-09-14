@@ -25,11 +25,41 @@ func defaultDataRoot() string {
 	return filepath.Join(".", "run")
 }
 
+// legacyConfigPath is where mcosd used to keep config.json on Linux.
+const legacyConfigPath = "/etc/mcos/config.json"
+
+// defaultConfigPath decides where config.json lives when --config is not given.
+//
+// ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
+// Burada koşulsuz "/etc/mcos/config.json" dönüyordu. MCOS canlı sistemde (ISO
+// ve USB) kök dosya sistemi initramfs'tir, yani /etc RAM'dedir: kalıcı bölüm
+// (MCOS-DATA) /data'ya bağlı olsa BİLE config.json her kapanışta yok oluyordu.
+//
+// Görünen sonucu şuydu: sunucular, kurulu Java ve yedekler /data altında
+// kalıcıyken — hepsi data-root'a yazılıyor — makine adı, Wi-Fi, saat dilimi,
+// SSH/uzaktan erişim ayarları, panel parolası ve setupComplete bayrağı HER
+// AÇILIŞTA sıfırlanıyordu. Yani kullanıcı kurulum sihirbazını her seferinde
+// baştan görüyordu.
+//
+// Artık varsayılan <data-root>/config.json. Sıra şu:
+//
+//  1. <data-root>/config.json varsa o kullanılır (kalıcı olan budur),
+//  2. yoksa ve eski /etc/mcos/config.json duruyorsa o kullanılır — kurulu bir
+//     sistemde /etc gerçekten kalıcıdır ve o dosyada kullanıcının ayarları
+//     vardır; sessizce görmezden gelmek onları kaybetmek olurdu,
+//  3. ikisi de yoksa yeni dosya <data-root> altında açılır.
 func defaultConfigPath(dataRoot string) string {
-	if runtime.GOOS == "linux" {
-		return "/etc/mcos/config.json"
+	inData := filepath.Join(dataRoot, "config.json")
+	if runtime.GOOS != "linux" {
+		return inData
 	}
-	return filepath.Join(dataRoot, "config.json")
+	if _, err := os.Stat(inData); err == nil {
+		return inData
+	}
+	if _, err := os.Stat(legacyConfigPath); err == nil {
+		return legacyConfigPath
+	}
+	return inData
 }
 
 func main() {

@@ -1,0 +1,20 @@
+// Kok Gradle dosyasi.
+//
+// Ciktilari ../../build altina tasiyoruz: Flutter'in beklentisi bu ve
+// "flutter clean" o klasoru temizliyor.
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+rootProject.buildDir = "../build"
+subprojects {
+    project.buildDir = "${rootProject.buildDir}/${project.name}"
+    project.evaluationDependsOn(":app")
+}
+
+tasks.register("clean", Delete) {
+    delete rootProject.buildDir
+}

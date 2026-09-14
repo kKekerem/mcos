@@ -23,12 +23,25 @@ package fbpanel
 import (
 	"image"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mcos/internal/fbui"
 	"mcos/internal/ipcclient"
 	"mcos/internal/model"
 )
+
+// SetPointerDevices records which pointing devices the host found.
+//
+// Panel evdev'i kendisi okumaz (cmd katmanının işi); ama Ayarlar ekranında
+// göstermek zorundadır, yoksa "fare desteği açık ama çalışmıyor" sorusunun
+// yanıtı hiçbir yerde görünmez.
+func (a *App) SetPointerDevices(names []string) {
+	a.mu.Lock()
+	a.pointerDevices = names
+	a.dirty = true
+	a.mu.Unlock()
+}
 
 // Section identifies a sidebar entry. Sıra panel/sidebar.go ile AYNI olmalı.
 type Section int
@@ -41,6 +54,7 @@ const (
 	SecPerformance
 	SecDevices
 	SecNetwork
+	SecDisplay
 	SecTunnel
 	SecPeers
 	SecPower
@@ -60,6 +74,7 @@ var sectionNames = [secCount]string{
 	SecPerformance: "Performans",
 	SecDevices:     "Donanım",
 	SecNetwork:     "Ağ",
+	SecDisplay:     "Ekran",
 	SecTunnel:      "Tünel (playit)",
 	SecPeers:       "MCOS Paylaşım",
 	SecPower:       "Güç",
@@ -96,14 +111,107 @@ type App struct {
 
 	events []fbui.Event
 	modal  Modal
-	scrim  fbui.ScrimCache
+	// wifiPickerWanted: kullanici ag listesini ISTEDI mi. Tarama saniyeler
+	// surdugu icin bu arada baska bir pencere acilmis olabilir; o zaman
+	// listeyi acmak, kullanicinin actigi pencereyi habersizce yok ederdi.
+	wifiListWanted bool
+	scrim          fbui.ScrimCache
+
+	// Bolumlere ozgu, daemon'dan cekilen ek veriler. Ana durum (status,
+	// servers, cfg) her saniye yenilenir; bunlar ise YALNIZCA o bolume
+	// girildiginde cekilir - bos bir bolum icin her saniye RPC yapmak
+	// uzerinde Minecraft sunucusu calisan bir makinede israftir.
+	javaRuntimes []model.JavaRuntime
+	peers        []model.Peer
+	tunnels      []model.TunnelStatus
+	usbJars      []model.USBJar
+	usbScanned   bool
+	wifiNote     string
+
+	// ── PC eşleştirme / ortak dünya ─────────────────────────────────────
+	// clusterID, BU makinenin eşleştirme kimliğidir (ad, adres, anahtar).
+	// Kullanıcı öbür makinede elle eşleştirme yaparken bunu okur.
+	clusterID peersIdentity
+	// link, ortak dünyanın durumudur (dilimler, aktarım sayısı, mod).
+	link model.LinkStatus
+	// scanNote, radar animasyonunun altında yazan açıklamadır.
+	scanNote string
+
+	// playit, tünel ajanının son bilinen durumudur.
+	playit ipcclient.PlayitStatus
+
+	// pointerDevices, bulunan fare/touchpad adlarıdır. Ayarlar ekranı
+	// gösterir: "fare çalışmıyor" şikâyetinin ilk sorusu budur.
+	pointerDevices []string
+
+	// Ekran bilgisi: gercek cozunurluk ve kullanicinin sectigi acilis modu.
+	screenW, screenH int
+	displayPref      string
 
 	// asleep: ekran kapalı, sunucular çalışmaya devam ediyor.
 	asleep   bool
 	sleepMsg string
 
+	// pending, onay penceresinden gelen guc eylemini tasir. Modal geri
+	// cagrisi Action donduremez (arayuz bool doner), bu yuzden karar burada
+	// saklanir ve ana dongu bir sonraki turda okur.
+	pending Action
+
 	spin  int
 	dirty bool
+
+	// refreshing, arka plan yoklamasının sürdüğünü söyler. Atomik, çünkü
+	// hem ana döngüden hem goroutine'den okunur ve a.mu'yu beklemeden
+	// denetlenmesi gerekir.
+	refreshing atomic.Bool
+
+	// ── Fare / touchpad ─────────────────────────────────────────────────
+	// zones her karede yeniden kurulur: tıklanabilir her şey çizilirken
+	// kendi dikdörtgenini kaydeder (bkz. pointer.go).
+	zones []zone
+	ptr   pointerState
+
+	// ── Geçiş animasyonları ─────────────────────────────────────────────
+	// prevFrame ve scratch TEMBEL ayrılır ve animasyonlar kapalıysa hiç
+	// ayrılmaz: 1080p'de her biri 8.3 MB tutar.
+	trans     *transition
+	prevFrame *image.RGBA
+	scratch   *image.RGBA
+
+	// scanBusy, ağ/eş taraması sürerken radar animasyonunu açar.
+	scanBusy bool
+
+	// wizard, sunucu oluşturma sihirbazıdır. nil ise açık değildir.
+	//
+	// setup'tan AYRI: ikisi aynı anda açık olabilir mi? Hayır — ama ayrı
+	// alanlar tutmak, hangisinin açık olduğunu tek bir bool'a sıkıştırmaktan
+	// ve yanlış çizmekten daha güvenli.
+	wizard *Wizard
+
+	// setup, ilk kurulum sihirbazıdır. nil ise normal panel çizilir.
+	//
+	// Panelin İÇİNDE yaşar (ayrı bir program değil) çünkü açılış
+	// ekranından sihirbaza yumuşak geçiş, iki ayrı süreç arasında
+	// yapılamaz — tuval aynı olmalı.
+	setup *Setup
+
+	// ── Kilit ekranı ────────────────────────────────────────────────────
+	// locked true iken panel yalnızca parola ekranını çizer ve hiçbir
+	// kısayolu işlemez. İSTEĞE BAĞLIDIR: parola kurulmadıysa hiç devreye
+	// girmez (bkz. model.SecurityConfig).
+	locked    bool
+	lockInput string
+	lockErr   string
+	// lockAn, kilit ekranındaki parola alanının yazma/silme animasyonu.
+	//
+	// Kullanıcının isteği: "yazma animasyonu şifre girerken falan, silerken".
+	// Kilit ekranı TextModal KULLANMAZ (tam ekrandır, pencere değil), bu
+	// yüzden aynı hareketin burada ayrıca kurulması gerekti.
+	lockAn    lockAnim
+	lockTries int
+	// lockUntil, ard arda yanlış denemelerden sonraki bekleme süresinin
+	// bitiş anıdır. Sıfır değer = ceza yok.
+	lockUntil time.Time
 
 	// lastErr is surfaced in the status bar instead of being swallowed.
 	lastErr string
@@ -122,6 +230,44 @@ type Modal interface {
 	Draw(a *App, r image.Rectangle)
 	// Key handles a keystroke. done=true closes the dialog.
 	Key(a *App, key string) (done bool)
+}
+
+// Animated is implemented by dialogs that move on their own.
+//
+// ── Neden gerekliydi ────────────────────────────────────────────────────────
+// Panel boştayken hiçbir kare çizmez (bkz. App.Tick): üzerinde Minecraft
+// sunucusu koşan bir makinede saniyede 60 kez tüm ekranı çizmek boşuna CPU
+// demek. Ama bu, açık bir pencerenin KENDİ animasyonunu da donduruyordu —
+// metin alanındaki imleç, "yanıp sönüyor" diye yazılmış olmasına rağmen
+// gerçekte HİÇ yanıp sönmüyordu, çünkü pencere açıkken yeniden çizim isteyen
+// bir koşul yoktu.
+//
+// fast ayrımı bilerek: kısa ve hızlı hareketler (yazma, silme, sarsılma) 60
+// kare/sn ister; imleç yanıp sönmesi 12 kare/sn ile aynı görünür. İkisini tek
+// bayrağa bağlamak ya imleci tökezletir ya da pencere açık kaldığı sürece
+// makineyi boşuna meşgul ederdi.
+type Animated interface {
+	// Animating reports whether the dialog needs a redraw on this tick.
+	// fast=true is the ~60 fps branch, fast=false the ~12 fps branch.
+	Animating(fast bool) bool
+}
+
+// needsFastRedraw reports whether anything on screen wants a 60 fps redraw.
+//
+// İki kaynak var ve ikisi de KISA süreli hareketler: açık bir pencerenin
+// kendi animasyonu (metin alanı) ve kilit ekranındaki parola alanı. İkisi de
+// 80 ms'lik animasyon tikine bağlanamaz — 150 ms'lik bir "yerine oturma"
+// orada iki kareye düşer ve kekemeleşir.
+func (a *App) needsFastRedraw() bool {
+	a.mu.Lock()
+	m := a.modal
+	lockBusy := a.locked && a.lockAn.animating()
+	a.mu.Unlock()
+	if lockBusy {
+		return true
+	}
+	an, ok := m.(Animated)
+	return ok && an.Animating(true)
 }
 
 // New creates the panel bound to a canvas and a daemon client.
@@ -348,7 +494,24 @@ func (a *App) SetCursor(c int) {
 }
 
 // gotoSection switches sections and resets the row cursor.
+//
+// Bölüm değişiminde bir GEÇİŞ başlatılır: yeni içerik, gidilen yöne göre
+// yukarıdan veya aşağıdan kayarak gelir. Yön bilgisi kullanıcıya "listede
+// nereye gittim?" sorusunu yanıtlatır — sert kesme bunu söylemez.
 func (a *App) gotoSection(s Section) {
+	a.mu.Lock()
+	old := a.section
+	a.mu.Unlock()
+
+	if old != s {
+		kind := transSlideDown
+		if s < old {
+			kind = transSlideUp
+		}
+		// Kilit ALTINDA çağrılamaz: beginTransition kendi kilidini alır.
+		a.beginTransition(kind)
+	}
+
 	a.mu.Lock()
 	a.section = s
 	a.cursor = 0
@@ -357,7 +520,15 @@ func (a *App) gotoSection(s Section) {
 }
 
 // OpenModal shows a dialog and captures the blurred backdrop once.
+//
+// Pencere SOLUKLAŞARAK gelir: anında beliren bir pencere, ekranın
+// değiştiğini değil "bir şey patladığını" hissettirir. Geçiş, arkadaki
+// bulanıklığın da yumuşakça oturmasını sağlar.
+//
+// beginTransition KİLİT DIŞINDA çağrılır: kendi kilidini alır ve içeride
+// çağırmak kilitlenmeye yol açardı.
 func (a *App) OpenModal(m Modal) {
+	a.beginTransition(transFade)
 	a.mu.Lock()
 	a.modal = m
 	a.dirty = true
@@ -369,6 +540,7 @@ func (a *App) OpenModal(m Modal) {
 
 // CloseModal dismisses the current dialog.
 func (a *App) CloseModal() {
+	a.beginTransition(transFade)
 	a.mu.Lock()
 	a.modal = nil
 	a.dirty = true
@@ -388,6 +560,32 @@ func (a *App) Tick() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.spin++
+
+	// Süren bir geçiş her karede yeniden çizilmeli, yoksa animasyon donar.
+	if a.trans != nil {
+		return true
+	}
+	// Kendi animasyonu olan bir pencere açıksa (metin alanı imleci gibi).
+	if an, ok := a.modal.(Animated); ok && an.Animating(false) {
+		return true
+	}
+	// Tarama radarı dönüyorsa aynı şekilde.
+	if a.scanBusy {
+		return true
+	}
+	// Kilit ekranındaki nefes alan halka.
+	if a.locked {
+		return true
+	}
+	// Sihirbaz: karşılama logosu nefes alır, tarama radarı döner,
+	// kurulum göstergesi ilerler.
+	if a.setup != nil {
+		return true
+	}
+	// Sunucu sihirbazı: sürüm listesi beklenirken gösterge döner.
+	if a.wizard != nil && (!a.wizard.verLoaded || a.wizard.creating) {
+		return true
+	}
 	// Yalnızca bir şey DÖNÜYORSA yeniden çizim iste: boştayken her 100 ms'de
 	// tüm ekranı çizmek bir sunucu makinesinde boşuna CPU yakar.
 	for _, s := range a.servers {
@@ -396,6 +594,12 @@ func (a *App) Tick() bool {
 		}
 	}
 	if len(a.events) > 0 && a.events[len(a.events)-1].Kind == fbui.EventBusy {
+		return true
+	}
+	// İmleç görünürken, boşta kaldığında KENDİLİĞİNDEN kaybolur; o anı
+	// yakalamak için bir kare daha gerekir.
+	if a.ptr.visible && time.Since(a.ptr.moved) > pointerHideAfter {
+		a.ptr.visible = false
 		return true
 	}
 	return false

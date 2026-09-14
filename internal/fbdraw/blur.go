@@ -3,6 +3,8 @@ package fbdraw
 import (
 	"image"
 	"image/color"
+	"runtime"
+	"sync"
 )
 
 // Bu dosya, açılır pencerelerin (Wi-Fi seçimi, parola girişi, onay kutuları)
@@ -59,9 +61,61 @@ func Blur(dst *image.RGBA, r image.Rectangle, radius int) {
 	}
 
 	sw, sh := w/scale, h/scale
+	// Küçültme ve büyütme TAM ÇÖZÜNÜRLÜKTE gezinir (2 milyon piksel okuma +
+	// 2 milyon yazma); asıl bulanıklık ise küçük arabellekte kalır. Yani
+	// maliyetin neredeyse tamamı bu iki geçiştedir ve ikisi de satır satır
+	// ayrıktır — bantlara bölünebilir.
 	small := downsample(dst, r, scale, sw, sh)
 	blurBuf(small, sw, sh, radius/scale)
 	upsample(dst, r, small, sw, sh)
+}
+
+// rowBands splits h rows across the cores, returning the band count.
+//
+// Bant başına en az minRows satır: daha incesinde goroutine kurma maliyeti
+// kazancı yer.
+func rowBands(h, minRows int) int {
+	n := runtime.NumCPU()
+	if n > 8 {
+		n = 8
+	}
+	if n > h/minRows {
+		n = h / minRows
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// forEachBand runs fn over contiguous row ranges, in parallel when worthwhile.
+//
+// GÜVENLİK: fn yalnızca [a, z) aralığındaki satırlara yazmalıdır. image.RGBA
+// satırları bellekte ayrık olduğu için iki bant asla aynı baytı görmez.
+func forEachBand(h, minRows int, fn func(a, z int)) {
+	bands := rowBands(h, minRows)
+	if bands == 1 {
+		fn(0, h)
+		return
+	}
+	var wg sync.WaitGroup
+	rows := (h + bands - 1) / bands
+	for i := 0; i < bands; i++ {
+		a := i * rows
+		z := a + rows
+		if z > h {
+			z = h
+		}
+		if a >= z {
+			break
+		}
+		wg.Add(1)
+		go func(a, z int) {
+			defer wg.Done()
+			fn(a, z)
+		}(a, z)
+	}
+	wg.Wait()
 }
 
 // blurBuf runs the three-pass box blur over a contiguous RGBA buffer.
@@ -103,7 +157,16 @@ func writeRegion(dst *image.RGBA, r image.Rectangle, buf []uint8) {
 func downsample(dst *image.RGBA, r image.Rectangle, scale, sw, sh int) []uint8 {
 	out := make([]uint8, sw*sh*4)
 	n := scale * scale
-	for y := 0; y < sh; y++ {
+	forEachBand(sh, 32, func(ya, yz int) {
+		downsampleBand(out, dst, r, scale, sw, n, ya, yz)
+	})
+	return out
+}
+
+func downsampleBand(out []uint8, dst *image.RGBA, r image.Rectangle,
+	scale, sw, n, ya, yz int) {
+
+	for y := ya; y < yz; y++ {
 		for x := 0; x < sw; x++ {
 			var sum [4]int
 			for by := 0; by < scale; by++ {
@@ -123,7 +186,6 @@ func downsample(dst *image.RGBA, r image.Rectangle, scale, sw, sh int) []uint8 {
 			out[o+3] = uint8(sum[3] / n)
 		}
 	}
-	return out
 }
 
 // upsample writes the small buffer back with bilinear interpolation.
@@ -136,7 +198,15 @@ func upsample(dst *image.RGBA, r image.Rectangle, src []uint8, sw, sh int) {
 	stepX := (sw << 16) / w
 	stepY := (sh << 16) / h
 
-	for y := 0; y < h; y++ {
+	forEachBand(h, 64, func(ya, yz int) {
+		upsampleBand(dst, r, src, sw, sh, w, stepX, stepY, ya, yz)
+	})
+}
+
+func upsampleBand(dst *image.RGBA, r image.Rectangle, src []uint8,
+	sw, sh, w, stepX, stepY, ya, yz int) {
+
+	for y := ya; y < yz; y++ {
 		fy := y * stepY
 		y0 := fy >> 16
 		if y0 >= sh-1 {

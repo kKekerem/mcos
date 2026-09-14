@@ -19,6 +19,7 @@ import (
 	"image"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"mcos/internal/fbdev"
@@ -37,10 +38,29 @@ func main() {
 		ttyPath = flag.String("tty", "/dev/tty", "konsol aygıtı")
 		fontPx  = flag.Float64("font", 0, "yazı boyutu (piksel); 0 = ekrana göre otomatik")
 		shot    = flag.String("screenshot", "", "bir kare çizip PNG olarak kaydet ve çık")
+		shotSec = flag.Int("section", 0, "ekran görüntüsü: hangi bölüm (0..11)")
+		shotFoc = flag.Bool("content", false, "ekran görüntüsü: odak içerik sütununda olsun")
+		shotMod = flag.String("modal", "", "ekran görüntüsü: açılır pencere (list|password|confirm)")
+		intro   = flag.String("intro", "/run/mcos-splash.rgba",
+			"açılış ekranının son karesi (geçiş animasyonu için)")
+		ready = flag.String("ready", "/run/mcos-panel.ready",
+			"panel hazır olunca bu dosyayı oluştur (açılış ekranı buna bakar)")
+		forceSetup = flag.Bool("setup", false,
+			"kurulum sihirbazını yapılandırma tamamlanmış olsa da aç")
+		shotSetup = flag.Int("setup-page", -1,
+			"ekran görüntüsü: kurulum sihirbazının şu sayfası (0..9)")
+		shotWizard = flag.Int("wizard-page", -1,
+			"ekran görüntüsü: sunucu sihirbazının şu sayfası (0..9)")
 	)
 	flag.Parse()
 
-	err := run(*sock, *fbPath, *ttyPath, *fontPx, *shot)
+	err := run(runOpts{
+		sock: *sock, fbPath: *fbPath, ttyPath: *ttyPath, fontPx: *fontPx,
+		shot: *shot, shotSec: *shotSec, shotFoc: *shotFoc, shotMod: *shotMod,
+		intro: *intro, ready: *ready,
+		forceSetup: *forceSetup, shotSetup: *shotSetup,
+		shotWizard: *shotWizard,
+	})
 	switch {
 	case err == nil:
 		return
@@ -61,7 +81,28 @@ func main() {
 // AÇIK BİR İSTEK olarak yorumlar.
 const exitLegacyPanel = 64
 
-func run(sock, fbPath, ttyPath string, fontPx float64, shot string) error {
+// runOpts groups the command-line options.
+//
+// Sekiz konumsal argüman, çağrı yerinde hangisinin hangisi olduğunu
+// okunmaz hale getiriyordu; adlandırılmış alanlar bunu çözer.
+type runOpts struct {
+	sock, fbPath, ttyPath string
+	fontPx                float64
+	shot                  string
+	shotSec               int
+	shotFoc               bool
+	shotMod               string
+	intro, ready          string
+	forceSetup            bool
+	shotSetup             int
+	shotWizard            int
+}
+
+func run(o runOpts) error {
+	sock, fbPath, ttyPath := o.sock, o.fbPath, o.ttyPath
+	fontPx, shot := o.fontPx, o.shot
+	shotSec, shotFoc, shotMod := o.shotSec, o.shotFoc, o.shotMod
+
 	cl, err := ipcclient.Dial(sock)
 	if err != nil {
 		// Ekran görüntüsü kipinde daemon ZORUNLU DEĞİL: arayüz, çalışan bir
@@ -110,12 +151,30 @@ func run(sock, fbPath, ttyPath string, fontPx float64, shot string) error {
 	ui := fbui.NewUI(canvas, face, fbui.DefaultPalette)
 	app := fbpanel.New(ui, cl)
 
+	// Ekran bolumu GERCEK cozunurlugu gostermeli: kullanici tercihinin
+	// uygulanip uygulanmadigini ancak boyle anlar.
+	app.SetScreenSize(w, h)
+	if out, err := exec.Command("mcos-display", "pref").Output(); err == nil {
+		app.SetDisplayPref(strings.TrimSpace(string(out)))
+	}
+
 	if shot != "" {
 		if cl == nil {
 			// Gercek veri yok: ornek veriyle ciz ki ekranin dolu hali
 			// gorulebilsin. Bu YALNIZCA ekran goruntusu kipindedir;
 			// calisan sistemde her zaman gercek veri gosterilir.
 			fbpanel.FillDemo(app)
+		}
+		switch {
+		case o.shotSetup >= 0:
+			fbpanel.DemoSetup(app, o.shotSetup)
+		case o.shotWizard >= 0:
+			fbpanel.DemoWizard(app, o.shotWizard)
+		default:
+			fbpanel.DemoView(app, shotSec, shotFoc)
+		}
+		if shotMod != "" {
+			fbpanel.DemoModal(app, shotMod)
 		}
 		app.Draw()
 		if err := fbdev.SavePNG(canvas, shot); err != nil {
@@ -142,14 +201,58 @@ func run(sock, fbPath, ttyPath string, fontPx float64, shot string) error {
 
 	act := fbinput.WatchActivity()
 	defer act.Close()
+	// Touchpad ham değerlerini piksele çevirmek için ekran boyutu gerekir.
+	act.SetScreen(w, h)
+	app.SetPointerDevices(act.Pointers())
 
 	host := &console{con: con, act: act, cl: cl}
 	keys := host.start(fbpanel.DefaultOptions().EscTimeout, act)
 	defer close(host.stop)
 
+	// ── Açılış geçişi ───────────────────────────────────────────────────
+	// Açılış ekranı (mcos-splash) son karesini kaydetmişse, panel oradan
+	// YAKINLAŞARAK açılır. Kullanıcının isteği tam olarak buydu:
+	// "boot animasyonu bitince içeri zoomlanarak blur felan ile OOBE'nin
+	// ilk ekranı gelsin".
+	//
+	// Kare bir KEZ kullanılır ve silinir: ikinci kez panele girildiğinde
+	// (F12 ile eski panele geçip dönmek gibi) aynı animasyonu tekrarlamak
+	// yavaş hissettirir.
+	if o.intro != "" {
+		if fr := fbdev.LoadFrame(o.intro, canvas.Bounds()); fr != nil {
+			app.BeginIntro(fr)
+			_ = os.Remove(o.intro)
+		}
+	}
+
+	// Açılış ekranına "hazırım" de. Bunu ÇİZİMDEN ÖNCE yapmıyoruz: splash
+	// hemen çıkarsa ekran bir an siyah kalır.
+	app.Draw()
+	_ = disp.Flip(canvas)
+	if o.ready != "" {
+		markReady(o.ready)
+		defer os.Remove(o.ready)
+	}
+
+	if o.forceSetup {
+		app.StartSetup()
+	}
+
 	err = app.Run(canvas, disp, host, fbpanel.DefaultOptions())
 	_ = keys
 	return err
+}
+
+// markReady creates the flag file the splash screen waits for.
+//
+// Hata YUTULUR: /run yazılamıyorsa (salt okunur kök, tuhaf bir kurulum)
+// açılış ekranı kendi zaman aşımıyla çıkar. Panel bu yüzden açılmamalı.
+func markReady(path string) {
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	_ = f.Close()
 }
 
 // autoFontSize picks a readable cell size for the screen height.
@@ -265,6 +368,13 @@ func (c *console) start(escTimeout time.Duration, act *fbinput.Activity) <-chan 
 
 func (c *console) Keys() <-chan fbinput.Key  { return c.ch }
 func (c *console) Activity() <-chan struct{} { return c.act.Wake() }
+
+// Pointer forwards decoded mouse/touchpad events to the panel.
+//
+// Aynı evdev okuyucusundan gelir (bkz. fbinput.Activity): aygıtı iki kez
+// açmak gereksiz kopya demektir ve bazı sürücülerde ikinci açış başarısız
+// olur.
+func (c *console) Pointer() <-chan fbinput.PointerEvent { return c.act.Pointer() }
 
 // Power restores the console BEFORE rebooting.
 //

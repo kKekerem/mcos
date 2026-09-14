@@ -13,9 +13,15 @@ BIN           ?= bin
 VERSION       := $(shell cat VERSION 2>/dev/null || echo 0.1.0)
 
 # Host binaries (for dev/test on the current OS).
-GO_CMDS := mcosd mcosctl mcos-detect mcos-panel mcos-panel-fb
+# Hedef imaja giren komutlar. mcos-flash BURADA DEGIL: o bir MASAUSTU
+# aracidir (kullanicinin Windows/Linux makinesinde calisir) ve imaja
+# koymanin anlami yok.
+GO_CMDS := mcosd mcosctl mcos-detect mcos-panel mcos-panel-fb mcos-splash
 
-.PHONY: all app build test test-boot check-ui check-fonts preview-ui vet fmt run clean os iso qemu qemu-uefi lite help preflight uefi bios usb verify-usb boottest linux
+# Masaustu araclari: imaja girmez, ayri derlenir (make flash / flash-windows).
+GO_HOST_CMDS := mcos-flash
+
+.PHONY: offline-bundle all app build test test-boot check-ui check-fonts preview-ui vet fmt run clean os iso qemu qemu-uefi lite help preflight uefi bios usb verify-usb boottest linux flash flash-windows flash-all mod mod-fabric mod-paper shots
 
 all: app
 
@@ -61,7 +67,26 @@ test-boot:
 	@sh scripts/test-bootloader-embed.sh
 	@sh scripts/test-boot-logic.sh
 	@sh scripts/test-display-logic.sh
+	@sh scripts/test-splash-logic.sh
 	@sh scripts/test-panel-wiring.sh
+	@sh scripts/test-diskroot-logic.sh
+	@sh scripts/test-vbox-compat.sh
+	@sh scripts/test-wifi-logic.sh
+	@sh scripts/test-flash-logic.sh
+	@sh scripts/test-ui-logic.sh
+	@sh scripts/test-link-logic.sh
+	@sh scripts/test-version.sh
+	@sh scripts/test-remote-logic.sh
+	@sh scripts/test-remote-e2e.sh
+
+## offline-bundle: çevrimdışı sunucu paketini indirir (Java + Fabric + Via)
+##
+## İmaja gömülür; internet olmadan sunucu kurulabilmesini sağlar.
+## Minecraft sunucu jar'ı BUNA DAHİL DEĞİLDİR — Mojang EULA'sı
+## dağıtımını yasaklıyor; o tek dosya ilk kurulumda indirilip
+## önbelleklenir.
+offline-bundle:
+	@sh scripts/fetch-offline-bundle.sh dist/offline
 
 ## probe-boot: HEDEF rootfs'te hangi önyükleyici araçlarının olduğunu gösterir
 probe-boot:
@@ -132,7 +157,35 @@ $(BR_DIR)/Makefile:
 	@mkdir -p os/buildroot
 	@git clone --depth 1 --branch $(BR_VERSION) https://github.com/buildroot/buildroot.git $(BR_DIR)
 
-os: preflight $(BR_DIR)/Makefile linux
+## fix-perms: derlemeyi kıran KAYIP ÇALIŞTIRMA BİTİNİ geri koyar
+##
+## ── Düzeltilen gerçek hata ─────────────────────────────────────────────────
+## "make iso" şununla kırıldı:
+##
+##   >>>   Executing post-build script .../post-build.sh
+##   /bin/bash: line 1: .../post-build.sh: Permission denied
+##   make[2]: *** [Makefile:754: target-finalize] Error 126
+##
+## Sebep: Buildroot BR2_ROOTFS_POST_BUILD_SCRIPT'i DOĞRUDAN çalıştırır, yani
+## dosyanın çalıştırma biti olmak ZORUNDA. Bu depo Windows'tan (WSL paylaşımı,
+## NTFS üzerinde bir checkout, ya da bir Windows düzenleyicisi) da
+## düzenlenebiliyor ve o yollardan yazılan her dosya 0644'e düşer. git de
+## yalnızca TEK bir çalıştırma bitini takip eder; dosya yeni eklendiyse ya da
+## mod değişikliği commit'lenmediyse bit sessizce kaybolur.
+##
+## Belirtisi sinsi: kaynak dosya doğru, derleme saatlerce sürüp EN SON adımda
+## kırılıyor. Bu yüzden 'os' hedefi her çalıştığında bitler geri konuyor.
+.PHONY: fix-perms
+fix-perms:
+	@chmod 755 \
+		os/buildroot/external/board/mcos/post-build.sh \
+		os/buildroot/external/board/mcos/rootfs-overlay/init \
+		os/buildroot/external/board/mcos/rootfs-overlay/etc/init.d/S* \
+		os/buildroot/external/board/mcos/rootfs-overlay/usr/bin/* \
+		2>/dev/null || true
+	@chmod 755 scripts/*.sh 2>/dev/null || true
+
+os: preflight fix-perms $(BR_DIR)/Makefile linux
 	@if [ "$(shell uname -s 2>/dev/null)" != "Linux" ]; then \
 		echo "os: Buildroot requires a Linux host (WSL2/Docker). Run from a Linux environment."; exit 1; \
 	fi; \
@@ -188,20 +241,51 @@ iso: os
 		'  set gfxpayload=keep' \
 		'  search --no-floppy --set=root --file /boot/bzImage' \
 		"  linux /boot/bzImage $$MCOS_CMDLINE_BASE" \
+		'  clear' \
+		'  echo "  MCOS baslatiliyor. Bellek diski yukleniyor (~140 MB)..."' \
 		'  initrd /boot/initrd.img' \
+		'  echo "  Hazir, cekirdek calistiriliyor."' \
 		'}' \
 		'menuentry "MCOS Live Installer (Safe / VGA Text Mode)" {' \
 		'  set gfxpayload=text' \
 		'  search --no-floppy --set=root --file /boot/bzImage' \
+		'  echo "  Guvenli kip: grafik kipi hic denenmez, tum kayit ekrana basilir."' \
 		"  linux /boot/bzImage $$MCOS_CMDLINE_RECOVERY" \
 		'  initrd /boot/initrd.img' \
 		'}' \
 		> "$$D/boot/grub/grub.cfg"; \
-	GRUB_MODS=""; \
-	[ -d /usr/lib/grub/i386-pc ] && GRUB_MODS="$$GRUB_MODS /usr/lib/grub/i386-pc"; \
-	[ -d /usr/lib/grub/x86_64-efi ] && GRUB_MODS="$$GRUB_MODS /usr/lib/grub/x86_64-efi"; \
-	grub-mkrescue -o dist/mcos-x86_64.iso "$$D" $$GRUB_MODS -- -volid MCOS && \
+	printf '\\EFI\\BOOT\\BOOTX64.EFI\r\n' > "$$D/startup.nsh"; \
+	grub-mkrescue -o dist/mcos-x86_64.iso "$$D" \
+		-- -volid MCOS -joliet on -rockridge on && \
 	echo ">> ISO ready: dist/mcos-x86_64.iso ($$(du -h dist/mcos-x86_64.iso | cut -f1))"
+
+# ── Yukaridaki grub-mkrescue cagrisinda DUZELTILEN GERCEK HATALAR ──────────
+#
+# 1) "$$GRUB_MODS" KALDIRILDI.
+#    grub-mkrescue, "--" oncesindeki her secenek-olmayan argumani ISO KOKUNE
+#    EKLENECEK KAYNAK DIZIN sayar. "-d/--directory" ile karistirilmisti.
+#    Olculen sonuc: uretilen ISO kokunde 291 basibos *.MOD dosyasi, BOOT.IMG,
+#    CDBOOT.IMG, EFIEMU32.O (~1 MB) -- ve daha kotusu, "EFI" dizin adi
+#    cakisip "EFI0/" ve "EFI1/" olarak bozulmustu, ikisi de BOS.
+#    grub-mkrescue iki platformu da zaten kendisi buluyor; bu argumana hic
+#    gerek yoktu.
+#
+# 2) startup.nsh EKLENDI.
+#    VirtualBox'in EDK2 tabanli EFI'si /EFI/BOOT/BOOTX64.EFI yolunu bazen
+#    bulamayip "UEFI Interactive Shell"e duser -- VBox'ta en cok bildirilen
+#    EFI belirtisi budur. O kabuk kokteki startup.nsh'i OTOMATIK calistirir,
+#    yani bu tek satirlik dosya makineyi kurtarir.
+#    (DIKKAT: bu, eskiden kernel panic'e yol acan EFISTUB numarasi DEGILDIR.
+#     Orada ham cekirdek BOOTX64.EFI yapiliyor ve komut satirsiz aciliyordu.
+#     Burada BOOTX64.EFI gercek GRUB'dir ve komut satirini kendisi verir.)
+#
+# 3) -joliet on -rockridge on EKLENDI.
+#    DIKKAT: "--" sonrasi xorriso YEREL kipte calisir, mkisofs oykunmesinde
+#    DEGIL. mkisofs adi olan "-rational-rock" burada GECERSIZDIR ve
+#    derlemeyi kirar; yerel karsiligi "-rockridge on".
+#
+#    Joliet olmadan bir firmware kabugu yalnizca bozuk 8.3 adlar gorur
+#    (BZIMAGE.;1). startup.nsh'in dogru adla gorunebilmesi icin gerekli.
 
 ## qemu: boot the ISO in QEMU, BIOS mode, graphical window
 qemu: iso
@@ -261,9 +345,24 @@ usb: uefi bios
 
 ## verify-usb: uretilmis imajlari BOOT ETMEDEN denetle (bolum tablosu, onyukleyici, etiket)
 verify-usb:
-	@for f in dist/mcos-uefi.img dist/mcos-bios.img; do \
-		if [ -f "$$f" ]; then bash scripts/verify-usb.sh "$$f"; fi; \
-	done
+	@# -- Yakalanan gercek hata --------------------------------------------
+	@# Bu hedef eskiden imaj YOKKEN hicbir sey yazmadan 0 ile cikiyordu.
+	@# Yani "make verify-usb" sessizce basarili gorunuyor, ama hicbir sey
+	@# dogrulanmiyordu. Dogrulama komutunun bos gecmesi, en kotu hata
+	@# turudur: kullanici imajin denetlendigini sanip USB'ye yazar.
+	@found=0; rc=0; \
+	for f in dist/mcos-uefi.img dist/mcos-bios.img; do \
+		if [ -f "$$f" ]; then \
+			found=1; \
+			bash scripts/verify-usb.sh "$$f" || rc=1; \
+		fi; \
+	done; \
+	if [ "$$found" -eq 0 ]; then \
+		echo "verify-usb: hicbir imaj bulunamadi (dist/mcos-uefi.img, dist/mcos-bios.img)"; \
+		echo "            once 'make usb' calistirin"; \
+		exit 1; \
+	fi; \
+	exit $$rc
 
 ## boottest: imajlari QEMU'da GERCEKTEN boot edip hangi asamaya geldigini raporla
 boottest:
@@ -276,3 +375,112 @@ boottest:
 
 help:
 	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## //'
+
+## flash: masaustu flaslama aracini bu makine icin derler
+##
+## Sonuc dist/flash/ altina konur; yanindaki mcos-flash.sh ile calistirilir
+## (kok hakkini kendisi ister).
+# Baslaticilar ELLE YAZILMIS KAYNAKTIR, uretilen dosya degil.
+#
+# NEDEN AYRI BIR DEGISKEN: dist/ butunuyle .gitignore'da (ISO ve .img orada
+# uretiliyor). Baslaticilar bir zamanlar dogrudan dist/flash/ icinde duruyordu
+# ve bu yuzden GIT TARAFINDAN HIC IZLENMIYORLARDI: temiz bir klonda "make
+# flash" ikiliyi uretiyor ama kullanicinin cift tiklayacagi .bat/.sh hic
+# olusmuyordu. Artik kaynak izlenen bir klasorde duruyor ve buraya kopyalaniyor.
+FLASH_LAUNCHER_SRC := cmd/mcos-flash/launcher
+
+flash:
+	@mkdir -p dist/flash
+	@echo ">> building mcos-flash (host)"
+	@CGO_ENABLED=0 "$(GO)" build -ldflags "-s -w" -o dist/flash/mcos-flash ./cmd/mcos-flash
+	@cp "$(FLASH_LAUNCHER_SRC)/mcos-flash.sh" dist/flash/
+	@cp "$(FLASH_LAUNCHER_SRC)/mcos-flash.bat" dist/flash/
+	@chmod +x dist/flash/mcos-flash.sh
+	@echo "   dist/flash/mcos-flash  (baslatici: dist/flash/mcos-flash.sh)"
+
+## flash-windows: masaustu flaslama aracini Windows icin derler
+##
+## .bat baslaticisi yonetici hakkini kendisi ister; ikisi de ayni klasorde
+## olmali.
+flash-windows:
+	@mkdir -p dist/flash
+	@echo ">> building mcos-flash.exe (windows/amd64)"
+	@CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$(GO)" build -ldflags "-s -w" \
+		-o dist/flash/mcos-flash.exe ./cmd/mcos-flash
+	@cp "$(FLASH_LAUNCHER_SRC)/mcos-flash.bat" dist/flash/
+	@echo "   dist/flash/mcos-flash.exe  (baslatici: dist/flash/mcos-flash.bat)"
+
+## flash-all: hem Linux hem Windows araclarini derler
+flash-all: flash flash-windows
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MCOS DUGUM (masaustu uygulamasi)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Siradan bir Windows/Linux bilgisayari MCOS'a "ikinci PC" olarak ekleyen
+# program. MCOS kurmaya gerek yok: calistirmak yeterli.
+#
+# Baslaticilar mcos-flash'taki ile AYNI mantikla izlenen bir klasorde durur;
+# dist/ butunuyle .gitignore'da oldugu icin oraya konulsalardi temiz bir
+# klonda hic olusmazlardi.
+NODE_LAUNCHER_SRC := cmd/mcos-node/launcher
+
+node:
+	@mkdir -p dist/node
+	@echo ">> building mcos-node (host)"
+	@CGO_ENABLED=0 "$(GO)" build -ldflags "-s -w" -o dist/node/mcos-node ./cmd/mcos-node
+	@cp "$(NODE_LAUNCHER_SRC)/mcos-node.sh" dist/node/
+	@cp "$(NODE_LAUNCHER_SRC)/mcos-node.bat" dist/node/
+	@chmod +x dist/node/mcos-node.sh
+	@echo "   dist/node/mcos-node  (baslatici: dist/node/mcos-node.sh)"
+
+node-windows:
+	@mkdir -p dist/node
+	@echo ">> building mcos-node.exe (windows/amd64)"
+	@CGO_ENABLED=0 GOOS=windows GOARCH=amd64 "$(GO)" build -ldflags "-s -w" \
+		-o dist/node/mcos-node.exe ./cmd/mcos-node
+	@cp "$(NODE_LAUNCHER_SRC)/mcos-node.bat" dist/node/
+	@echo "   dist/node/mcos-node.exe  (baslatici: dist/node/mcos-node.bat)"
+
+# Modu da yanina koy: dugum, ortak dunya modunu programin YANINDA arar.
+node-all: node node-windows
+	@if [ -f dist/mods/mcos-link.jar ]; then \
+		cp dist/mods/mcos-link.jar dist/node/; \
+		echo "   dist/node/mcos-link.jar (ortak dunya modu)"; \
+	else \
+		echo "   UYARI: dist/mods/mcos-link.jar yok - once 'make mod' calistirin"; \
+	fi
+
+
+## mod: MCOS Link Minecraft modunu derler (gradle, bir kez internet ister)
+##
+## Sonuc dist/mods/mcos-link.jar; daemon oradan alip sunucunun mods/
+## klasorune kurar.
+# Ortak dunya eklentisinin IKI yapisi vardir.
+#
+# Fabric modlari mods/ altindan, Paper eklentileri plugins/ altindan yuklenir
+# ve ikisi birbirinin dosyasini TANIMAZ. Tek bir jar ile ikisini birden
+# beslemek mumkun degil. Ikisi de AYNI tel protokolunu konusur, yani bir Paper
+# dugumu ile bir Fabric dugumu ayni ortak dunyayi paylasabilir.
+mod: mod-fabric mod-paper
+	@ls -l dist/mods/ 2>/dev/null || true
+
+## mod-fabric: ortak dunya modu (Fabric/Quilt) -> dist/mods/mcos-link.jar
+mod-fabric:
+	@if [ ! -f mods/mcos-link/build.gradle ]; then \
+		echo "mods/mcos-link bulunamadi"; exit 1; \
+	fi
+	@mkdir -p dist/mods
+	@cd mods/mcos-link && (./gradlew build --no-daemon || gradle build --no-daemon)
+
+## mod-paper: ortak dunya eklentisi (Paper/Purpur) -> dist/mods/mcos-link-paper.jar
+mod-paper:
+	@if [ ! -f mods/mcos-link-paper/build.gradle ]; then \
+		echo "mods/mcos-link-paper bulunamadi"; exit 1; \
+	fi
+	@mkdir -p dist/mods
+	@cd mods/mcos-link-paper && (./gradlew build --no-daemon || gradle build --no-daemon)
+
+## shots: arayuzun her ekranini PNG olarak basar (donanim gerekmez)
+shots:
+	@sh scripts/shots.sh

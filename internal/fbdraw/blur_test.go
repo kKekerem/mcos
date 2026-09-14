@@ -37,20 +37,70 @@ func TestBlurSpreadsInk(t *testing.T) {
 
 // TestBlurLargeRegionIsFast — büyük bölgede küçültme yolu devreye girmeli.
 //
-// Tam çözünürlükte 1080p bulanıklık 176 ms sürüyordu; bu kabul edilemez.
-// Bu test, bütçenin aşılmadığını CI'da da doğrular.
+// ── Neden mutlak süre ÖLÇMÜYORUZ ────────────────────────────────────────────
+// Bu test önce "1080p bulanıklık 60 ms'yi aşmasın" diyordu. İki sorunu vardı:
+//
+//  1. Makine hızına bağlıydı. Aynı kod bir dizüstünde 55 ms, yük altında
+//     79 ms sürüyordu — yani test kodu değil, o anda başka ne çalıştığını
+//     ölçüyordu.
+//  2. "go test -race" altında KESİN başarısız oluyordu: yarış dedektörü her
+//     şeyi 10-20 kat yavaşlatır. Yani sıradan bir "-race ./..." koşusu
+//     kırmızı veriyordu ve insan onu görmezden gelmeyi öğrenirdi — asıl
+//     tehlike bu.
+//
+// Asıl doğrulanmak istenen şey bir süre değil, bir DEĞİŞMEZ: büyük bölgede
+// küçültme yolunun gerçekten devreye girdiği. Onu oranla ölçüyoruz: aynı
+// görüntüyü tam çözünürlükte bulanıklaştırmak, Blur'un kendisinden belirgin
+// biçimde YAVAŞ olmalı. İki ölçüm de aynı makinede, aynı yük altında
+// yapıldığı için oran makineden bağımsızdır.
 func TestBlurLargeRegionIsFast(t *testing.T) {
 	if testing.Short() {
 		t.Skip("kısa kipte atlandı")
 	}
-	img := image.NewRGBA(image.Rect(0, 0, 1920, 1080))
-	start := time.Now()
-	Blur(img, img.Bounds(), 12)
-	el := time.Since(start)
-	if el > 60*time.Millisecond {
-		t.Errorf("1080p bulanıklık %v sürdü — 60 ms bütçesi aşıldı, küçültme yolu çalışmıyor", el)
+	if raceEnabled {
+		// Gerekçe race_on_test.go içinde: yarış dedektörü iki yolun bellek
+		// erişim profillerini farklı oranda yavaşlattığı için ORAN anlamını
+		// yitiriyor ve test hiçbir şey bozulmamışken kırmızı yanıyor.
+		t.Skip("yarış dedektörü altında süre oranı ölçülemez")
 	}
-	t.Logf("1920x1080 bulanıklık: %v", el)
+	const w, h = 1920, 1080
+	const radius = 12
+
+	// ── Neden ÜÇ turun en iyisi? ────────────────────────────────────────
+	// Tek ölçüm, o an makinede koşan başka bir işe takılırsa şişer ve test
+	// rastgele kırmızı yanar. En iyi süre, "bu kod yolu en az ne kadar iş
+	// yapıyor" sorusunun en kararlı cevabıdır; gürültü yalnızca YUKARI
+	// yönde olur, aşağı değil.
+	best := func(f func()) time.Duration {
+		var d time.Duration
+		for i := 0; i < 3; i++ {
+			start := time.Now()
+			f()
+			if el := time.Since(start); d == 0 || el < d {
+				d = el
+			}
+		}
+		return d
+	}
+
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	fast := best(func() { Blur(img, img.Bounds(), radius) })
+
+	// Karşılaştırma: küçültmeden, tam çözünürlükte aynı bulanıklık.
+	buf := make([]uint8, w*h*4)
+	full := best(func() { blurBuf(buf, w, h, radius) })
+
+	if fast >= full {
+		t.Errorf("Blur (%v) tam çözünürlüklü bulanıklıktan (%v) hızlı değil — "+
+			"küçültme yolu çalışmıyor", fast, full)
+	}
+	// Küçültme 4 kat ise alan 16 kat azalır; 3 kat hızlanma çok ihtiyatlı bir
+	// alt sınır ve yalnızca yol tamamen kapandığında ihlal edilir.
+	if ratio := float64(full) / float64(fast); ratio < 3 {
+		t.Errorf("yalnızca %.1f kat hızlanma (%v -> %v) — küçültme yolu "+
+			"beklenenden az iş kazandırıyor", ratio, full, fast)
+	}
+	t.Logf("1920x1080: küçülterek %v, tam çözünürlükte %v", fast, full)
 }
 
 // TestBlurPreservesAverageBrightness — bulanıklık toplam parlaklığı korumalı.

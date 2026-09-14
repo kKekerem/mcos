@@ -1,0 +1,159 @@
+#!/bin/sh
+# mcos-display — acilis cozunurlugunu okur ve degistirir.
+#
+# ── NEDEN AYRI BIR PROGRAM? ────────────────────────────────────────────────
+# Cozunurluk bu sistemde CALISIRKEN degistirilemez: cekirdekte gercek ekran
+# karti surucusu yok (i915/amdgpu/nouveau derlenmiyor), framebuffer'i firmware
+# kuruyor. Tek yol onyukleyicideki "set gfxmode=" satirini degistirip yeniden
+# baslatmak.
+#
+# Bu, boot bolumunu baglamayi ve bir dosya yazmayi gerektirir. Panel bunu
+# kendisi yapmaz - ayri, test edilebilir bir program yapar.
+#
+# Kullanim:
+#   mcos-display get              -> su anki gercek cozunurluk (WxH)
+#   mcos-display pref             -> kayitli acilis tercihi (yoksa bos)
+#   mcos-display set 1920x1080    -> tercihi kaydet + grub.cfg guncelle
+#   mcos-display modes            -> secilebilir modlar
+
+set -eu
+
+CONF_DIR=/data/mcos
+CONF="$CONF_DIR/display.conf"
+MNT=/mnt/mcos-boot
+
+# Ortak cozunurluk tanimi (post-build tarafindan kopyalanir).
+if [ -r /usr/lib/mcos/display.sh ]; then
+    . /usr/lib/mcos/display.sh
+else
+    MCOS_GFXMODE='1920x1080x32,1920x1080,1680x1050,1600x900,1440x900,1366x768,1280x1024,1280x800,1280x720,1024x768,auto'
+    MCOS_MODES='1920x1080 1680x1050 1600x900 1440x900 1366x768 1280x1024 1280x800 1280x720 1024x768'
+fi
+
+die() { echo "$1" >&2; exit 1; }
+
+# current_mode, cekirdegin BILDIRDIGI cozunurlugu verir.
+#
+# /sys/class/graphics/fb0/virtual_size "1920,1080" bicimindedir. Bu, GRUB'un
+# ne sectigini degil, GERCEKTE ne oldugunu soyler - kullanici tercihinin
+# uygulanip uygulanmadigini ancak boyle anlarsiniz.
+current_mode() {
+    if [ -r /sys/class/graphics/fb0/virtual_size ]; then
+        tr ',' 'x' < /sys/class/graphics/fb0/virtual_size | tr -d '\n'
+    else
+        echo "bilinmiyor"
+    fi
+}
+
+saved_pref() {
+    [ -r "$CONF" ] || return 0
+    sed -n 's/^gfxmode=//p' "$CONF" | head -1
+}
+
+# find_boot_part, uzerinde grub.cfg olan FAT bolumunu bulur.
+#
+# Etiketten aramak sabit bir aygit adindan (/dev/sda1) cok daha guvenilir:
+# disk siralamasi acilistan aciliya degisebilir.
+find_boot_part() {
+    for lbl in MCOS-BOOT MCOS MCOS_LIVE; do
+        p="$(/usr/bin/mcos-findfs "$lbl" 2>/dev/null || true)"
+        [ -n "$p" ] && { echo "$p"; return 0; }
+    done
+    return 1
+}
+
+# write_gfxmode, verilen grub.cfg icindeki "set gfxmode=" satirini degistirir.
+#
+# Dosyayi bastan yazmiyoruz: kullanicinin veya kurulumun oradaki diger
+# ayarlarini (timeout, menu girdileri) korumak gerekiyor. Yalnizca TEK satir
+# degisir.
+#
+# Secilen mod listenin BASINA eklenir, listenin tamami korunur. Tek deger
+# yazsaydik ve o mod bu ekranda yoksa GRUB metin moduna duser, kullanici
+# kara ekranla kalirdi.
+write_gfxmode() {
+    cfg="$1"
+    mode="$2"
+    [ -f "$cfg" ] || return 1
+
+    tmp="$cfg.tmp$$"
+    if grep -q '^set gfxmode=' "$cfg"; then
+        sed "s|^set gfxmode=.*|set gfxmode=$mode,$MCOS_GFXMODE|" "$cfg" > "$tmp"
+    else
+        # gfxmode satiri yoksa basa ekle.
+        { echo "set gfxmode=$mode,$MCOS_GFXMODE"; cat "$cfg"; } > "$tmp"
+    fi
+    mv "$tmp" "$cfg"
+}
+
+cmd="${1:-get}"
+
+case "$cmd" in
+    get)
+        current_mode
+        echo
+        ;;
+
+    pref)
+        saved_pref
+        ;;
+
+    modes)
+        for m in $MCOS_MODES; do echo "$m"; done
+        ;;
+
+    set)
+        mode="${2:-}"
+        [ -n "$mode" ] || die "kullanim: mcos-display set <GENISLIKxYUKSEKLIK>"
+
+        # Mod gecerli mi? Listede olmayan bir mod, acilista GRUB'un onu
+        # bulamamasi demektir.
+        ok=0
+        for m in $MCOS_MODES; do
+            [ "$m" = "$mode" ] && ok=1
+        done
+        [ "$ok" = 1 ] || die "gecersiz mod: $mode"
+
+        # 1) Tercihi kalici veriye yaz. mcos-install bunu okuyup yeni
+        #    kurulumlarda da uygular.
+        mkdir -p "$CONF_DIR" 2>/dev/null || true
+        if ! printf 'gfxmode=%s\n' "$mode" > "$CONF" 2>/dev/null; then
+            die "tercih kaydedilemedi ($CONF yazilamiyor)"
+        fi
+
+        # 2) Boot bolumundeki grub.cfg'yi guncelle. Bu adim basarisiz olsa
+        #    bile tercih kaydedildi; kullaniciya durum acikca soylenir.
+        part="$(find_boot_part || true)"
+        if [ -z "$part" ]; then
+            echo "Tercih kaydedildi ($mode) ancak boot bolumu bulunamadi;"
+            echo "canli sistemde calisiyorsaniz bu normaldir."
+            exit 0
+        fi
+
+        mkdir -p "$MNT"
+        if ! mount "$part" "$MNT" 2>/dev/null; then
+            echo "Tercih kaydedildi ($mode) ancak boot bolumu baglanamadi."
+            exit 0
+        fi
+        # Ne olursa olsun ayir: bagli birakmak bir sonraki kurulumu bozar.
+        trap 'umount "$MNT" 2>/dev/null || true' EXIT
+
+        changed=0
+        for cfg in "$MNT/boot/grub/grub.cfg" "$MNT/EFI/BOOT/grub.cfg"; do
+            if write_gfxmode "$cfg" "$mode" 2>/dev/null; then
+                changed=$((changed + 1))
+            fi
+        done
+        sync
+
+        if [ "$changed" -gt 0 ]; then
+            echo "Cozunurluk $mode olarak ayarlandi ($changed dosya guncellendi)"
+        else
+            echo "Tercih kaydedildi ($mode) ancak grub.cfg bulunamadi"
+        fi
+        ;;
+
+    *)
+        die "bilinmeyen komut: $cmd"
+        ;;
+esac

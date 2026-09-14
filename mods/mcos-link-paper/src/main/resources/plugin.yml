@@ -1,0 +1,54 @@
+# Paper eklenti tanimi.
+#
+# api-version 1.21.11: TAM surum pinlidir, yalnizca ana surum degil.
+#
+# Bukkit 1.20.5'ten itibaren api-version'da minor surumu de kabul eder ve
+# "belirtilenden DUSUK surumlu sunucular eklentiyi yuklemeyi REDDEDER".
+# Teknik alt sinir aslinda 1.20.5'tir (Player#transfer o surumle geldi), ama
+# bu eklenti icin dogru olan sinir teknik degil ISLETIMSELDIR: MCOS kumesinde
+# HER dugum AYNI Minecraft surumunu calistirmak zorundadir — ../mcos-link/
+# gradle.properties bunu "farkli surumler farkli dunya uretir ve aktarilan
+# oyuncu baglantiyi kaybeder" diye yaziyor.
+#
+# Dolayisiyla 1.20.5 ya da 1.21.0 bir dugume yuklenmek ISTENMEZ: orada
+# eklenti calisir ama oyuncu sinirdan gectiginde bambaska bir dunyaya duser.
+# Tam surumu pinlemek, surum uyusmazligini "acilista reddedilen eklenti"ye
+# cevirir; alternatifi, aktarimin ortasinda kaybolan bir oyuncudur.
+#
+# Deger, gradle.properties'teki paper_api_version=1.21.11-R0.1-SNAPSHOT ve
+# offline-manifest.txt'teki "HEDEF SURUM: Minecraft 1.21.11" ile ayni olmali;
+# ucu birlikte degisir.
+name: MCOSLink
+version: '${version}'
+main: gg.mcos.link.paper.McosLinkPlugin
+api-version: '1.21.11'
+authors: [MCOS]
+description: >
+  Birden cok MCOS cihazinin ayni dunyayi calistirmasini saglar. Dunya X
+  ekseninde dilimlere bolunur; oyuncu siniri gectiginde envanteriyle birlikte
+  kesintisiz olarak obur cihaza aktarilir.
+website: https://github.com/mcos/mcos
+
+# folia-supported BILEREK YOK: Folia'da her bolge ayri bir is parcaciginda
+# calisir ve buradaki ana-is-parcacigi varsayimlari gecersiz olur. Yanlis
+# calismaktansa yuklenmemek yegdir.
+
+commands:
+  mcoslink:
+    description: Ortak dunya durumunu goster ve yonet
+    usage: /mcoslink <status|map|reload|where|send>
+    # DIKKAT: burada "permission:" YOKTUR ve olmamalidir.
+    #
+    # Komut duzeyindeki bir yetki, yurutucu HIC calismadan siradan oyuncuyu
+    # geri cevirir. Fabric surumu ise yalnizca "reload" ve "send" icin yetki
+    # (hasPermissionLevel(2)) ariyor; "status", "map" ve "where" HERKESE
+    # aciktir. Buraya permission yazmak, o uc alt komutu da kilitler ve iki
+    # dugum farkli davranir. Denetim, LinkCommands icinde yalnizca o iki alt
+    # komutta yapiliyor.
+
+permissions:
+  mcoslink.admin:
+    description: MCOS Link topolojisini yenileyebilir ve elle aktarim yapabilir
+    # op: yalnizca /mcoslink reload ve /mcoslink send bu yetkiyi ister;
+    # ikisi de sunucu topolojisine dokunur.
+    default: op

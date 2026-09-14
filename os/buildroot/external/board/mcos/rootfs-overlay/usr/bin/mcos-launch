@@ -11,6 +11,20 @@ SOCK_PATH="/run/mcos/mcosd.sock"
 LOG="/run/mcos/mcosd.log"
 PANEL_VT="2"
 PANEL_DEVICE="/dev/tty${PANEL_VT}"
+# KURTARMA KONSOLU: panel VT'si grafik kipinde KILITLI KALABILIR ve kabuktan
+# bunu dogrulamanin bir yolu yoktur (KDGETMODE ioctl'i icin arac yok). Bu
+# yuzden kurtarma arayuzu, hicbir MCOS programinin dokunmadigi bir VT'ye
+# tasinir; oradaki konsol her zaman metin kipinde ve satir kipindedir.
+RECOVERY_VT="1"
+RECOVERY_DEVICE="/dev/tty${RECOVERY_VT}"
+# CONSOLE_DIRTY: bu acilista panel VT'sini grafik kipine alan bir program
+# calistiysa "1" olur. Bir kez kirlendikten sonra temizlendigi KANITLANAMAZ,
+# bu yuzden bayrak geri alinmaz.
+CONSOLE_DIRTY=""
+# CONSOLE_READY: kurtarma konsolu bu dongu turunda hazirlandi mi? Hazirlama
+# ekrani siler; iki kez calisirsa show_recovery'nin yazdigi teshis metnini
+# silip menuyu bos bir ekrana birakirdi.
+CONSOLE_READY=""
 # FONT SIRASI: fbterm listenin İLK öğesini birincil font yapar, geri kalanlar
 # yalnızca eksik glif yedeğidir. Birincil MUTLAKA monospace bir metin fontu
 # olmalı. Eskiden burada "Noto Color Emoji" ilk sıradaydı; o font sistemde
@@ -20,10 +34,47 @@ PANEL_DEVICE="/dev/tty${PANEL_VT}"
 # /etc/fonts/local.conf ile AYNI olmalıdır.
 MCOS_FONT_NAMES="FiraCode Nerd Font,DejaVu Sans Mono,Liberation Mono,Noto Emoji"
 
+# ── Acilis ekrani (mcos-splash) ────────────────────────────────────────────
+# Acilis animasyonu servisler baslarken calisir ve SON KARESINI kaydeder;
+# panel oradan yakinlasarak acilir. Bayrak dosyalari /run altinda, yani
+# RAM diskinde: yeniden baslatinca kendiliginden kaybolurlar.
+SPLASH_MSG="/run/mcos-splash.msg"      # init'in yazdigi tek satirlik durum
+SPLASH_FRAME="/run/mcos-splash.rgba"   # panelin gecis icin okudugu son kare
+BOOT_READY="/run/mcos-boot.ready"      # bu dosya olusunca splash biter
+SPLASH_STARTED="/run/mcos-splash.started"
+# SPLASH_PIDFILE, rcS'in erken baslattigi animasyonun PID'ini tasir
+# (etc/init.d/S04splash). Bu betik animasyonu oradan devralir; bkz.
+# adopt_early_splash.
+SPLASH_PIDFILE="/run/mcos-splash.pid"
+SPLASH_PID=""
+# VT_STATE, fbvt devralma zincirinin ACIK oldugunu gosterir (internal/fbvt).
+# Konsolu devralan ILK program devralmadan onceki durumu buraya yazar; zinciri
+# kapatan Restore() dosyayi siler. Yani dosya DURUYORSA bir program konsolu
+# aldi ve henuz geri vermedi; panel VT'si su anda grafik kipinde olabilir.
+# Kabuktan KDGETMODE okunamadigi icin elimizdeki tek nesnel ipucu budur.
+VT_STATE="/run/mcos-vt.state"
+# ACTIVE_DEVICE, betigin su anda GERCEKTEN yazdigi konsol. Kurtarma arayuzu
+# baska bir VT'ye tasinabildigi icin "hangi tty'yi duzeltecegiz" sorusunun
+# tek dogru cevabi bu degiskendir.
+ACTIVE_DEVICE="$PANEL_DEVICE"
+# MENU_TIMEOUT, kurtarma menusunun kendiliginden [1]'e donmesi icin beklenen
+# suredir. Eskiden 5 saniyeydi: kullanici bes satirlik menuyu OKUYUP bir rakam
+# yazip Enter'a basamadan zaman asimi oluyordu, yani secenekler kagit uzerinde
+# vardi ama pratikte yine secilemiyordu. Sinirsiz de olamaz; basinda kimse
+# olmayan bir makine paneli kendiliginden yeniden denemelidir.
+MENU_TIMEOUT="15"
+
 mkdir -p /run/mcos /data /var/log /root /root/.cache/fontconfig /var/cache/fontconfig
 
+# Yakalanan gercek hata: bu "exec" korumasizdi. Etkilesimsiz bir kabukta
+# acilamayan bir yonlendirme KABUGU OLDURUR; init tty2::respawn ile betigi
+# aninda yeniden baslatir ve makine ekranda tek bir hata bile gostermeden
+# sonsuz acilis donusune girer. Once bir alt kabukta deniyoruz: orada olmek
+# zararsizdir, ana kabuk hayatta kalir ve kurtarma yolu acik kalir.
 if [ -c "$PANEL_DEVICE" ]; then
-    exec <"$PANEL_DEVICE" >"$PANEL_DEVICE" 2>&1
+    if ( exec <"$PANEL_DEVICE" >"$PANEL_DEVICE" ) 2>/dev/null; then
+        exec <"$PANEL_DEVICE" >"$PANEL_DEVICE" 2>&1
+    fi
     chvt "$PANEL_VT" >/dev/null 2>&1 || true
 fi
 
@@ -46,6 +97,290 @@ prepare_console() {
     loadkeys trq >/dev/null 2>&1 || true
 }
 
+# stage, acilis ekranindaki durum satirini gunceller.
+#
+# Splash calismiyorsa da zararsizdir: yalnizca bir dosyaya yazar.
+stage() {
+    echo "$1" > "$SPLASH_MSG" 2>/dev/null || true
+}
+
+# animations_enabled, kullanicinin acilis animasyonunu kapatip kapatmadigina bakar.
+#
+# Ayar config.json icindedir ("bootAnimation": false). JSON ayristirmak icin
+# bir arac yok; tek bir anahtarin degerini aramak yeterli ve kirilgan degil:
+# alan yoksa VARSAYILAN ACIK'tir, yani yeni kurulumda animasyon calisir.
+# UC AYRI YOL DENENIYOR cunku yapilandirmanin yeri surumler arasinda degisti:
+#   /data/config.json       — mcosd'nin kalici depodaki dosyasi (bugunku yer)
+#   /etc/mcos/config.json   — eski varsayilan (kurulu sistemlerde hala olabilir)
+#   /data/mcos/config.json  — daha eski bir yerlesim
+#
+# Yakalanan gercek hata: burada YALNIZCA /data/mcos/config.json vardi. mcosd o
+# yola hicbir zaman yazmiyor (bkz. cmd/mcosd/main.go defaultConfigPath), yani
+# "bootAnimation": false ayari HICBIR ZAMAN okunmuyordu: animasyonu kapatan
+# kullanici onu yine de goruyordu. Bu liste etc/init.d/S04splash icindeki ile
+# AYNI olmalidir.
+animations_enabled() {
+    for cfg in /data/config.json /etc/mcos/config.json /data/mcos/config.json; do
+        [ -r "$cfg" ] || continue
+        if grep -q '"bootAnimation"[[:space:]]*:[[:space:]]*false' \
+                "$cfg" 2>/dev/null; then
+            return 1
+        fi
+    done
+    if grep -q 'mcos\.noanim' /proc/cmdline 2>/dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+# adopt_early_splash, rcS'in (S04splash) zaten baslattigi animasyonu devralir.
+#
+# NEDEN GEREKLI: animasyon artik acilisin cok daha erken bir noktasinda,
+# rcS'in basinda basliyor — siyah ekran penceresini yariya indiren degisiklik
+# buydu. Ama o zaman animasyonu baslatan surec BU betik degil; yani:
+#
+#   * SPLASH_PID bos kalirdi ve finish_splash "sahipsiz" yoluna duserek
+#     pkill'e guvenirdi (daha kaba ve daha yavas),
+#   * CONSOLE_DIRTY bos kalirdi; oysa panel VT'si GERCEKTEN grafik kipinde
+#     olurdu. Kurtarma menusu o VT'ye yazilir ve HIC GORUNMEZDI — tam olarak
+#     eskiden yasanan "donmus logoya bakip guc dugmesine basma" arizasi.
+#
+# S04splash PID'i /run/mcos-splash.pid dosyasina yaziyor; buradan okuyup
+# sahipleniyoruz. Surec olmusse dosya yok sayilir.
+adopt_early_splash() {
+    [ -n "$SPLASH_PID" ] && return 0
+    [ -e "$SPLASH_STARTED" ] || return 0
+    CONSOLE_DIRTY=1
+    [ -r "$SPLASH_PIDFILE" ] || return 0
+    pid="$(cat "$SPLASH_PIDFILE" 2>/dev/null)"
+    case "$pid" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    pid_running "$pid" || return 0
+    SPLASH_PID="$pid"
+    return 0
+}
+
+# start_splash, acilis animasyonunu arka planda baslatir.
+#
+# --keep: cikarken konsolu METIN kipine DONDURMEZ. Panel hemen ardindan
+# devralacak; metin kipine donmek ekranda bir an konsol metni gosterir ve
+# "iceri zoomlanarak gecis" etkisini kirar.
+start_splash() {
+    adopt_early_splash
+    [ -n "$SPLASH_PID" ] && return 0
+    [ -x /usr/bin/mcos-splash ] || return 0
+    has_framebuffer || return 0
+    [ -e "$SPLASH_STARTED" ] && return 0
+    animations_enabled || return 0
+
+    : > "$SPLASH_STARTED" 2>/dev/null || true
+    rm -f "$BOOT_READY" "$SPLASH_FRAME" 2>/dev/null || true
+    stage "Sistem baslatiliyor..."
+
+    # --keep verildigi an panel VT'si grafik kipinde kalacak demektir: bundan
+    # sonra o VT'ye yazilan hicbir metin gorunmez.
+    CONSOLE_DIRTY=1
+    # ZAMAN ASIMI 45 -> 180 saniye. Eski deger, donanim hizlandirmasi olmayan
+    # bir sanal makinede (olculdu: panel 42. saniyede aciliyor) dolabiliyordu;
+    # dolunca animasyon cikar, konsolu METIN kipine dondurur ve kullanici
+    # panel gelene kadar bos bir konsola bakar. Normal akista bu sure hicbir
+    # zaman dolmaz: finish_splash animasyonu cok daha once kapatir.
+    /usr/bin/mcos-splash \
+        --fb /dev/fb0 --tty "$PANEL_DEVICE" \
+        --until "$BOOT_READY" --stage "$SPLASH_MSG" --save "$SPLASH_FRAME" \
+        --timeout 180s --keep >/dev/null 2>&1 &
+    SPLASH_PID=$!
+    echo "$SPLASH_PID" > "$SPLASH_PIDFILE" 2>/dev/null || true
+}
+
+# pid_running, verilen surecin GERCEKTEN calisip calismadigini soyler.
+#
+# NEDEN "kill -0" YETMEZ: kill -0 bir ZOMBI icin de basarili doner. Arka plana
+# atilan cocuk, kabuk onu "wait" ile toplayana kadar zombi olarak durur ve bu
+# sirada cikmis olmasina ragmen kill -0'a EVET demeye devam eder.
+#
+# DURUSTLUK NOTU: dash ile olctum, cocugu kendiliginden topluyor; yani bugun
+# busybox ash'te de dongu buyuk ihtimalle erken biter. Ama bu davranis hicbir
+# yerde GARANTI EDILMEMISTIR ve acilis suresini garanti edilmemis bir ayrintiya
+# baglamak istemiyoruz: toplanmadigi bir kabukta finish_splash, splash coktan
+# cikmisken 50 tur daha doner ve acilisi bosuna 5 saniye (busybox'ta kesirli
+# uyku desteklenmiyorsa 50 saniye) geciktirirdi. /proc'tan surec durumunu
+# okumak belirsizligi tamamen kaldirir ve ek bir maliyeti yoktur.
+pid_running() {
+    [ -n "$1" ] || return 1
+    kill -0 "$1" 2>/dev/null || return 1
+    # /proc/PID/stat: "PID (comm) STATE ...". comm parantez icinde ve bosluk
+    # icerebilir, o yuzden son ")" karakterine kadar olan kisim atiliyor.
+    st="$(sed 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1)"
+    [ "$st" = "Z" ] && return 1
+    return 0
+}
+
+# finish_splash, acilis ekranina "hazirim" der ve bitmesini bekler.
+#
+# BEKLEMEK SART: splash ile panel ayni framebuffer'a yazar. Beklemeden paneli
+# baslatmak, iki programin ayni kareye birlikte yazmasina ve titremeye yol
+# acar.
+#
+# Yakalanan gercek hata: fonksiyon yalnizca KENDI baslattigi splash'i
+# (SPLASH_PID) bekliyor, aksi halde hicbir sey yapmadan donuyordu. Panel cokup
+# init betigi tty2::respawn ile yeniden baslattiginda SPLASH_PID bos olur ama
+# ONCEKI turdan kalan mcos-splash --timeout 45s dolana kadar yasar ve panel
+# VT'sini GRAFIK kipinde tutar: kurtarma menusu yine gorunmez bir konsola
+# yazilirdi. Artik "hazirim" bayragi her cagrida yaziliyor ve sahipsiz splash
+# de sinirli sure beklenip kapatiliyor.
+finish_splash() {
+    : > "$BOOT_READY" 2>/dev/null || true
+    # rcS'in erken baslattigi animasyonu da kapatabilmek icin once sahiplen:
+    # SPLASH_PID bossa asagidaki dongu pgrep/pkill yoluna duser ve o yol hem
+    # daha yavas hem de daha kaba.
+    adopt_early_splash
+
+    # Splash en fazla birkac yuz milisaniye icinde cikar (son kareyi yazip
+    # kaydediyor). Yine de sonsuza kadar beklemiyoruz.
+    i=0
+    while [ "$i" -lt 50 ]; do
+        if [ -n "$SPLASH_PID" ]; then
+            pid_running "$SPLASH_PID" || break
+        else
+            # pgrep yoksa komut 127 dondurur ve dongu hemen biter: eksik bir
+            # arac yuzunden acilis BEKLEMEZ.
+            pgrep mcos-splash >/dev/null 2>&1 || break
+        fi
+        sleep 0.1 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+
+    if [ -n "$SPLASH_PID" ]; then
+        # SIGTERM: splash'in kendi sinyal isleyicisi konsolu METIN kipine
+        # dondurup cikar (internal/fbvt installSignalHandler).
+        kill "$SPLASH_PID" 2>/dev/null || true
+        i=0
+        while pid_running "$SPLASH_PID" && [ "$i" -lt 20 ]; do
+            sleep 0.1 2>/dev/null || sleep 1
+            i=$((i + 1))
+        done
+        # Hala duruyorsa SIGTERM yutuluyor demektir. "wait" tek basina
+        # ZAMAN ASIMSIZDIR ve boyle bir surecte acilisi sonsuza kadar
+        # kilitlerdi; once KILL, sonra wait: wait artik aninda doner ve
+        # zombiyi toplar.
+        kill -9 "$SPLASH_PID" 2>/dev/null || true
+        # "wait" YALNIZCA bu kabugun KENDI cocugunu toplayabilir. Animasyonu
+        # rcS baslattiysa (S04splash) surec bizim cocugumuz DEGILDIR ve wait
+        # aninda hata dondurur - sorun degil, kill -9 zaten islemi bitirdi.
+        wait "$SPLASH_PID" 2>/dev/null || true
+        SPLASH_PID=""
+    else
+        pkill mcos-splash >/dev/null 2>&1 || true
+    fi
+    rm -f "$SPLASH_PIDFILE" 2>/dev/null || true
+}
+
+# console_sane, verilen konsolun SATIR DISIPLININI bilinen iyi bir hale getirir.
+#
+# Yakalanan gercek hata: splash ve panel tty'yi ham kipe aliyor (ICANON, ECHO,
+# ICRNL, ISIG, OPOST kapali) ve cikarken "acilista ne bulduysak" onu geri
+# yaziyor - ama --keep ile cikan bir splash'tan sonra buldugu sey ZATEN ham
+# kipti. Kullanici kurtarma menusunde "3" yazip Enter'a basiyordu: rakam
+# ekranda hic gorunmuyordu (ECHO kapali) ve Enter CR olarak geliyordu (ICRNL
+# temiz) - "read" ise LF bekliyor. Sonuc: 2-5 secenekleri, yani diske kurulum
+# ve ESKI/YENI arayuz anahtari, HIC secilemiyordu; menu her turda zaman
+# asimina ugrayip sessizce paneli yeniden aciyordu.
+console_sane() {
+    con_dev="$1"
+    [ -c "$con_dev" ] || return 0
+    # "sane": ICANON + ECHO + ICRNL + ISIG + OPOST hepsini birden geri acar.
+    stty sane <"$con_dev" >"$con_dev" 2>/dev/null || true
+    # Klavyeyi tekrar karakter ureten kipe al. Ham/medium-raw kipte tuslar
+    # scancode olarak gelir ve "read" hicbir zaman bir satir goremez.
+    kbd_mode -u -C "$con_dev" >/dev/null 2>&1 || kbd_mode -u >/dev/null 2>&1 || true
+    # RIS ile renk/imlec/karakter kumesi durumunu sifirla, sonra UTF-8'e don,
+    # imleci geri getir ve ekran koruyucuyu yeniden kapat (RIS onu da sifirlar).
+    printf '\033c\033%%G\033[?25h\033[9;0]' >"$con_dev" 2>/dev/null || true
+}
+
+# restore_console, splash --keep ile ciktiktan sonra konsolu geri almaya calisir.
+#
+# Panel acilamazsa konsol grafik kipinde kalir ve kullanici KARA EKRANLA
+# bas basa kalir. Kurtarma menusu gosterilmeden once bu cagrilmali.
+#
+# Yakalanan gercek hata: "mcos-splash --restore" ETKISIZDI. O komut konsolu
+# aciyor, o ANDAKI kipi "eski kip" diye kaydediyor ve ayni kipi geri yaziyordu;
+# splash --keep ile ciktiginda o an KD_GRAPHICS oldugu icin grafik kipi grafik
+# kipiyle degistiriliyordu, yani hicbir sey degismiyordu.
+#
+# internal/fbvt artik duzeltildi: Restore() anlik goruntuyu tekrarlamiyor,
+# devralma zincirinin BASINDAKI duruma (metin kipi, kullanilabilir klavye kipi,
+# pismis termios) doner - o durum /run/mcos-vt.state dosyasinda tutuluyor. Yani
+# bu cagri ARTIK ise yariyor.
+#
+# Yine de tek dayanak yapilamaz: mcos-splash imajda olmayabilir, VT olmayan bir
+# aygitta Open() basarisiz olur ve kabuktan KDGETMODE okuyup SONUCU DOGRULAMAK
+# mumkun degildir. Bu yuzden satir disiplini burada ayrica ve kosulsuz
+# duzeltiliyor, kipin gercekten metne donmus olmasi ise recovery_console'un
+# VT degistirmesiyle garantileniyor. Uc katmanin ucu de bagimsiz calisir.
+restore_console() {
+    if [ -x /usr/bin/mcos-splash ]; then
+        /usr/bin/mcos-splash --restore --tty "$PANEL_DEVICE" --fb /dev/fb0 \
+            >/dev/null 2>&1 || true
+    fi
+    console_sane "$PANEL_DEVICE"
+}
+
+# recovery_console, kurtarma arayuzu icin GERCEKTEN gorunur bir konsol hazirlar.
+#
+# Yakalanan gercek hata: panel VT'si (tty2) splash --keep ciktiktan sonra
+# KD_GRAPHICS kipinde kaliyordu. Cekirdek o kipteki bir VT'ye hicbir metin
+# CIZMEZ: show_recovery'nin butun teshis satirlari ve 5 secenekli menu bos
+# ekrana yaziliyordu. Kullanici donmus acilis logosuna bakip "sistem bozuldu"
+# diyerek guc dugmesine basiyordu - oysa menu orada, gorunmez halde
+# calisiyordu. Ayni sey panelin NORMAL cikisindan sonra da oluyordu, cunku
+# panel de cikarken buldugu (grafik) kipi geri yaziyor.
+#
+# Kabuktan KDGETMODE okunamaz; yani tty2'nin metin kipine dondugunu
+# DOGRULAYAMAYIZ. O yuzden grafik kipine giren bir program calistiysa
+# (CONSOLE_DIRTY) butun kurtarma arayuzu hic dokunulmamis bir VT'ye tasinir.
+# Orasi kesin olarak metin kipindedir ve satir kipinde acilir.
+recovery_console() {
+    [ -z "$CONSOLE_READY" ] || return 0
+    CONSOLE_READY=1
+
+    restore_console
+
+    [ -n "$CONSOLE_DIRTY" ] || return 0
+    [ -c "$RECOVERY_DEVICE" ] || return 0
+    # Once bir alt kabukta dene: "exec" ile acilamayan bir aygit, etkilesimsiz
+    # kabugun TAMAMINI oldururdu; init betigi yeniden baslatir ve makine
+    # sonsuz bir acilis dongusune girerdi.
+    ( exec <"$RECOVERY_DEVICE" >"$RECOVERY_DEVICE" ) 2>/dev/null || return 0
+
+    exec <"$RECOVERY_DEVICE" >"$RECOVERY_DEVICE" 2>&1
+    ACTIVE_DEVICE="$RECOVERY_DEVICE"
+    chvt "$RECOVERY_VT" >/dev/null 2>&1 || true
+    console_sane "$RECOVERY_DEVICE"
+}
+
+# panel_console, girdi/ciktiyi panel VT'sine geri verir.
+#
+# Kurtarma arayuzu baska bir VT'ye tasinmis olabilir; panel HER ZAMAN kendi
+# VT'sinde acilmali, yoksa kullanici bos bir metin konsoluna bakarken panel
+# gorunmeyen bir ekrana cizer.
+panel_console() {
+    CONSOLE_READY=""
+    [ -c "$PANEL_DEVICE" ] || return 0
+    ACTIVE_DEVICE="$PANEL_DEVICE"
+    # ON PLANA ALMA ONCE ve KOSULSUZ yapilir. Panel ekrani /dev/tty uzerinden,
+    # yani bu surecin KONTROL EDEN terminali olan panel VT'si uzerinden acar;
+    # asagidaki yonlendirme basarisiz olsa bile o VT on planda OLMALI. Aksi
+    # halde panel arka plandaki bir VT'ye cizer: kullanici kurtarma ekranina
+    # bakar, bastigi tuslar panele hic ulasmaz ve betik panel cikana kadar -
+    # yani sonsuza kadar - bekler.
+    chvt "$PANEL_VT" >/dev/null 2>&1 || true
+    ( exec <"$PANEL_DEVICE" >"$PANEL_DEVICE" ) 2>/dev/null || return 0
+    exec <"$PANEL_DEVICE" >"$PANEL_DEVICE" 2>&1
+}
+
 start_daemon() {
     if ! pgrep mcosd >/dev/null 2>&1; then
         echo ">> MCOS daemon baslatiliyor..."
@@ -60,12 +395,26 @@ wait_daemon() {
         i=$((i + 1))
     done
     if [ ! -S "$SOCK_PATH" ]; then
+        # Yakalanan gercek hata: burada once acilis ekrani hala calisiyordu
+        # (konsol grafik kipinde, yani asagidaki satirlarin HICBIRI gorunmez)
+        # ve ardindan ZAMAN ASIMISIZ bir "read _" geliyordu. Basinda kimse
+        # olmayan bir makinede - mcosd bozuk bir config.json yuzunden coktuyse
+        # ya da /data doluysa - betik burada SONSUZA KADAR bekliyordu: panel
+        # hic acilmiyor, kurtarma menusune hic ulasilmiyor, init de sureci
+        # canli gordugu icin yeniden baslatamiyordu. Kullanici sadece donmus
+        # bir logo goruyordu. Simdi: once gorunur bir konsola gec, sonra
+        # SINIRLI bekle ve ne olursa olsun devam et - panel baglanamayinca
+        # kurtarma menusu gelir.
+        finish_splash
+        recovery_console
         echo "Hata: mcosd soketi hazirlanamadi: $SOCK_PATH"
         echo "Son daemon loglari:"
         tail -n 20 "$LOG" 2>/dev/null || true
         echo ""
-        echo "Devam etmek icin Enter'a basin..."
-        read _
+        echo "Devam etmek icin Enter'a basin (30 sn sonra kendiliginden devam eder)..."
+        # "read" zaman asimini desteklemiyorsa ya da girdi kapaliysa hemen
+        # doner; her iki durumda da AKIS DEVAM ETMELI.
+        read -t 30 _ 2>/dev/null || true
     fi
 }
 
@@ -117,10 +466,19 @@ has_framebuffer() {
 }
 
 run_panel_fbterm() {
+    # Acilis ekranini bitir: fbterm de ayni framebuffer'a yazar ve ikisi
+    # birlikte yazarsa ekran titrer. Eski panelde gecis animasyonu yok,
+    # bu yuzden kaydedilen kare kullanilmaz.
+    finish_splash
+    restore_console
+
     # fbterm is not xterm-compatible for 256-colour SGR commands. Its own
     # terminfo entry and the panel's ANSI palette are deliberately used here.
     FONT_SIZE=$(detect_font_size)
     export TERM=fbterm
+    # fbterm de konsolu grafik kipine alir: cikisindan sonra o VT'nin metin
+    # kipine dondugune guvenilemez.
+    CONSOLE_DIRTY=1
     /usr/bin/fbterm --font-names="$MCOS_FONT_NAMES" -s "$FONT_SIZE" -- sh -c \
         "export TERM=fbterm LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 HOME=/root; exec /usr/bin/mcos-panel --connect '$SOCK'"
 }
@@ -136,8 +494,16 @@ run_panel_fbterm() {
 # sinyal isleyicisi geri verir, bu yuzden burada ek bir kurtarma gerekmiyor.
 run_panel_fb() {
     [ -x /usr/bin/mcos-panel-fb ] || return 127
+    # Acilis ekranini bitir ve son karesini al. Panel o kareden
+    # yakinlasarak acilir (--intro).
+    finish_splash
+    # Panel konsolu grafik kipine alir ve cikarken ACILISTA BULDUGU kipi geri
+    # yazar - splash --keep'ten sonra o kip zaten grafikti. Yani panel normal
+    # ciktiginda bile VT grafik kipinde kalabilir; menuyu oraya cizemeyiz.
+    CONSOLE_DIRTY=1
     LANG=tr_TR.UTF-8 LC_ALL=tr_TR.UTF-8 HOME=/root \
-        /usr/bin/mcos-panel-fb --connect "$SOCK" --fb /dev/fb0 --tty /dev/tty
+        /usr/bin/mcos-panel-fb --connect "$SOCK" --fb /dev/fb0 --tty /dev/tty \
+            --intro "$SPLASH_FRAME"
 }
 
 # panel_mode, hangi panelin calisacagini soyler.
@@ -159,6 +525,10 @@ panel_mode() {
 
 show_recovery() {
     reason="$1"
+    # Panel acilamadi: konsol grafik kipinde kalmis olabilir. Once GORUNUR bir
+    # konsola gec, yoksa asagidaki metinlerin hicbiri ekrana ulasmaz.
+    finish_splash
+    recovery_console
     printf '\033[2J\033[H'
     echo "MCOS paneli guvenli bekleme modunda."
     echo "Neden: $reason"
@@ -171,15 +541,32 @@ show_recovery() {
     echo ""
 }
 
+# Yakalanan gercek hata: CONSOLE_DIRTY her calismada bos basliyordu. Betik
+# init tarafindan yeniden baslatildiginda (tty2::respawn) panel VT'sini bu
+# acilista grafik kipine alan program BIZDEN ONCEKI turda calismistir; bayrak
+# bos oldugu icin kurtarma arayuzu gorunur bir VT'ye TASINMIYOR ve menu yine
+# kara ekrana yaziliyordu. Iki ipucu da /run altinda, yani bu acilisa aittir:
+# splash bayragi ve fbvt devralma zincirinin acik olmasi.
+[ -e "$SPLASH_STARTED" ] && CONSOLE_DIRTY=1
+[ -e "$VT_STATE" ] && CONSOLE_DIRTY=1
+
 prepare_console
+start_splash
+stage "MCOS servisi baslatiliyor..."
 start_daemon
 wait_daemon
+stage "Ag aygitlari hazirlaniyor..."
 prepare_network_radios
+stage "Yazi tipleri hazirlaniyor..."
 prepare_fonts
+stage "Panel aciliyor..."
 
 while true; do
+    # Onceki tur kurtarma menusunu baska bir VT'ye tasimis olabilir; panel
+    # kendi VT'sinde acilmali.
+    panel_console
     printf '\033[2J\033[H'
-    echo "MCOS TUI hazirlaniyor..."
+    echo "MCOS hazirlaniyor..."
     echo "Klavye ile kullanin: ok tuslari, Enter, Esc, Tab."
     echo ""
 
@@ -235,6 +622,12 @@ while true; do
         show_recovery "$panel_failed"
     fi
 
+    # Menu, panel NORMAL kapandiginda da gosteriliyor. Panel cikarken konsolu
+    # grafik kipinde birakmis olabilecegi icin menu de gorunur bir konsola
+    # tasinmali - yoksa kullanici kara ekrana bakip klavyeye basar ve hicbir
+    # sey olmadigini sanir. show_recovery cagrildiysa bu zaten yapildi;
+    # recovery_console tur basina bir kez calisir.
+    recovery_console
     echo ""
     if [ -n "$panel_failed" ]; then
         echo "MCOS paneli bozuk sembollerle acilmadi; sorun giderildiğinde yeniden deneyin."
@@ -246,19 +639,57 @@ while true; do
     echo "  [3] USB'yi kalici yap / kurulum (mcos-persist)"
     echo "  [4] Kabuk (gelismis kullanim)"
     if [ "$(panel_mode)" = "legacy" ]; then
-        echo "  [5] YENI arayuze geri don"
+        echo "  [5] YENI arayuze geri don (onerilen)"
     else
-        echo "  [5] ESKI arayuze gec"
+        echo "  [5] ESKI arayuze gec (yalnizca sorun giderme)"
     fi
-    printf "Secim [1] (5 sn): "
-    read -t 5 choice 2>/dev/null || choice=1
+    printf "Secim [1] (%s sn): " "$MENU_TIMEOUT"
+    # Yakalanan gercek hata: tty ham kipte kaldigi icin Enter hic ulasmiyor,
+    # "read" her seferinde zaman asimina ugruyor ve secim sessizce 1 oluyordu
+    # (bkz. console_sane). Girdi tamamen kapaliysa "read" ANINDA doner; o
+    # durumda beklemeden dongunun basina donmek islemciyi bosuna %100'de
+    # tutardi, bu yuzden kisa bir soluk aliyoruz.
+    if read -t "$MENU_TIMEOUT" choice 2>/dev/null; then
+        :
+    else
+        choice=1
+        sleep 1
+    fi
     [ -z "$choice" ] && choice=1
     case "$choice" in
         2) prepare_fonts ;;
-        3) mcos-persist || echo "kalicilik basarisiz"; sleep 2 ;;
+        3)
+            mcos-persist || echo "kalicilik basarisiz"
+            # Kurulum araci tam ekran cizip tty'yi ham kipte birakmis
+            # olabilir; menu yeniden yazilmadan once satir disiplini geri
+            # alinmazsa bir sonraki tur yine hicbir tusu goremezdi.
+            console_sane "$ACTIVE_DEVICE"
+            sleep 2
+            ;;
         4)
             echo "Panele donmek icin kabuktan cikin (exit)."
-            exec /bin/sh
+            # Yakalanan gercek hata: burada "exec /bin/sh" vardi. "exec" bu
+            # betigin YERINE geciyor; kabuktan cikildiginda surec oluyor ve
+            # kurtarma menusu - yani diske kurulum ve ESKI/YENI arayuz
+            # anahtari - kayboluyordu. /bin/sh hic yoksa "exec" ayni anda tek
+            # kurtarma yolunu da olduruyordu. Alt surec olarak calistirinca
+            # kabuktan cikan kullanici menuye geri doner.
+            #
+            # "setsid -c" ile kabugu bu VT'nin kontrol eden terminali
+            # yapmak CAZIP ama TEHLIKELI: setsid TIOCSCTTY'yi ZORLAYARAK
+            # cagirir ve girdi bizim kontrol eden terminalimizse - kurtarma
+            # arayuzu baska bir VT'ye tasinmadiginda oyle olur - tty'yi
+            # BIZDEN CALAR. O andan sonra /dev/tty cozulemez ve panel bir
+            # daha hic acilmaz ("mcos-panel-fb --tty /dev/tty"). Ayrica
+            # "setsid ... || /bin/sh" yazilamaz: kullanicinin kabugu sifir
+            # disi bir kodla ciktiginda - basarisiz son komut yeter - ikinci
+            # bir kabuk acilirdi. Bedeli: kurtarma VT'sinin on plan surec
+            # grubu olmadigi icin Ctrl+C burada olu kalir; cikis "exit" ile.
+            /bin/sh || true
+            # Kullanici kabukta konsolu bozmus olabilir (tam ekran bir program,
+            # yarida kesilen bir editor). Menu yeniden cizilmeden once satir
+            # disiplini geri alinir.
+            console_sane "$ACTIVE_DEVICE"
             ;;
         5)
             # Arayuz secimini kalici olarak degistir. Yeni arayuzde bir sorun

@@ -1,0 +1,95 @@
+plugins {
+    // Duz Java eklentisi: Fabric Loom gibi ozel bir eklenti gerekmiyor.
+    // Paper API yalnizca DERLEME zamani bagimliligidir.
+    id 'java'
+}
+
+group = project.maven_group
+version = project.plugin_version
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    mavenCentral()
+    // Paper API yalnizca burada yayinlanir.
+    maven {
+        name = 'papermc'
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
+}
+
+dependencies {
+    // compileOnly: Paper API sunucunun KENDISINDE zaten var. Jar'a gomseydik
+    // hem jar megabaytlarca buyurdu hem de sunucudaki surumle catisabilirdi.
+    compileOnly "io.papermc.paper:paper-api:${project.paper_api_version}"
+
+    // Gson: LinkProtocol, Topology, Coordinator ve HandoffService
+    // com.google.gson.JsonObject kullanir. paper-api onu TRANSITIF olarak
+    // getirmeyebilir, bu yuzden acikca isteniyor.
+    //
+    // Yine compileOnly, cunku Gson sunucunun kendi sinif yolunda ZATEN
+    // vardir (Minecraft onu kullanir). GOLGELENMEZ (shadow/relocate):
+    // tel bicimi, JsonObject#toString() ciktisina baglidir ve o ciktinin
+    // ASCII disi harfleri \u ile KACIRMAMASI protokolun bir parcasidir.
+    // Yeniden paketlenmis bir Gson, ayni sinifin iki kopyasini ve sessiz
+    // davranis farklarini getirirdi.
+    compileOnly "com.google.code.gson:gson:${project.gson_version}"
+
+    // SLF4J: Log sinifi org.slf4j.Logger/LoggerFactory kullanir.
+    //
+    // paper-api bunu GECISLI olarak da getirir (Plugin#getSLF4JLogger()
+    // org.slf4j.Logger dondurur, yani API'nin kendi imzasinda gorunur), ama
+    // Gson'u "getirmeyebilir" diye acikca isteyip bunu gecisliligin insafina
+    // birakmak tutarsizdi: ayni gerekce iki dosyada iki farkli sonuc
+    // veremez. Grafik bir gun budanirsa hata "package org.slf4j does not
+    // exist" olurdu ve sebebi burada gorunmezdi.
+    //
+    // Yine compileOnly: gercek uygulamayi sunucu saglar (Paper konsolu zaten
+    // SLF4J uzerinden akar). Surum numarasi pratikte onemsizdir; yalnizca
+    // Logger#info/warn/error kullaniliyor ve bu ucu her 1.7/2.0 surumunde
+    // aynidir.
+    compileOnly "org.slf4j:slf4j-api:${project.slf4j_version}"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // Minecraft 1.21.11 Java 21 ister (Mojang manifesti
+    // javaVersion.majorVersion=21 diyor; bkz. offline-manifest.txt). Fabric
+    // esi de ayni degeri kullanir. Java 25'e YALNIZCA Paper'in takvim
+    // surumlerine (26.x) gecilirse ihtiyac olur ve o gecis, surumu
+    // cevrimdisi paketten kopardigi icin bilerek yapilmiyor.
+    it.options.release = 21
+    it.options.encoding = 'UTF-8'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+}
+
+processResources {
+    inputs.property 'version', project.version
+
+    filesMatching('plugin.yml') {
+        // Surum numarasi TEK YERDE (gradle.properties) dursun.
+        expand 'version': project.version
+    }
+}
+
+// ── MCOS'a teslim ───────────────────────────────────────────────────────────
+//
+// Daemon eklentiyi SABIT bir adla arar (mcos-link-paper.jar); surum numarasi
+// iceren bir dosya adi, her yukseltmede daemon'un arama yolunu guncellemeyi
+// gerektirirdi. Bkz. internal/daemon/handlers_link.go linkArtifact().
+tasks.register('deployToMcos', Copy) {
+    dependsOn tasks.jar
+    from tasks.jar.archiveFile
+    into rootProject.file('../../dist/mods')
+    rename { 'mcos-link-paper.jar' }
+    doLast {
+        println 'mcos-link-paper.jar -> dist/mods/'
+    }
+}
+
+tasks.named('build') { finalizedBy 'deployToMcos' }

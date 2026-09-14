@@ -124,6 +124,15 @@ func (s *Server) serveConn(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// Dispatch decodes one JSON-RPC request line and runs its handler.
+//
+// DISA ACIK: uzaktan kontrol koprusu (internal/remote) ayni yontem tablosunu
+// HTTP uzerinden sunar. Ayri bir dagitici yazmak, iki yolun zamanla
+// ayrismasina ve yalnizca birinde var olan yontemlere yol acardi.
+func (s *Server) Dispatch(ctx context.Context, line []byte) Response {
+	return s.dispatch(ctx, line)
+}
+
 func (s *Server) dispatch(ctx context.Context, line []byte) Response {
 	var req Request
 	if err := json.Unmarshal(line, &req); err != nil {

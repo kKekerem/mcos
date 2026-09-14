@@ -1,0 +1,9 @@
+pluginManagement {
+    repositories {
+        // Fabric Loom yalnızca burada yayınlanır; mavenCentral onu bulamaz.
+        maven { url = 'https://maven.fabricmc.net/' }
+        gradlePluginPortal()
+    }
+}
+
+rootProject.name = 'mcos-link'

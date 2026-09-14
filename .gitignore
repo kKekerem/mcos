@@ -7,6 +7,18 @@
 # Dev runtime state (mcosd --data-root ./run)
 /run/
 
+# Ad-hoc "go build ./cmd/..." ciktilari.
+#
+# "make build" bunlari bin/ altina yazar, ama elle derlerken kok dizine
+# duserler ve 16 MB'lik ikililer sessizce commit'e girer.
+/mcosd
+/mcosctl
+/mcos-detect
+/mcos-panel
+/mcos-panel-fb
+/mcos-splash
+/mcos-flash
+
 # Go
 /vendor/
 
@@ -22,3 +34,8 @@
 .DS_Store
 *.swp
 *~
+
+# Gradle / Java build outputs
+.gradle/
+build/
+

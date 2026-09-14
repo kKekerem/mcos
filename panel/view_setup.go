@@ -23,17 +23,32 @@ import (
 // setupStep enumerates the first-boot (OOBE) wizard phases.
 type setupStep int
 
+// Adım sırası. KURULUM EN SONDA — sebebi kritik:
+//
+// Eskiden stepInstall 5. sıradaydı ve başarılı kurulum sistemi hemen yeniden
+// başlatıyordu. Bunun iki yıkıcı sonucu vardı:
+//
+//  1. 6-10. adımlar (tema, bütçe, eşleştirme, ilk sunucu, onay) HİÇ
+//     ÇALIŞMIYORDU. İlerleme çubuğu "adım 5/10" derken sihirbaz aslında
+//     orada bitiyordu.
+//  2. Ayarları kaydeden tek yer olan doSetupSave() stepConfirm'de olduğu için
+//     HİÇBİR AYAR KAYDEDİLMİYORDU. Kullanıcı Wi-Fi parolasını, temasını,
+//     düğüm adını giriyor, kurulum sonrası hepsi kayboluyordu — ve sihirbaz
+//     yeniden baştan başlıyordu.
+//
+// Doğru sıra: ÖNCE HER ŞEYİ TOPLA VE KAYDET, SONRA KUR. Böylece
+// mcos-install kalıcı bölüme gerçek bir config.json kopyalayabilir.
 const (
 	stepIntro setupStep = iota
 	stepSystem
 	stepIdentity // PC name + Wi-Fi
 	stepJava
-	stepInstall
 	stepTheme // theme + timezone
 	stepBudget
 	stepCluster // PC pairing
 	stepFirstServer
 	stepConfirm
+	stepInstall // EN SON: ayarlar kaydedildikten sonra
 	stepCount
 )
 
@@ -89,7 +104,10 @@ type setupModel struct {
 	// First server (optional)
 	startServer bool
 
-	errMsg         string
+	errMsg string
+	// saving, doSetupSave'in sürdüğünü bildirir: arka arkaya Enter basılınca
+	// aynı yapılandırmayı iki kez kaydetmeyi engeller.
+	saving         bool
 	cancelled      bool
 	loading        bool
 	installSuccess bool
@@ -190,11 +208,16 @@ func (s *setupModel) update(m tea.KeyMsg, cl *Client) (bool, tea.Cmd) {
 			return false, doFetchDisks(cl)
 		}
 	case "left", "h":
-		s.adjust(-1)
-		return false, nil
+		// Metin alanı odaklıysa bu tuşlar METİNDİR, kısayol değil.
+		if s.activeTextInput() == nil {
+			s.adjust(-1)
+			return false, nil
+		}
 	case "right", "l", " ":
-		s.adjust(1)
-		return false, nil
+		if s.activeTextInput() == nil {
+			s.adjust(1)
+			return false, nil
+		}
 	}
 
 	// Text input handling.
@@ -405,16 +428,24 @@ func (s *setupModel) advance(cl *Client) (bool, tea.Cmd) {
 		// stepIdentity is handled by proceedFromIdentity
 		return false, nil
 	case stepJava:
-		s.goTo(stepInstall)
-		s.disksLoading = true
-		return false, doFetchDisks(cl)
+		s.goTo(stepTheme)
 	case stepInstall:
+		// KURULUM BAŞARILI ekranındayken Enter YENİDEN KURMAZ.
+		//
+		// Eski davranış yıkıcıydı: ekran "USB'yi ŞİMDİ çıkarın" diyor,
+		// kullanıcı talimata uyup Enter'a basıyor ve kurulum BAŞTAN
+		// çalışıyordu — yeni kurulmuş diski tekrar bölümleyip biçimlendirerek.
+		if s.installSuccess {
+			s.rebootCounter = 0
+			return s.handleRebootTick()
+		}
 		if s.cursor < len(s.disks) {
 			disk := s.disks[s.cursor]
 			s.loading = true
 			return false, doInstallOS(cl, disk.Device, s.dlJava, s.dlPlugins)
 		}
-		s.goTo(stepTheme)
+		// "Atla": diske kurulmadan sihirbazı bitir.
+		return true, nil
 	case stepTheme:
 		s.goTo(stepBudget)
 	case stepBudget:
@@ -428,15 +459,26 @@ func (s *setupModel) advance(cl *Client) (bool, tea.Cmd) {
 	case stepFirstServer:
 		s.goTo(stepConfirm)
 	case stepConfirm:
-		return true, doSetupSave(cl, s.buildConfig(), s.effectiveSSID(), s.pass.Value())
+		// ÖNCE KAYDET. Kurulum bundan sonra gelir, böylece mcos-install
+		// kalıcı bölüme GERÇEK bir config.json kopyalayabilir.
+		if s.saving {
+			return false, nil // çift Enter'ı yut: iki kez kaydetme
+		}
+		s.saving = true
+		return false, doSetupSave(cl, s.buildConfig(), s.effectiveSSID(), s.pass.Value())
 	}
 	return false, nil
 }
 
 func (s *setupModel) back() (bool, tea.Cmd) {
-	if s.step > stepInstall {
+	// Kurulum başladıktan sonra geri dönülemez: disk zaten değişti.
+	if s.step == stepInstall && (s.loading || s.installSuccess) {
+		return false, nil
+	}
+	if s.step > stepIntro {
 		s.step--
 		s.cursor = 0
+		s.errMsg = ""
 		s.syncFocus()
 	}
 	return false, nil
@@ -493,6 +535,7 @@ func (s *setupModel) effectiveSSID() string { return strings.TrimSpace(s.ssid.Va
 func (s *setupModel) buildConfig() *model.Config {
 	cfg := model.DefaultConfig()
 	cfg.SetupComplete = true
+	cfg.Hostname = strings.TrimSpace(s.pcName.Value())
 	cfg.Cluster.NodeName = strings.TrimSpace(s.nodeName.Value())
 	cfg.Cluster.Enabled = s.clusterOn
 	cfg.WiFiSSID = s.effectiveSSID()
@@ -525,6 +568,7 @@ func (s *setupModel) handleInstallDone(m installDoneMsg) (bool, tea.Cmd) {
 		return false, nil
 	}
 	s.installSuccess = true
+	s.cursor = 0 // imleç artık disk listesinde değil
 	s.rebootCounter = 10
 	return false, doRebootTick()
 }
@@ -871,11 +915,29 @@ func (s *setupModel) viewIdentity() string {
 	if len(s.networks) == 0 {
 		lines = append(lines, th.Muted.Render("    "+theme.IconWait+" Kablosuz ağ taranıyor / bulunamadı — kablolu ağ için 'Kablolu / Atla'"))
 	} else {
-		for i, n := range s.networks {
-			if i >= 8 {
-				break
+		// Liste kaydirilir, KIRPILMAZ.
+		//
+		// Eskiden ilk 8 ag ciziliyor ama imlec daha asagi inebiliyordu:
+		// kullanici 9. agi sectiginde ekranda hicbir sey degismiyor, neyi
+		// sectigini goremiyordu. Artik pencere imleci takip eder.
+		const maxRows = 8
+		start := 0
+		if len(s.networks) > maxRows {
+			start = s.cursor - 1 - maxRows/2
+			if start < 0 {
+				start = 0
 			}
-			lines = append(lines, s.networkRow(n, s.cursor == i+1))
+			if start+maxRows > len(s.networks) {
+				start = len(s.networks) - maxRows
+			}
+		}
+		for i := start; i < len(s.networks) && i < start+maxRows; i++ {
+			lines = append(lines, s.networkRow(s.networks[i], s.cursor == i+1))
+		}
+		if len(s.networks) > maxRows {
+			lines = append(lines, th.Muted.Render(fmt.Sprintf(
+				"    %d / %d ag (yukari/asagi ile kaydirin)",
+				s.cursor, len(s.networks))))
 		}
 	}
 	lines = append(lines, s.field(theme.IconNetwork+" Kablolu / Atla", "", s.isWiredRow(s.cursor)))

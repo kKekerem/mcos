@@ -22,14 +22,19 @@ import (
 	"mcos/internal/model"
 	"mcos/internal/players"
 	"mcos/internal/server"
+	"mcos/internal/sshd"
 	"mcos/internal/store"
 	"mcos/internal/supervisor"
 	"mcos/internal/tunnel"
+	"mcos/internal/version"
 	"mcos/internal/worlds"
 )
 
 // Version is the MCOS release string surfaced in status/ping.
-const Version = "0.1.0"
+//
+// Tek kaynak internal/version; burada yeniden yazmak, daemon ile panelin
+// farkli surum bildirmesine yol aciyordu.
+const Version = version.Version
 
 // Daemon is the central coordinator.
 type Daemon struct {
@@ -47,9 +52,29 @@ type Daemon struct {
 	tunnelMgr *tunnel.Manager
 	catalog   *catalog.Client
 
+	// playitSt, tünel ajanının durumudur. TEMBEL kurulur: playit isteğe
+	// bağlıdır ve imajda hiç bulunmayabilir (bkz. handlers_playit.go).
+	playitSt *playitState
+
+	// remoteSt, telefon uygulamasinin bagli oldugu HTTPS koprusu.
+	remoteSt remoteState
+	// ssh, kabuk erisimi (dropbear).
+	ssh *sshd.Manager
+	// rpc, kendi yontem tablomuz. Uzaktan kontrol koprusu AYNI tabloyu
+	// kullanir; ayri bir tablo tutmak, iki yolun zamanla ayrismasi demekti.
+	rpc *ipc.Server
+
 	mu        sync.RWMutex
 	cfg       *model.Config
 	startedAt time.Time
+}
+
+// newLinkCoordinator wires the shared-world coordinator to this daemon.
+//
+// Ayrı bir yardımcı çünkü cluster paketi daemon'u ithal EDEMEZ (döngü
+// olurdu); bağlantı burada, LinkHost arayüzü üzerinden kuruluyor.
+func newLinkCoordinator(d *Daemon) *cluster.LinkCoordinator {
+	return cluster.NewLinkCoordinator(d.cluster, d)
 }
 
 // New constructs a daemon: loads config, opens the store, prepares logging,
@@ -83,6 +108,9 @@ func New(cfgPath, dataRoot string, lg *log.Logger) (*Daemon, error) {
 		cfg:       cfg,
 		startedAt: time.Now(),
 	}
+	// SSH yoneticisi: sunucu anahtarlari KALICI veri klasorunde durur,
+	// yoksa her acilista degisir ve istemci 'anahtar degisti' diye reddeder.
+	d.ssh = sshd.New(dataRoot, lg)
 	// Cluster needs an Executor that runs real work via the daemon's
 	// subsystems, so it is wired after d exists.
 	d.cluster = cluster.NewManager(cfg.Cluster, Version, st, lg, taskExecutor{d})
@@ -110,6 +138,20 @@ func (d *Daemon) Log() *log.Logger { return d.log }
 
 // Register installs all RPC handlers onto the IPC server.
 func (d *Daemon) Register(s *ipc.Server) {
+	// Uzaktan kontrol koprusu bu tabloyu yeniden kullanir.
+	d.rpc = s
+
+	s.Handle(ipc.MethodRemoteStatus, d.handleRemoteStatus)
+	s.Handle(ipc.MethodRemoteEnable, d.handleRemoteEnable)
+	s.Handle(ipc.MethodRemoteDisable, d.handleRemoteDisable)
+	s.Handle(ipc.MethodRemoteRotate, d.handleRemoteRotate)
+
+	s.Handle(ipc.MethodSSHStatus, d.handleSSHStatus)
+	s.Handle(ipc.MethodSSHEnable, d.handleSSHEnable)
+	s.Handle(ipc.MethodSSHDisable, d.handleSSHDisable)
+	s.Handle(ipc.MethodSSHPassword, d.handleSSHPassword)
+	s.Handle(ipc.MethodSSHAddKey, d.handleSSHAddKey)
+
 	s.Handle(ipc.MethodPing, d.handlePing)
 	s.Handle(ipc.MethodSystemStatus, d.handleSystemStatus)
 	s.Handle(ipc.MethodSystemPower, d.handleSystemPower)
@@ -164,6 +206,21 @@ func (d *Daemon) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodClusterPeers, d.handleClusterPeers)
 	s.Handle(ipc.MethodClusterPair, d.handleClusterPair)
 	s.Handle(ipc.MethodClusterTasks, d.handleClusterTasks)
+	s.Handle(ipc.MethodClusterScan, d.handleClusterScan)
+	s.Handle(ipc.MethodClusterPairManual, d.handleClusterPairManual)
+	s.Handle(ipc.MethodClusterSecret, d.handleClusterSecret)
+
+	s.Handle(ipc.MethodLinkStatus, d.handleLinkStatus)
+	s.Handle(ipc.MethodLinkEnable, d.handleLinkEnable)
+	s.Handle(ipc.MethodLinkDisable, d.handleLinkDisable)
+	s.Handle(ipc.MethodLinkEvents, d.handleLinkEvents)
+
+	s.Handle(ipc.MethodPlayitStatus, d.handlePlayitStatus)
+	s.Handle(ipc.MethodPlayitClaim, d.handlePlayitClaim)
+	s.Handle(ipc.MethodPlayitPoll, d.handlePlayitPoll)
+	s.Handle(ipc.MethodPlayitStart, d.handlePlayitStart)
+	s.Handle(ipc.MethodPlayitStop, d.handlePlayitStop)
+	s.Handle(ipc.MethodPlayitInstall, d.handlePlayitInstall)
 
 	s.Handle(ipc.MethodServerVersions, d.handleServerVersions)
 	s.Handle(ipc.MethodNetWiFiScan, d.handleNetWiFiScan)
@@ -183,11 +240,32 @@ func (d *Daemon) Run(ctx context.Context) {
 	d.applyNetworkFromConfig()
 	go d.timeSyncLoop(ctx)
 	d.applyClusterFromConfig()
+	d.startLinkCoordinator()
+
+	// Uzaktan kontrol ve SSH, yeniden baslatmayi ATLATMALI: kullanici
+	// telefondan acip makineyi yeniden baslatinca erisimini kaybederse,
+	// makinenin basina gitmek zorunda kalir -- ki uzaktan erisimin varlik
+	// sebebi tam olarak bunu onlemekti.
+	if err := d.startRemote(); err != nil {
+		d.log.Warnf("remote: acilista baslatilamadi: %v", err)
+	}
+	if sc := d.Config().SSH; sc.Enabled {
+		if err := d.ssh.Apply(sc); err != nil {
+			d.log.Warnf("sshd: acilista baslatilamadi: %v", err)
+		}
+	}
+
 	d.autostart(ctx)
 	go d.backupScheduler(ctx)
 	go d.clusterWorkLoop(ctx)
 	<-ctx.Done()
 	d.log.Infof("daemon: shutting down, stopping all servers")
+	if c := d.cluster.LinkCoord(); c != nil {
+		c.Stop()
+	}
+	d.stopRemote()
+	d.ssh.Stop()
+	d.playitStop()
 	d.cluster.Stop()
 	d.sup.StopAll()
 }

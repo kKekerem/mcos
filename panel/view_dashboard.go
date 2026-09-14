@@ -86,7 +86,7 @@ func (a *App) renderDashboard(w, h int) string {
 	svcBody := strings.Join([]string{
 		kv(th, "Sunucular", fmt.Sprintf("%d çalışıyor / %d toplam", st.ServersUp, st.ServersTotal)),
 		kv(th, "Java", javaList(st.JavaVersions)),
-		kv(th, "Tünel (Serveo)", st.WAN),
+		kv(th, "Tünel (playit)", st.WAN),
 		kv(th, "Turbo", turbo),
 		kv(th, "Eşleşmiş PC", itoa(st.PeersOnline)),
 		kv(th, "Aktif görev", itoa(st.ActiveTasks)),

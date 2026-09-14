@@ -91,17 +91,71 @@ func R(x, y, w, h float64) Rect { return Rect{X: x, Y: y, W: w, H: h} }
 //
 // Kapsama maskesi olarak çizilir (draw.Over): kenar pikselleri kısmi alfa ile
 // harmanlanır, yani basamak yerine yumuşak kenar oluşur.
-func (p *Painter) path(build func(r *vector.Rasterizer), c color.RGBA) {
+//
+// ════════════════════════════════════════════════════════════════════════════
+// NEDEN SINIR KUTUSU PARAMETRESİ VAR
+// ════════════════════════════════════════════════════════════════════════════
+//
+// ── Yakalanan gerçek hata ───────────────────────────────────────────────────
+// Burası eskiden HER ŞEKİL için rasterleştiriciyi TUVALİN TAMAMI kadar
+// kuruyordu: Reset(1920, 1080) iki milyon float32'yi (8 MB) sıfırlar ve
+// Draw tuvalin her pikselini gezer.
+//
+// Yani 12 piksellik bir ok işareti de, tam ekran bir dikdörtgen de AYNI
+// maliyeti ödüyordu. Bir panel karesinde onlarca şekil var; açılış
+// ekranındaki ilerleme halkası tek başına saniyenin üçte birini yiyordu.
+//
+// Artık her şekil kendi sınır kutusunu bildiriyor ve rasterleştirici
+// yalnızca o kadar. Küçük şekiller yüzlerce kat ucuzladı.
+//
+// box: şeklin TUVAL UZAYINDAKİ sınırları. build'e verilen (ox, oy), kırpma
+// dikdörtgeninin köşesidir; yol noktaları ondan çıkarılarak yazılır, çünkü
+// rasterleştirici her zaman (0,0) tabanlıdır.
+func (p *Painter) path(box Rect, build func(r *vector.Rasterizer, ox, oy float32),
+	c color.RGBA) {
+
 	b := p.dst.Bounds()
-	w, h := b.Dx(), b.Dy()
-	if w <= 0 || h <= 0 {
+	if b.Dx() <= 0 || b.Dy() <= 0 {
 		return
 	}
 
-	p.ras.Reset(w, h)
+	// Kutuyu bir piksel genişlet: kenar yumuşatma şeklin matematiksel
+	// sınırının bir miktar DIŞINA taşar ve kırpılırsa kenar tıraşlanır.
+	clip := image.Rect(
+		int(math.Floor(box.X))-1,
+		int(math.Floor(box.Y))-1,
+		int(math.Ceil(box.X+box.W))+1,
+		int(math.Ceil(box.Y+box.H))+1,
+	).Intersect(b)
+	if clip.Empty() {
+		return
+	}
+
+	p.ras.Reset(clip.Dx(), clip.Dy())
 	p.ras.DrawOp = draw.Over
-	build(p.ras)
-	p.ras.Draw(p.dst, b, &image.Uniform{C: c}, image.Point{})
+	build(p.ras, float32(clip.Min.X), float32(clip.Min.Y))
+	p.ras.Draw(p.dst, clip, &image.Uniform{C: c}, image.Point{})
+}
+
+// boundsOf returns the bounding box of a point set.
+func boundsOf(pts []Pt) Rect {
+	minX, minY := pts[0].X, pts[0].Y
+	maxX, maxY := minX, minY
+	for _, q := range pts[1:] {
+		if q.X < minX {
+			minX = q.X
+		}
+		if q.X > maxX {
+			maxX = q.X
+		}
+		if q.Y < minY {
+			minY = q.Y
+		}
+		if q.Y > maxY {
+			maxY = q.Y
+		}
+	}
+	return Rect{X: minX, Y: minY, W: maxX - minX, H: maxY - minY}
 }
 
 // ── Yuvarlak dikdörtgen ─────────────────────────────────────────────────────
@@ -111,7 +165,8 @@ func (p *Painter) path(build func(r *vector.Rasterizer), c color.RGBA) {
 // dir=+1 saat yönü, dir=-1 saat yönünün tersi. Ters yön, halka (çerçeve)
 // çizerken iç konturu oymak için kullanılır: vector.Rasterizer sıfır-olmayan
 // sarım kuralı uygular, bu yüzden ters yönlü iç kontur deliği açar.
-func roundRectPath(ras *vector.Rasterizer, rc Rect, rad float64, dir int) {
+func roundRectPath(ras *vector.Rasterizer, rc Rect, rad float64, dir int,
+	ox, oy float32) {
 	// Yarıçap kenarın yarısını aşamaz, yoksa köşeler birbirine girer.
 	maxR := math.Min(rc.W, rc.H) / 2
 	if rad > maxR {
@@ -121,8 +176,9 @@ func roundRectPath(ras *vector.Rasterizer, rc Rect, rad float64, dir int) {
 		rad = 0
 	}
 
-	x0, y0 := float32(rc.X), float32(rc.Y)
-	x1, y1 := float32(rc.X+rc.W), float32(rc.Y+rc.H)
+	// Kirpma kosesini cikar: rasterlestirici (0,0) tabanlidir.
+	x0, y0 := float32(rc.X)-ox, float32(rc.Y)-oy
+	x1, y1 := float32(rc.X+rc.W)-ox, float32(rc.Y+rc.H)-oy
 	r := float32(rad)
 	k := float32(rad * kappa)
 
@@ -156,8 +212,8 @@ func (p *Painter) FillRoundRect(rc Rect, radius float64, c color.RGBA) {
 	if rc.W <= 0 || rc.H <= 0 {
 		return
 	}
-	p.path(func(ras *vector.Rasterizer) {
-		roundRectPath(ras, rc, radius, +1)
+	p.path(rc, func(ras *vector.Rasterizer, ox, oy float32) {
+		roundRectPath(ras, rc, radius, +1, ox, oy)
 	}, c)
 }
 
@@ -185,9 +241,9 @@ func (p *Painter) StrokeRoundRect(rc Rect, radius, thickness float64, c color.RG
 	// İç yarıçap: dış yarıçaptan kalınlık kadar küçük, ama negatif olamaz.
 	innerRad := math.Max(0, radius-thickness)
 
-	p.path(func(ras *vector.Rasterizer) {
-		roundRectPath(ras, rc, radius, +1)
-		roundRectPath(ras, inner, innerRad, -1)
+	p.path(rc, func(ras *vector.Rasterizer, ox, oy float32) {
+		roundRectPath(ras, rc, radius, +1, ox, oy)
+		roundRectPath(ras, inner, innerRad, -1, ox, oy)
 	}, c)
 }
 
@@ -233,20 +289,26 @@ func (p *Painter) Line(x0, y0, x1, y1, width float64, c color.RGBA) {
 	// olarak inşa et.
 	nx, ny := -dy/length*width/2, dx/length*width/2
 
-	p.path(func(ras *vector.Rasterizer) {
-		ras.MoveTo(float32(x0+nx), float32(y0+ny))
-		ras.LineTo(float32(x1+nx), float32(y1+ny))
-		ras.LineTo(float32(x1-nx), float32(y1-ny))
-		ras.LineTo(float32(x0-nx), float32(y0-ny))
+	corners := []Pt{
+		{X: x0 + nx, Y: y0 + ny}, {X: x1 + nx, Y: y1 + ny},
+		{X: x1 - nx, Y: y1 - ny}, {X: x0 - nx, Y: y0 - ny},
+	}
+	p.path(boundsOf(corners), func(ras *vector.Rasterizer, ox, oy float32) {
+		ras.MoveTo(float32(x0+nx)-ox, float32(y0+ny)-oy)
+		ras.LineTo(float32(x1+nx)-ox, float32(y1+ny)-oy)
+		ras.LineTo(float32(x1-nx)-ox, float32(y1-ny)-oy)
+		ras.LineTo(float32(x0-nx)-ox, float32(y0-ny)-oy)
 		ras.ClosePath()
 	}, c)
 }
 
 // ── Daireler ────────────────────────────────────────────────────────────────
 
-func circlePath(ras *vector.Rasterizer, cx, cy, r float64, dir int) {
+func circlePath(ras *vector.Rasterizer, cx, cy, r float64, dir int,
+	ox, oy float32) {
+
 	k := float32(r * kappa)
-	fx, fy, fr := float32(cx), float32(cy), float32(r)
+	fx, fy, fr := float32(cx)-ox, float32(cy)-oy, float32(r)
 	if dir >= 0 {
 		ras.MoveTo(fx, fy-fr)
 		ras.CubeTo(fx+k, fy-fr, fx+fr, fy-k, fx+fr, fy)
@@ -268,7 +330,10 @@ func (p *Painter) FillCircle(cx, cy, r float64, c color.RGBA) {
 	if r <= 0 {
 		return
 	}
-	p.path(func(ras *vector.Rasterizer) { circlePath(ras, cx, cy, r, +1) }, c)
+	p.path(Rect{X: cx - r, Y: cy - r, W: 2 * r, H: 2 * r},
+		func(ras *vector.Rasterizer, ox, oy float32) {
+			circlePath(ras, cx, cy, r, +1, ox, oy)
+		}, c)
 }
 
 // StrokeCircle paints a circle outline — one continuous ring, not segments.
@@ -280,10 +345,11 @@ func (p *Painter) StrokeCircle(cx, cy, r, thickness float64, c color.RGBA) {
 		p.FillCircle(cx, cy, r, c)
 		return
 	}
-	p.path(func(ras *vector.Rasterizer) {
-		circlePath(ras, cx, cy, r, +1)
-		circlePath(ras, cx, cy, r-thickness, -1)
-	}, c)
+	p.path(Rect{X: cx - r, Y: cy - r, W: 2 * r, H: 2 * r},
+		func(ras *vector.Rasterizer, ox, oy float32) {
+			circlePath(ras, cx, cy, r, +1, ox, oy)
+			circlePath(ras, cx, cy, r-thickness, -1, ox, oy)
+		}, c)
 }
 
 // ── Çokgen ──────────────────────────────────────────────────────────────────
@@ -296,10 +362,10 @@ func (p *Painter) FillPolygon(pts []Pt, c color.RGBA) {
 	if len(pts) < 3 {
 		return
 	}
-	p.path(func(ras *vector.Rasterizer) {
-		ras.MoveTo(float32(pts[0].X), float32(pts[0].Y))
+	p.path(boundsOf(pts), func(ras *vector.Rasterizer, ox, oy float32) {
+		ras.MoveTo(float32(pts[0].X)-ox, float32(pts[0].Y)-oy)
 		for _, q := range pts[1:] {
-			ras.LineTo(float32(q.X), float32(q.Y))
+			ras.LineTo(float32(q.X)-ox, float32(q.Y)-oy)
 		}
 		ras.ClosePath()
 	}, c)

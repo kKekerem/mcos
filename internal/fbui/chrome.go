@@ -66,14 +66,14 @@ func (u *UI) Scrim(r image.Rectangle) {
 	// AYARLANDI: önce cellH*3/4 idi ve arka plan tamamen tanınmaz hale
 	// geliyordu. Amaç arkadaki ekranı YOK ETMEK değil, geri plana itmek —
 	// kullanıcı hangi ekranın üstünde olduğunu görmeye devam etmeli.
-	radius := u.F.CellH / 3
+	radius := u.F.CellH / 4
 	if radius < 3 {
 		radius = 3
 	}
 	fbdraw.Blur(u.dst, r, radius)
 	// Karartma bulanıklıktan SONRA: önce karartsaydık bulanıklık karartmayı
 	// kenarlardan geri yayardı ve perde kenarı halkalanırdı.
-	fbdraw.Dim(u.dst, r, u.Pal.Bg, 0.30)
+	fbdraw.Dim(u.dst, r, u.Pal.Bg, 0.25)
 }
 
 // ScrimCache stores a pre-rendered blurred backdrop.
@@ -120,6 +120,13 @@ func (c *ScrimCache) Invalidate() { c.valid = false }
 func (u *UI) Modal(w, h int, title string) image.Rectangle {
 	b := u.dst.Bounds()
 	margin := u.M.PadX * 2
+
+	// ALT SINIR: ekranin dortte biri. Hucre sayisina gore olculen bir pencere
+	// yuksek cozunurlukte kaybolacak kadar kucuk kalir - 1920 pikselde 44
+	// sutun yalnizca 528 piksel eder. Pencere her zaman fark edilir olmali.
+	if min := b.Dx() * 34 / 100; w < min {
+		w = min
+	}
 	if w > b.Dx()-margin {
 		w = b.Dx() - margin
 	}
@@ -195,7 +202,11 @@ func (u *UI) StatusBarH() int { return u.F.CellH + u.M.PadY*2 }
 // ve NE OLUYOR (canlı olay).
 //
 // ev nil ise sol taraf boş bırakılır.
-func (u *UI) StatusBar(ev *Event, keys []Shortcut, spin int) image.Rectangle {
+//
+// İki değer döner: çubuğun kendisi ve her kısayol tuş kapağının dikdörtgeni.
+// İkincisi fare desteği içindir — kullanıcı alttaki "Enter Başlat" kapağına
+// tıklayabilmeli. Sıra keys ile AYNIDIR.
+func (u *UI) StatusBar(ev *Event, keys []Shortcut, spin int) (image.Rectangle, []image.Rectangle) {
 	b := u.dst.Bounds()
 	h := u.StatusBarH()
 	bar := image.Rect(b.Min.X, b.Max.Y-h, b.Max.X, b.Max.Y)
@@ -220,12 +231,15 @@ func (u *UI) StatusBar(ev *Event, keys []Shortcut, spin int) image.Rectangle {
 	}
 
 	// Kısayollar sağdan sola dizilir: en sağdaki her zaman görünür kalır.
+	caps := make([]image.Rectangle, len(keys))
 	rx := bar.Max.X - u.M.PadX
 	for i := len(keys) - 1; i >= 0; i-- {
-		rx = u.shortcut(rx, ty, keys[i])
+		var capR image.Rectangle
+		rx, capR = u.shortcut(rx, ty, keys[i])
+		caps[i] = capR
 		rx -= u.M.Gap * 2
 	}
-	return bar
+	return bar, caps
 }
 
 // EventColors maps a kind to (text colour, indicator colour).
@@ -245,8 +259,8 @@ func (u *UI) EventColors(k EventKind) (color.RGBA, color.RGBA) {
 }
 
 // shortcut draws one "key label" pair right-aligned ending at x, returning the
-// new left edge.
-func (u *UI) shortcut(x, y int, s Shortcut) int {
+// new left edge and the key cap's clickable rectangle.
+func (u *UI) shortcut(x, y int, s Shortcut) (int, image.Rectangle) {
 	lw := u.TextWidth(s.Label)
 	u.Text(x-lw, y, s.Label, u.Pal.TextDim)
 	x -= lw + u.M.Gap
@@ -259,7 +273,10 @@ func (u *UI) shortcut(x, y int, s Shortcut) int {
 		fbdraw.R(float64(x-kw), float64(ky), float64(kw), float64(kh)),
 		float64(kh)*0.3, u.Pal.Raised)
 	u.TextCenter(x-kw, x, y, s.Key, u.Pal.Text)
-	return x - kw
+	// Tıklama alanı, kapağın çizildiği dikdörtgenin AYNISI olmalı; birkaç
+	// piksel pay bırakmak, iki kapak arasına tıklandığında yanlış olanı
+	// tetiklerdi.
+	return x - kw, image.Rect(x-kw, ky, x, ky+kh)
 }
 
 // spinnerFrames are the rotation angles (in eighths) of the busy indicator.

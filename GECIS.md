@@ -4,7 +4,277 @@
 > oturumdaki hafızanın tamamını aktarmaktır: ne yapıldı, neden yapıldı, ne
 > yarım kaldı, hangi kod ne işe yarıyor, araştırma çıktıları nerede.
 >
-> **Tarih:** 2026-09-11 · **Dal:** `ensonlarındanbiri` · **Depo:** `~/mcos` (WSL Ubuntu)
+> **Son güncelleme:** 2026-09-13 · **Sürüm:** 1.0.1 · **Depo:** `~/mcos` (WSL Ubuntu)
+>
+> **ÖNCE [BÖLÜM 0](#bölüm-0--sürüm-101de-yapılanlar-en-güncel)'I OKU** — en güncel durum oradadır. Aşağıdaki bölümler tarihsel bağlamdır ve bazı "yarım kaldı" notları artık geçersizdir.
+
+---
+
+# BÖLÜM 0 — SÜRÜM 1.0.1'DE YAPILANLAR (EN GÜNCEL)
+
+> **Bu bölüm en yeni oturumun çıktısıdır ve aşağıdaki tüm bölümlerden DAHA
+> GÜNCELDİR.** Çelişki olursa burası doğrudur. Aşağıdaki "YARIM KALANLAR"
+> listesinin çoğu artık BİTMİŞTİR; her biri burada işaretli.
+>
+> **Sürüm:** 0.1.0 → **1.0.1** · **Tarih:** 2026-09-13
+
+## 0.1 Kullanıcının bu oturumdaki istekleri (ham, kendi kelimeleriyle)
+
+```
+"kral test mest yapma bence bisi misi olr pc benim dğeil. sen yap emin ol yeter."
+"ek olarak sunucuya gerek kalmasın ve bat ve sh olsun onla baslatılsın."
+"ek olarak isletim sistemine animasyonlar ekle boot ekrnaı ekle ve fare desteği ekle."
+"ayarlardan acılıp kapanabilsin touchpad ve fare desteği gelsin."
+"sürüm 1.0.1 olsun."
+"blurlar gecis efektleri dönen tekerlek felan cok iyi olsun."
+"playit servisini adam akıllı yaptın mı hesaba giris yapmak felan lazım ilk
+ kurulumda kursun servisi sonra giris yapalım agente sonra siteden tünel
+ acıp bağlayabilelim."
+"ilk kurulumda boot animasyonu bitince iceri zoomlanarak blur felan ile
+ oobe nin ilk ekranı gelsin sonra klasik gecis animasyonu olsun."
+"isteğe bağlı şifre olsun baya gelissin os."
+"pc eslestirme gercekten ise yarasın hatta kendin mod bile yaz."
+"menüleri iyi yap mantık hatası var oobe de eklnemmeli sunucu kurarken
+ secilmemli bu acılsın mı yaraı."
+"soldaki menüden pc eslestirmeye gidince oradan pc eslestirebilelim otomatik
+ ağda tarasın bulamazsak ipo girelim ekranda taraırken dönen animasoyn
+ listelenecek listeye secenek gelince anşimasyon aynıları wifi veya bisi
+ listelenirken de olacak."
+"iki sunucu aynı dünyayı calıstıracak ama dünyanın yarısı diğer pc de
+ calısırken diğeri diğer pc de ancak aynı dünya olacak tek bi sw gibi
+ gorunecek aslında sw1 den sw2 niin alanına gidince orada gecis yapacaz
+ pc eslestirme sayısı sınırsız olacak modu iyi yap."
+"TEHLİKELİ ŞEYLER YAPMA"
+"yaptığın isi iyi yap yazdığım tüm mesajlara bak her seyin eksiksiz ve
+ calısır olduğundan emin ol"
+```
+
+**Değişmez güvenlik kuralları (hâlâ geçerli):**
+
+1. **ASLA BİR YERE KURULUM YAPMA** — hiçbir aygıta yazma. Kullanıcı kendisi
+   flaşlıyor. `--dry-run` dışında `mcos-flash` çalıştırılmadı.
+2. `git remote` URL'sinde **düz metin GitHub token'ı** bulundu. Yanmış kabul
+   edilmeli, iptal edilmeli, **kullanılmamalı**. PR açılmadı.
+
+## 0.2 Yeni dosyalar — ne işe yarıyor?
+
+### Sürüm
+
+| Dosya | İş |
+|---|---|
+| `internal/version/version.go` | **Sürümün TEK kaynağı.** Daha önce 8 ayrı yerde elle yazılıydı ve ayrışıyordu. `scripts/test-version.sh` bunu kilitler. |
+
+### Girdi — fare / touchpad
+
+| Dosya | İş |
+|---|---|
+| `internal/fbinput/evdev_linux.go` | Aygıt yeteneklerini **çekirdeğe sorar** (`EVIOCGBIT`, `EVIOCGABS`, `EVIOCGNAME`). Aygıt adına bakmaz — üretici adları güvenilmez. Sınıflandırma: fare / touchpad / dokunmatik ekran / diğer. |
+| `internal/fbinput/activity_linux.go` | **YENİDEN YAZILDI.** Artık tek okuyucu hem uyku etkinliğini hem imleç olaylarını üretir. Aynı evdev dosyasını iki kez açmak gereksiz kopya demekti. Touchpad mutlak→bağıl dönüşümü, tap-to-click, iki parmak kaydırma, MT slot filtreleme burada. |
+| `internal/fbinput/activity_other.go` | Linux dışı stub'lar (aynı API). |
+| `internal/fbinput/pointer_linux_test.go` | 14 test: paket birleştirme, zıplama yok, tap/drag ayrımı, iki parmak, slot filtresi, alt-piksel birikimi, kuyruk taşması. |
+
+### Çizim — animasyon ve efektler
+
+| Dosya | İş |
+|---|---|
+| `internal/fbdraw/effects.go` | `CrossFade`, `SlideBlend` (paralakslı), `Zoom` (16.16 sabit nokta), `ZoomBlurFade` (açılış geçişi), easing fonksiyonları, `Pulse`. Hepsi yalnızca verilen dikdörtgeni işler. |
+| `internal/fbui/anim.go` | `Cursor` / `CursorBusy` (çizilmiş ok, konturlu), `SpinnerAt`, `ScanPulse` + `ScanBanner` (radar), `ProgressRing`, `Logo` / `LogoPulse` (izometrik küp), `SkeletonRow`, `HoverRow`. |
+| `internal/fbdev/frame.go` | Bir kareyi iki program arasında taşır (`MCFB` ham biçim, `/run` altında). Açılış ekranı → panel geçişi için. |
+
+### Panel
+
+| Dosya | İş |
+|---|---|
+| `internal/fbpanel/pointer.go` | **Tıklama bölgeleri.** Çizim sırasında her tıklanabilir şey dikdörtgenini kaydeder; tıklama sondan başa aranır. Çizim ile tıklama alanının ayrışması böylece imkânsız. Tek tık seçer, çift tık çalıştırır, sağ tık geri. |
+| `internal/fbpanel/anim.go` | Geçiş durum makinesi. Tamponlar **tembel** ayrılır ve animasyon kapalıysa hiç ayrılmaz (1080p'de 8.3 MB × 2). |
+| `internal/fbpanel/lock.go` | İsteğe bağlı kilit ekranı. Parola yoksa hiç devreye girmez. 5 yanlış → 20 sn bekleme. Arka planda **sistem durumu gösterilmez** (ekran görüntüsü sızıntısı). |
+| `internal/fbpanel/actions.go` | `runAction` — fare tıklamasının adlandırılmış eylemlere yönlendirilmesi. |
+| `internal/fbpanel/setup.go` | **Kurulum sihirbazı durum makinesi.** 10 sayfa. |
+| `internal/fbpanel/setup_draw.go` | ORTAK sayfa akışı çizici (`drawFlow`) + ilk kurulumun sayfa gövdeleri. İki sihirbaz da bunu kullanır; ayrı çizilselerdi biri düzeltilip öteki unutulurdu. |
+| `internal/fbpanel/wizard.go` | **Sunucu oluşturma sihirbazı** — 10 sayfa, sayfa başına doğrulama, gönderim öncesi son denetim. Eş cihaz SEÇTİRMEZ. |
+| `internal/fbpanel/wizard_draw.go` | Sunucu sihirbazının sayfa gövdeleri ve özeti. |
+| `internal/fbpanel/screen_peers.go` | **MCOS Paylaşım ekranı** — tarama, elle IP, anahtar gösterimi, ortak dünya kurulumu, dilim haritası. |
+| `internal/fbpanel/screen_tunnel.go` | **playit ekranı** — üç adım, onay kodu, ajan günlüğü, yoklama. |
+| `internal/fbpanel/screen_settings.go` | **Ayarlar ekranı** — fare/touchpad penceresi, animasyon, parola, paylaşım anahtarı. |
+| `internal/fbpanel/password.go` | `PasswordModal` → genel **`TextModal`**'a dönüştü: doğrulayıcılı, maskeli, yer tutuculu. Wi-Fi parolası artık onun ince bir sarmalayıcısı. |
+
+### Küme / ortak dünya
+
+| Dosya | İş |
+|---|---|
+| `internal/cluster/discover.go` | **Etkin LAN taraması** (`ScanLAN`) ve **elle eşleştirme** (`AddManual`). Multicast ev modemlerinde engelli olduğu için şart. Tarama otomatik eşleştirmez. |
+| `internal/cluster/link.go` | **Link koordinatörü** — 127.0.0.1:27892'de moda topoloji sunar, eşlere `linkSpec` yayar, olayları toplar. |
+| `internal/model/link.go` | Dilim matematiği (`Territories`, `OwnerOf`), `LinkConfig`, `LinkSpec`, `LinkStatus`. Sınırlar spawn etrafında simetrik. |
+| `internal/daemon/handlers_link.go` | `link.status/enable/disable/events`, `cluster.scan/pairManual/secret`, mod kurulumu, eşten gelen kurulumu uygulama. |
+| `internal/daemon/handlers_playit.go` | `playit.status/install/claim/poll/start/stop` + otomatik başlatma. |
+| `internal/ipcclient/link.go` | Bu üç grubun tipli istemci sarmalayıcıları. |
+
+### Minecraft modu
+
+| Dosya | İş |
+|---|---|
+| `mods/mcos-link/` | **Fabric modu.** Sunucu tarafı; istemcide mod gerekmez. |
+| `…/Topology.java` | Koordinatörden gelen topolojiyi çözer. Tanımadığı sürümde ortak dünyayı KAPATIR. |
+| `…/Coordinator.java` | 5 sn'de bir topolojiyi çeker (`HttpURLConnection` — `java.base`, her JRE'de var). Olayları geri bildirir. |
+| `…/LinkProtocol.java` | Düğümler arası tel biçimi: sihirli satır + JSON başlık + gövde. HTTP sunucusu YOK (`jdk.httpserver` her JRE'de olmayabilir). |
+| `…/LinkServer.java` | 27893'te eşleri dinler: `handoff`, `chat`, `announce`, `ping`. Anahtar sabit sürede karşılaştırılır, UUID doğrulanır. |
+| `…/HandoffService.java` | **Modun kalbi.** Sınır denetimi, gecikme (hysteresis), veri gönderimi, `ServerTransferS2CPacket`. |
+| `…/PlayerData.java` | `playerdata/<uuid>.dat` okuma. **Elle serileştirme YOK** — oyunun kendi kayıt biçimi taşınır. |
+| `…/LinkCommands.java` | `/mcoslink status\|map\|where\|send\|reload`. |
+| `…/McosLink.java` | Giriş noktası, tik döngüsü, zorluk eşitleme, sekme listesi başlığı. |
+
+### Masaüstü araç
+
+| Dosya | İş |
+|---|---|
+| `cmd/mcos-flash/main.go` | **YENİDEN YAZILDI** — sunucusuz, etkileşimli terminal. |
+| `cmd/mcos-flash/progress.go` | `\r` tabanlı ilerleme çubuğu (ANSI YOK — eski Windows konsolu). |
+| `cmd/mcos-flash/wait_windows.go` | Çift tıklanınca pencere kapanmasın. |
+| `internal/flash/enum_windows.go` | `DeviceIoControl` ile fiziksel disk keşfi (WMI/PowerShell YOK). |
+| `internal/flash/raw_windows.go` | Birim kilitleme + ayırma + ham yazma + bölüm tablosu yenileme. |
+| `internal/flash/write_test.go` | Sahte aygıtla tam yazma yolu: bozuk bellek tespiti, sistem diski reddi, dry-run. |
+| `dist/flash/mcos-flash.bat` | Yönetici yükseltmesi + UTF-8 kod sayfası + pencereyi açık tutma. |
+| `dist/flash/mcos-flash.sh` | Kök yükseltmesi (POSIX sh). |
+
+> Bu iki dosyanın **kaynağı** `cmd/mcos-flash/launcher/` altındadır; `dist/` bütünüyle `.gitignore`'da olduğu için orada tutulsalardı git tarafından hiç izlenmez, temiz bir klonda da hiç oluşmazlardı. `make flash` / `make flash-windows` onları kaynaktan `dist/flash/` içine kopyalar.
+
+### Açılış
+
+| Dosya | İş |
+|---|---|
+| `cmd/mcos-splash/main.go` | **Açılış animasyonu.** Logo + nefes alan hâle + ilerleme halkası + durum satırı. `--keep` ile konsolu panele devreder, `--restore` ile geri alır. |
+
+## 0.3 Değişen dosyalar — neden?
+
+| Dosya | Değişiklik |
+|---|---|
+| `internal/model/config.go` | `UIConfig` (fare, touchpad, tap, hız, animasyon, açılış animasyonu) ve `SecurityConfig` (parola) eklendi. |
+| `internal/model/password.go` | **YENİ** — PBKDF2-SHA256, 200k tur, sabit süreli karşılaştırma. |
+| `internal/model/model.go` | `Server.LevelSeed` ve `Server.Link` eklendi. |
+| `internal/server/install.go` | `level-seed` artık `server.properties`'e yazılıyor (ortak dünya için ŞART). |
+| `internal/fbui/widgets.go` | `Canvas()`, `Pix()`, `WrapLines`, `TextWrap`; `ButtonRow` artık **dikdörtgen döndürüyor** (tıklama alanı = çizim alanı). |
+| `internal/fbui/chrome.go` | `StatusBar` kısayol kapaklarının dikdörtgenlerini döndürüyor (tıklanabilir). |
+| `internal/fbpanel/draw.go` | Bölge sıfırlama, kilit ekranı, sihirbaz dalı, geçiş uygulama, imleç çizimi. |
+| `internal/fbpanel/run.go` | İmleç kanalı, 60 kare/sn yeniden çizim tikeri, ilk açılışta sihirbaz, uyandıktan sonra kilit. |
+| `internal/fbpanel/keys.go` | Kilit ve sihirbaz yönlendirmesi; `s`/`i` Paylaşım ekranında farklı iş yapıyor. |
+| `internal/cluster/cluster.go` | `linkSpec` metodu + koordinatör bağlantısı. |
+| `cmd/mcos-panel-fb/main.go` | `--intro`, `--ready`, `--setup`, `--setup-page`; imleç bağlantısı; ekran boyutu bildirimi. |
+| `os/.../usr/bin/mcos-launch` | Açılış ekranını başlatır, aşamaları bildirir, paneli açmadan önce bitirir, hata yolunda konsolu geri alır. |
+| `os/.../package/mcos/mcos.mk` | `mcos-splash` kuruluyor; sürüm 1.0.1. |
+| `Makefile` | `mcos-splash` eklendi; `flash`, `flash-windows`, `flash-all`, `mod`, `shots` hedefleri; 4 yeni test betiği. |
+
+## 0.4 Eski "YARIM KALANLAR" listesinin durumu
+
+| Eski madde | Durum |
+|---|---|
+| Diskten çalışma (`switch_root`) | ✅ bitti (önceki oturum) |
+| Çevrimdışı sunucu | ✅ bitti (önceki oturum) |
+| playit tüneli | ✅ **bitti** — üç adımlı akış, RPC'ler, panel ekranı |
+| Turbo modunun gerçek etkisi | ✅ bitti (cgroup v2) |
+| Kurulum sihirbazı mantık hataları | ✅ **bitti** — sihirbaz yeniden yazıldı, sıra düzeltildi |
+| Sunucu oluşturma sihirbazı | ✅ **bitti** — yeni arayüzde (`internal/fbpanel/wizard.go`) |
+| Kalan bölümlerin taşınması | ✅ **bitti** — 12 bölümün hepsi yeni arayüzde |
+| VirtualBox uyumu | ✅ bitti (önceki oturum) |
+| Wi-Fi ağ görmeme | ✅ bitti (`wireless-regdb`) |
+| Masaüstü flaşlama aracı | ✅ **bitti** — sunucusuz, Windows + Linux, doğrulamalı |
+
+## 0.5 HÂLÂ YARIM KALANLAR
+
+| # | İş | Neden yarım | Nereden başlanmalı |
+|---|---|---|---|
+| 1 | **Ortak dünyada blok senkronu** | Komşu dilimdeki yapılar sınırın öbür tarafından görünmüyor. Gerçek zamanlı chunk çoğaltma gerekir. | `World#setBlockState` üzerine Mixin + sınır şeridinde değişiklik yayını. Riskli: Mixin hatası sunucuyu çökertir. |
+| 3 | **Mod jar'ının imaja gömülmesi** | `make mod` gradle ister (bir kez internet). | `scripts/fetch-offline-bundle.sh` içine derlenmiş jar eklenebilir ya da CI'da derlenip `dist/mods` overlay'e konabilir. |
+| 4 | **macOS flaşlama** | `diskutil unmountDisk` + `/dev/rdiskN` gerekiyor. | `internal/flash/enum_darwin.go` + `raw_darwin.go`. Sistem diskini gizleyemeyen bir araç TEHLİKELİDİR — doğru yapılmadan eklenmemeli. |
+| 5 | **Gerçek donanım denemesi** | Kullanıcı flaşlıyor; ajan hiçbir aygıta yazmadı. | Fare, touchpad, açılış animasyonu ve ortak dünya yalnızca gerçek makinede doğrulanabilir. |
+
+## 0.6 YENİ TESTLER — ne kanıtlıyorlar?
+
+| Test | Kanıt |
+|---|---|
+| `internal/model/link_test.go` | Dilimler dünyayı **boşluksuz ve çakışmasız** kaplıyor (1–8 düğüm × 4 dilim genişliği × ±span). İki düğümde sınır tam x=0. |
+| `internal/model/password_test.go` | Parolasız sistemde giriş serbest; tuz çalışıyor; bozuk özet reddediyor; eski biçim doğrulanıyor. |
+| `internal/fbinput/pointer_linux_test.go` | Touchpad **zıplamıyor**; tap ile drag ayrılıyor; iki parmak kaydırma imleci oynatmıyor; alt-piksel hareket kaybolmuyor. |
+| `internal/fbpanel/setup_test.go` | Sihirbazın 10 sayfası çiziliyor, her sayfada ilerleme yolu var, imleç taşmıyor, **eşleştirme sunmuyor**, daemon yokken paniklemiyor. |
+| `internal/fbpanel/pointer_test.go` | İmleç ekran dışına çıkmıyor; kenar çubuğunda tek tık; listede tek tık **çalıştırmıyor**; sürükleyip bırakma iptal ediyor; hız ayarı etkili. |
+| `internal/flash/write_test.go` | **Bozuk bellek yakalanıyor**; sistem diskine bayt yazılmıyor; dry-run aygıt açmıyor. |
+| `scripts/test-ui-logic.sh` | Fare/animasyon/açılış/kilit/sihirbaz gerçekten **bağlı** (fonksiyonun var olması yetmez, çağrılıyor olmalı). |
+| `scripts/test-link-logic.sh` | Go ↔ Java **aynı portları, aynı alan adlarını, aynı sürümü** kullanıyor; veri transfer paketinden önce gidiyor. |
+| `scripts/test-flash-logic.sh` | Sistem diski denetimi `--all-disks` filtresinden ÖNCE; onayda yol yazılıyor; Windows'ta kilit diskten önce. |
+| `scripts/test-version.sh` | Sürüm tek kaynaktan; elle yazılmış sürüm kalmamış. |
+
+**Toplam:** `make test-boot` → **231 denetim**, `go test` → tüm paketler yeşil.
+
+## 0.7 ÖNEMLİ TASARIM KARARLARI (bu oturum)
+
+1. **Oyuncu durumu elle serileştirilmiyor.** Aktarımda Minecraft'ın kendi
+   `playerdata/<uuid>.dat` dosyası taşınıyor. Elle yazılan bir serileştirici er
+   ya da geç bir şeyi unutur (ender sandığı, ateş süresi, ilerlemeler) ve
+   sürüm değiştiğinde kırılır.
+
+2. **Veri ÖNCE, transfer paketi SONRA.** Tersi durumda istemci hedefe bizden
+   önce ulaşır ve oyuncu **boş envanterle** doğar. Gönderim başarısızsa
+   aktarım hiç yapılmaz.
+
+3. **Dilim sahipliği bitişik, hash değil.** Karoya göre hash'lemek oyuncunun
+   her 16 blokta bir makine değiştirmesi demekti.
+
+4. **Sınırlar yalnızca Go'da hesaplanıyor.** Java topolojiden okuyor. İki
+   taraf ayrı hesaplasaydı yuvarlama farkı bile oyuncuyu döngüye sokardı.
+   `test-link-logic.sh` Java'da `Math.round` olmadığını doğruluyor.
+
+5. **Tıklama alanı = çizim alanı.** `ButtonRow` ve `StatusBar` artık
+   dikdörtgen döndürüyor. İkisini ayrı hesaplamak, düzen değiştiğinde sessizce
+   kayan tıklama alanları demek.
+
+6. **Listede tek tık çalıştırmıyor.** Satırlar yıkıcı olabilir.
+
+7. **Onayda aygıt yolu yazdırılıyor.** "e/h" alışkanlık hâline gelir.
+
+8. **Sihirbaz önce kaydediyor, sonra kuruyor.** Eski sıra ayarları tamamen
+   kaybediyordu.
+
+9. **Açılış ekranı `--keep` ile konsolu devrediyor.** Metin kipine dönmek
+   ekranda bir an konsol metni gösterir ve geçiş etkisini kırar. Hata
+   yolunda başlatıcı `--restore` çağırıyor.
+
+10. **Animasyon kapalıysa tampon ayrılmıyor.** 1080p'de 8.3 MB × 2.
+
+## 0.8 BU OTURUMDA BULUNAN VE DÜZELTİLEN HATALAR
+
+| # | Hata | Belirti | Düzeltme |
+|---|---|---|---|
+| 1 | Sürüm 8 ayrı yerde elle yazılı | Panel "v0.1.0", daemon "1.0.0" | `internal/version` + `test-version.sh` |
+| 2 | `ButtonRow` yalnızca genişlik döndürüyordu | Fare desteği eklenince düğmeler tıklanamaz olurdu | Dikdörtgen listesi döndürüyor |
+| 3 | Sihirbaz ipuçları panelden taşıyordu | Metin ekran kenarından dışarı çiziliyordu | `WrapLines` + satır yüksekliği hesabı |
+| 4 | Hassasiyet çubuğu "%100"de üçte bir dolu | Hata gibi okunuyordu | Uç etiketleri (%20 / %300) |
+| 5 | `test-panel-wiring.sh` yalnızca `screens.go`'ya bakıyordu | Ekranlar kendi dosyalarına taşınınca "eksik" sanıldı | Tüm pakette arıyor |
+| 6 | `test-version.sh` JSON-RPC sürümünü yakalıyordu | Yanlış pozitif | `internal/ipc/protocol.go` hariç tutuldu |
+| 7 | `test-link-logic.sh` `,omitempty` etiketlerini kaçırıyordu | Yanlış pozitif | `jsonfield` yardımcısı |
+| 8 | Windows `flash` derlenmiyordu | `enum_other.go` "Linux only" diyordu | Gerçek `DeviceIoControl` uygulaması |
+
+## 0.9 ÇALIŞAN KOMUTLAR (bu oturumda doğrulandı)
+
+```bash
+# Go — WSL içinden, $ ve tırnak tuzaklarından kaçınmak için yardımcı betikle
+wsl.exe -d ubuntu -- bash /home/kkekerem/gob.sh go test ./cmd/... ./internal/... ./panel/...
+wsl.exe -d ubuntu -- bash /home/kkekerem/gob.sh make test-boot
+
+# Arayüzün TAMAMINI PNG olarak basmak (EN KULLANIŞLI)
+wsl.exe -d ubuntu -- bash -c 'cd /home/kkekerem/mcos && sh scripts/shots.sh'
+#   → dist/shots/ altında 31 PNG: panel, pencereler, sihirbaz, açılış
+
+# Çapraz derleme denetimi (Windows aracı da derlenmeli)
+wsl.exe -d ubuntu -- bash /home/kkekerem/crossbuild.sh
+
+# Flaşlama aracı — SALT OKUMA
+wsl.exe -d ubuntu -- /tmp/mcos-flash --list --all-disks
+```
+
+> **TUZAK (yine yaşandı):** `wsl.exe -- bash -c "..."` içinde `$VAR`, `$(...)`
+> ve parantez Windows kabuğu tarafından yenir. Çözüm: Python/kabuk yamalarını
+> **dosyaya yaz**, sonra çalıştır. `gob.sh` bu yüzden var.
+
+---
 
 ---
 
@@ -1023,3 +1293,107 @@ Bunları değiştirmeden önce nedenlerini oku:
    silen bir hata var. Sonra **playit (§7.3)**, sonra **çevrimdışı sunucu
    (§7.2)**, en son **disk kökü (§7.1)** çünkü en riskli olan o.
 5. **Hiçbir diske yazma.** Kullanıcı kendisi derleyip yazıyor.
+
+---
+
+# BÖLÜM 0.6 — UZAKTAN KONTROL, SSH, DÜĞÜM PROGRAMI VE TELEFON UYGULAMASI
+
+Bu bölüm 1.0.1'in son turunda eklenenleri anlatır.
+
+## 0.6.1 Uzaktan kontrol köprüsü (`internal/remote`)
+
+Telefon uygulamasının bağlandığı HTTPS köprüsü. **Ayrı bir API değil**:
+daemon'un JSON-RPC yöntem tablosunun AYNISINI sunar.
+
+```
+   telefon                    mcosd
+   ┌──────────┐   HTTPS   ┌──────────────────────────────┐
+   │  /rpc    │──────────▶│ remote.Server                │
+   │  Bearer  │           │   1. jeton (sabit süreli)    │
+   └──────────┘           │   2. ipc.Server.Dispatch ────┼──▶ aynı yöntemler
+                          └──────────────────────────────┘
+```
+
+**Neden ayrı bir yöntem tablosu YOK:** iki yol zamanla ayrışırdı — panelde
+çalışan bir şey telefonda çalışmaz olurdu. `ipc.Server.Dispatch` bu yüzden
+dışa açıldı.
+
+| Karar | Neden |
+|---|---|
+| TLS zorunlu | Jeton her istekte gider; düz HTTP'de aynı ağdaki herkes okur. |
+| Kendinden imzalı sertifika | Cihazın alan adı yok. Kimlik doğrulaması **parmak izi sabitleme** ile yapılır. |
+| Sertifika kalıcı | Her açılışta yenisi üretilse, telefon her seferinde "araya giren var" derdi. |
+| Jetonsuz açılmaz | `New()` hata döner. "Kapalı" ile "herkese açık" arasında kaza eseri geçiş olmamalı. |
+| Varsayılan kapalı | Sunucunun tam denetimini veren bir port, istenmeden dinlenmemeli. |
+| Port 2223 | Eşleştirme portunun (2222) yanı; ikisi birlikte hatırlanır, ikisi de ayrıcalıksız. |
+
+Testler: `internal/remote/server_test.go` (12 test) + `scripts/test-remote-logic.sh`
+(22 denetim). Testler "çalışıyor mu" değil, **"izinsiz geçilebiliyor mu"**
+diye sorar.
+
+## 0.6.2 SSH (`internal/sshd`)
+
+İmajda zaten OpenSSH var (`BR2_PACKAGE_OPENSSH=y`), dropbear de destekleniyor;
+hangisi varsa o kullanılır.
+
+- **Kendi `sshd_config`'imiz** veri klasörüne yazılır, `/etc/ssh`'a değil:
+  panelin açıp kapattığı bir hizmetin ayarını sistem dosyasına yazmak,
+  kullanıcının elle yaptığı değişiklikleri sessizce ezmek olurdu.
+- **Sunucu anahtarları kalıcı** klasörde: her açılışta değişse istemci
+  "REMOTE HOST IDENTIFICATION HAS CHANGED" derdi. O uyarıyı rutin hâline
+  getirmek, gerçeğini fark edilemez kılar.
+- **Parola `/etc/shadow`'a** yazılır, `config.json`'a değil: yapılandırmayı
+  yedekleyen biri kabuk erişimi kazanmamalı. Yapılandırmada yalnızca
+  `PasswordSet` bayrağı durur.
+- Parola `chpasswd`'ye **stdin ile** verilir; komut satırı argümanları
+  `/proc` üzerinden her sürece görünür.
+- **Parolasız ve anahtarsız açılmaz:** giremeyeceğiniz bir kapıyı açık
+  bırakmanın anlamı yok.
+
+## 0.6.3 Masaüstü düğüm programı (`cmd/mcos-node`)
+
+Sıradan bir Windows/Linux PC'yi ikinci MCOS düğümü yapar. MCOS kurmaya
+gerek yok.
+
+**Neden mümkün oldu:** `cluster`, `server`, `store`, `java`, `supervisor`
+paketlerinin hepsi Windows'a derleniyor (yalnızca `internal/daemon`
+derlenmiyor — `syscall.Sethostname`). Yani düğüm, mevcut kodun üzerine
+kuruldu; `cluster.LinkHost` arayüzünü uygulayan ince bir katman.
+
+```
+  MCOS kutusu                     Windows PC
+  ┌─────────────┐   linkSpec   ┌──────────────────┐
+  │ ortak dünya │─────────────▶│ mcos-node        │
+  │ aç          │   :2222      │  → sunucu kur    │
+  └─────────────┘              │  → Java indir    │
+                               │  → başlat        │
+                               └──────────────────┘
+```
+
+**Anahtarla eşleşme:** düğümde "şu makineyi eşleştir" diyecek bir panel yok.
+Kullanıcının elindeki tek kanıt, MCOS panelinde gördüğü anahtar. Doğru
+anahtarı sunan çağırıcı eşleşmiş sayılır (`Manager.SetOpenPairing`) — ve bu
+yol YALNIZCA düğüm programında açıktır, MCOS kutusunda kapalıdır.
+
+## 0.6.4 Kimlik artık addan bağımsız
+
+**Yakalanan gerçek hata:** kümede kimlik GÖRÜNEN ADLA belirleniyordu ve her
+kurulum kendine `mcos-1` diyordu. İki taze makine birbirini "kendisi" sanıyor,
+tarama "0 cihaz" diyor, elle IP girince "bu adres bu makinenin kendisi"
+hatası veriyordu. **PC eşleştirme varsayılan ayarlarla tamamen çalışmıyordu.**
+
+Artık kimlik, kurulumda bir kez üretilip diske yazılan rastgele bir değer
+(`internal/cluster/identity.go`). Ad yalnızca etiket.
+
+## 0.6.5 Telefon uygulaması (`app/mcos_app`)
+
+Flutter, Android. Tasarım panelin renklerini **birebir** kullanır
+(`lib/theme/palette.dart`, değerler `internal/fbui/theme.go`'dan alındı).
+
+Dört sekme: Durum, Sunucular (+ canlı konsol), SSH terminali, Ayarlar.
+
+> **DERLENMEDİ.** Flutter SDK geliştirme makinesinde yok. Yapılan denetim:
+> dengeli parantez, göreli import çözümlemesi, kullanılmayan import, ikiz
+> sınıf — 17 dosya, sorun yok. Bu "derlenir" demek DEĞİL.
+> Sunucu tarafı (`/health`, `/rpc`) gerçek daemon'a karşı sınandı ve çalışıyor.
+

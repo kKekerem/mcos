@@ -1,0 +1,94 @@
+# offline-manifest.txt — imaja gömülecek çevrimdışı sunucu paketi.
+#
+# Biçim:  <etiket>|<url>
+# Boş satırlar ve # ile başlayanlar yok sayılır.
+#
+# scripts/fetch-offline-bundle.sh bunları derleme zamanında indirir,
+# mcos-install ise kalıcı bölüme (/data/artifacts) tohumlar. Çalışma anında
+# internal/server/providers/offline.go ağa çıkmadan ÖNCE oraya bakar.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# ÖNEMLİ: MINECRAFT SUNUCU JAR'I BURADA YOK — VE OLAMAZ
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Mojang'ın EULA'sı bunu açıkça yasaklıyor:
+#
+#   "you must not distribute anything we've made unless we specifically agree
+#    to it... give copies of our game software or content to anyone else"
+#   "In order to ensure the integrity of our games, we need all game downloads
+#    and updates to come from a source that we authorize."
+#
+# Yani server.jar'ı imaja gömmek de, kendi sunucumuzda aynalamak da yasak.
+# Dosya Mojang'ın kendi uç noktasından (piston-data.mojang.com) indirilmek
+# ZORUNDA.
+#
+# PRATİKTE NE ANLAMA GELİYOR:
+#   • İlk sunucu kurulumu bir kez internet ister (53,7 MiB indirir).
+#   • O dosya /data/artifacts içine önbelleklenir.
+#   • Bundan SONRA aynı sürümden sunucu kurmak tamamen çevrimdışı çalışır.
+#   • Java, Fabric ve Via modları zaten imajla gelir — hiç indirilmez.
+#
+# Bu, yasal olarak ulaşılabilecek en iyi noktadır.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# HEDEF SÜRÜM: Minecraft 1.21.11
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Mojang manifestinde doğrulandı: 1.21.11, 2025-12-09'da yayımlandı ve
+# 1.21.x serisinin SON sürümü. Java 21 gerektirir. Mojang bundan sonra
+# takvim sürümlemesine geçti (26.1, 26.2...), bu yüzden 1.21.11 sabit ve
+# uzun ömürlü bir hedef.
+
+# ── Java 21 (Temurin JRE) ───────────────────────────────────────────────────
+#
+# Minecraft 1.21.11'in manifesti javaVersion.majorVersion=21 diyor.
+# Lisans: GPLv2 + Classpath İstisnası — imajda dağıtılabilir.
+# 49,6 MiB sıkıştırılmış / 157,6 MiB açılmış.
+jre21|https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_linux_hotspot_21.0.12.1_1.tar.gz
+
+# ── Fabric çalışma zamanı ───────────────────────────────────────────────────
+#
+# DİKKAT: meta.fabricmc.net'in "server/jar" uç noktası bir AĞ ÖNYÜKLEYİCİSİDİR
+# (178 KB) — içinde Fabric çalışma zamanı YOKTUR, ilk çalıştırmada her şeyi
+# indirir. Çevrimdışı bir imaja onu koymak, açılmayan bir sunucu demektir.
+# Bu yüzden parçaları TEK TEK indiriyoruz. Hepsi Apache-2.0.
+fabric-loader|https://maven.fabricmc.net/net/fabricmc/fabric-loader/0.19.5/fabric-loader-0.19.5.jar
+fabric-intermediary|https://maven.fabricmc.net/net/fabricmc/intermediary/1.21.11/intermediary-1.21.11.jar
+fabric-mixin|https://maven.fabricmc.net/net/fabricmc/sponge-mixin/0.17.4+mixin.0.8.7/sponge-mixin-0.17.4+mixin.0.8.7.jar
+fabric-mixinextras|https://maven.fabricmc.net/io/github/llamalad7/mixinextras-fabric/0.5.5/mixinextras-fabric-0.5.5.jar
+asm|https://maven.fabricmc.net/org/ow2/asm/asm/9.10.1/asm-9.10.1.jar
+asm-analysis|https://maven.fabricmc.net/org/ow2/asm/asm-analysis/9.10.1/asm-analysis-9.10.1.jar
+asm-commons|https://maven.fabricmc.net/org/ow2/asm/asm-commons/9.10.1/asm-commons-9.10.1.jar
+asm-tree|https://maven.fabricmc.net/org/ow2/asm/asm-tree/9.10.1/asm-tree-9.10.1.jar
+asm-util|https://maven.fabricmc.net/org/ow2/asm/asm-util/9.10.1/asm-util-9.10.1.jar
+
+# ── Sürüm uyumluluğu (eski istemciler bağlanabilsin) ────────────────────────
+#
+# ViaVersion Fabric'te ÇALIŞMAZ: o bir Bukkit/Paper eklentisidir ve Fabric'in
+# eklenti sistemi yoktur. Fabric karşılığı ViaFabric'tir ve ViaVersion'ı
+# kendi içinde barındırır.
+#
+# Yön önemlidir: ViaVersion tek başına YENİ istemcilerin ESKİ sunucuya
+# bağlanmasını sağlar. 1.21.11 sunucuya ESKİ istemcilerin bağlanması için
+# ViaBackwards (1.14+) ve ViaRewind (1.7/1.8) de gerekir.
+#
+# Hepsi mods/ dizinine konur. Lisanslar GPL-3.0; değiştirilmemiş jar'ları
+# imajda dağıtmak serbesttir (salt toplama), ancak istendiğinde kaynak
+# sağlanabilmelidir — sürümler burada kayıtlı.
+fabric-api|https://cdn.modrinth.com/data/P7dR8mSH/versions/6qAuTtLR/fabric-api-0.141.6%2B1.21.11.jar
+viafabric|https://cdn.modrinth.com/data/YlKdE5VK/versions/tUvNpHH0/ViaFabric-0.4.21%2B181-1.14-1.21.jar
+viabackwards|https://cdn.modrinth.com/data/NpvuJQoq/versions/GB5LJQxR/ViaBackwards-5.12.0-SNAPSHOT.jar
+viarewind|https://cdn.modrinth.com/data/TbHIxhx5/versions/FkS8Q0YI/ViaRewind-4.1.4-SNAPSHOT.jar
+
+# ── playit tünel ajanı ──────────────────────────────────────────────────────
+#
+# İkisi de statik-pie musl derlemesi: hiçbir libc bağımlılığı yok, Buildroot
+# rootfs'ine olduğu gibi düşer. CA sertifikası da gerekmez (rustls kök
+# sertifikaları ikiliye gömülü).
+#
+# DİKKAT: playit-linux-amd64 CLI DEĞİL, ARKA PLAN SERVİSİDİR (playitd).
+# 1.0 mimarisi ikiye bölünmüştür; ikisi de gerekir.
+#
+# Lisans: playit-agent deposu açık kaynak; imajda dağıtılabilir.
+playitd|https://github.com/playit-cloud/playit-agent/releases/download/v1.0.10/playit-linux-amd64
+playit-cli|https://github.com/playit-cloud/playit-agent/releases/download/v1.0.10/playit-cli-linux-amd64

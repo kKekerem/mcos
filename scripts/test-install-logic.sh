@@ -99,11 +99,22 @@ else
     # ifadeler içerdiği için ham grep yanlış pozitif verir.
     CODE="$(grep -v '^[[:space:]]*#' "$INSTALL")"
 
-    # 4a. Çekirdeğe root= HİÇ verilmemeli: initramfs içindeki /init PID 1 olur
-    #     ve root= zaten yok sayılır. Yazmak yanlış beklenti yaratır ve eski
+    # 4a. ÇEKİRDEĞİN root= parametresi HİÇ verilmemeli.
+    #
+    #     Sistem initramfs'ten açılır; oradaki /init PID 1 olur ve çekirdek
+    #     root='u zaten yok sayar. Yazmak yanlış beklenti yaratır ve eski
     #     "root=LABEL=" panic'inin geri gelmesine kapı açar.
-    check "root= hic kullanilmiyor" \
-          "$(printf '%s\n' "$CODE" | grep -c 'root=' || true)" "0"
+    #
+    #     DİKKAT — "mcos.root=" BAŞKA BİR ŞEYDİR ve serbesttir: o bizim kendi
+    #     parametremizdir, /init onu okuyup diske switch_root yapar
+    #     (kalıcılık). Bu yüzden yalnızca SÖZCÜK BAŞINDAKİ root= aranır;
+    #     aksi halde "mcos.root=" de yanlışlıkla eşleşirdi.
+    check "cekirdek root= parametresi kullanilmiyor" \
+          "$(printf '%s\n' "$CODE" | grep -cE '(^|[[:space:]"])root=' || true)" "0"
+
+    # 4a-2. Kendi kalıcılık parametremiz ise VAR olmalı.
+    check "mcos.root= kalicilik parametresi var" \
+          "$(printf '%s\n' "$CODE" | grep -c 'mcos\.root=' || true)" "1"
 
     # 4b. grub.cfg initrd YÜKLEMELİ (modelin çekirdeği). Normal + kurtarma
     #     girdisi = 2 satır.

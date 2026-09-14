@@ -261,9 +261,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, nil
 	case setupDoneMsg:
+		// Ayarlar KAYDEDİLDİ. Sihirbaz burada BİTMEZ: son adım diske
+		// kurulumdur.
+		//
+		// Sıra bilerek böyle: önce her şey toplanıp kaydedilir, SONRA
+		// kurulum yapılır. Eskiden tersiydi — kurulum 5. adımdaydı ve hemen
+		// yeniden başlatıyordu, bu yüzden hiçbir ayar kaydedilmiyordu ve
+		// mcos-install henüz var olmayan bir config.json'ı kopyalamaya
+		// çalışıyordu.
+		if a.setup != nil && a.setup.step != stepInstall {
+			a.setup.saving = false
+			a.setup.goTo(stepInstall)
+			a.setup.disksLoading = true
+			a.flash = "ayarlar kaydedildi — son adım: diske kurulum"
+			return a, doFetchDisks(a.cl)
+		}
 		startServer := a.setup != nil && a.setup.startServer
 		a.setup = nil
-		a.flash = "✓ kurulum tamamlandı"
+		a.flash = "kurulum tamamlandı"
 		if startServer {
 			a.openWizard()
 			return a, tea.Batch(fetchConfig(a.cl), fetchStatus(a.cl), doFetchVersions(a.cl, ""))

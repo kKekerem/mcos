@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"mcos/internal/files"
@@ -145,7 +147,42 @@ func (d *Daemon) handleConfigSet(_ context.Context, raw json.RawMessage) (any, e
 
 	// cluster.enabled çalışma zamanında değişebilir; portu buna göre aç/kapat.
 	d.applyClusterFromConfig()
+
+	// PC adini GERCEKTEN uygula. Yalnizca kaydetmek yetmez: kullanici
+	// sihirbazda "salon-pc" yazip Donanim sekmesinde hala "mcos"
+	// goruyordu. Hata olursa kaydetme basarisiz sayilmaz - ad diskte
+	// duruyor ve bir sonraki acilista uygulanir.
+	d.applyHostname(cfg.Hostname)
 	return ipc.OKResult{OK: true}, nil
+}
+
+// applyHostname sets the system hostname now and makes it survive a reboot.
+//
+// Iki adim birden gerekir: sethostname() calisan sistemi degistirir ama
+// reboot'ta kaybolur; /etc/hostname acilista okunur ama calisan sistemi
+// degistirmez.
+func (d *Daemon) applyHostname(name string) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	// Guvenlik: yalnizca gecerli ana makine adi karakterleri.
+	for _, r := range name {
+		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '.'
+		if !ok {
+			d.log.Errorf("daemon: gecersiz PC adi %q - uygulanmadi", name)
+			return
+		}
+	}
+	if err := os.WriteFile("/etc/hostname", []byte(name+"\n"), 0o644); err != nil {
+		d.log.Errorf("daemon: /etc/hostname yazilamadi: %v", err)
+	}
+	if err := syscall.Sethostname([]byte(name)); err != nil {
+		d.log.Errorf("daemon: hostname uygulanamadi: %v", err)
+		return
+	}
+	d.log.Infof("daemon: PC adi %q olarak ayarlandi", name)
 }
 
 func (d *Daemon) handleServerList(_ context.Context, _ json.RawMessage) (any, error) {
@@ -304,6 +341,9 @@ func (d *Daemon) handleServerCreate(_ context.Context, raw json.RawMessage) (any
 		if err := d.servers.EnsureInstalled(context.Background(), s); err != nil {
 			d.log.Errorf("daemon: auto-install %q failed: %v", s.Name, err)
 		}
+		// Ortak dunya eklentisi HER sunucuya kurulur: kullanici onu
+		// sonradan actiginda sunucuyu yeniden kurmak gerekmesin.
+		d.ensureLinkArtifact(s)
 	}(srv.Clone())
 
 	return ipc.ServerResult{Server: srv}, nil
@@ -418,6 +458,13 @@ func (d *Daemon) handleServerStart(ctx context.Context, raw json.RawMessage) (an
 		srv.FullPerf = true
 		srv.CPUQuota = 0
 		srv.JVMFlags = java.ProfileTurbo
+		// Cekirdek sabitlemesini de KALDIR.
+		//
+		// Eskiden yapilandirmadaki yorum "turbo sunuculari tum cekirdeklerde
+		// calistirir" diyordu ama kod bunu YAPMIYORDU: onceden konulmus bir
+		// affinity maskesi turbo acikken de yerinde kaliyor, sunucu birkac
+		// cekirdege hapsolmus halde "turbo" calisiyordu.
+		srv.CPUAffinity = nil
 	}
 	if err := d.servers.Start(ctx, srv); err != nil {
 		// Kullanıcıya Türkçe, eyleme dönüştürülebilir mesaj; teknik ayrıntı

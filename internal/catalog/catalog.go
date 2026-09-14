@@ -16,12 +16,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"mcos/internal/version"
 )
 
 const apiBase = "https://api.modrinth.com/v2"
 
 // userAgent is required by Modrinth's API etiquette.
-const userAgent = "mcos/0.1.0 (Minecraft Server OS)"
+const userAgent = version.UserAgent
 
 // Project is a single Modrinth search hit.
 type Project struct {

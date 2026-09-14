@@ -46,6 +46,20 @@ type Spec struct {
 	// CPUAffinity pins the process to specific CPU cores (Linux only). Empty =
 	// all cores.
 	CPUAffinity []int
+
+	// ID, kaynak grubunu (cgroup) adlandirmak icin kullanilir. Bos ise
+	// cgroup olusturulmaz.
+	ID string
+	// Limits, ISLETIM SISTEMI duzeyinde uygulanan kaynak tavanidir.
+	//
+	// -Xmx'ten FARKLIDIR: -Xmx yalnizca JVM yiginini sinirlar, bu ise
+	// surecin TAMAMINI sinirlar. Eskiden "sunucu basina CPU payi" ayari
+	// hicbir yerde uygulanmiyordu; artik burada uygulaniyor.
+	Limits Limits
+	// OnLimits, uygulanan sinirlari bildirir (bos = sinir yok). Cagiran
+	// bunu kullaniciya gosterir: "kayitli" ile "uygulaniyor" arasindaki
+	// farkin GORULEBILMESI gerekir.
+	OnLimits func(desc string)
 }
 
 // Process is a single supervised child.
@@ -149,12 +163,29 @@ func (p *Process) Start() error {
 	// Apply OS scheduling limits (nice / CPU affinity). No-op off Linux.
 	applyLimits(p.pid, p.spec)
 
+	// Kaynak grubunu sureci baslatir baslatmaz uygula. Once sinirlari kur,
+	// sonra sureci gruba tasi (ApplyCgroup bu sirayi kendisi korur), yoksa
+	// surec kisa bir sure sinirsiz calisir.
+	if p.spec.ID != "" {
+		if desc := ApplyCgroup(p.spec.ID, p.pid, p.spec.Limits); desc != "" {
+			if p.spec.OnLimits != nil {
+				p.spec.OnLimits(desc)
+			}
+		}
+	}
+
 	go p.wait(lw)
 	return nil
 }
 
 func (p *Process) wait(lw *lineWriter) {
 	err := p.cmd.Wait()
+
+	// Kaynak grubunu temizle. Yapilmazsa her baslatma bos bir cgroup dizini
+	// birakir; binlerce bos grup cekirdek bellegini bosa harcar.
+	if p.spec.ID != "" {
+		RemoveCgroup(p.spec.ID)
+	}
 
 	p.mu.Lock()
 	code := 0

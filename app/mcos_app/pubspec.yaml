@@ -1,0 +1,57 @@
+name: mcos_app
+description: "MCOS uzaktan kontrol — sunucunuzu telefondan yönetin."
+
+# publish_to: uygulamayı pub.dev'e yayınlamıyoruz; bu satır olmazsa
+# "flutter pub publish" kazayla çalışabilir.
+publish_to: "none"
+
+version: 1.0.1+1
+
+environment:
+  # 3.6 / Flutter 3.27: Color.withValues() bu surumle geldi ve kod onu
+  # kullaniyor. Daha eski bir Flutter ile DERLENMEZ.
+  #
+  # withOpacity() ile geriye uyumlu yazilabilirdi, ama o yontem artik
+  # kullanimdan kaldiriliyor ve yeni kurulan her Flutter zaten 3.27 uzeri.
+  sdk: ">=3.6.0 <4.0.0"
+  flutter: ">=3.27.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # ── Neden bu üç paket, daha fazlası değil ────────────────────────────────
+  # Her bağımlılık, ileride kırılabilecek bir yüzeydir. HTTPS için hiçbir
+  # paket kullanmıyoruz: dart:io'nun HttpClient'ı sertifika sabitlemeyi
+  # (pinning) zaten destekliyor ve bize tam denetim veriyor.
+
+  # SSH istemcisi. Saf Dart: yerel kod (NDK) derlemesi gerektirmez, yani
+  # uygulama her Android mimarisinde aynı şekilde çalışır.
+  dartssh2: ^2.9.0
+
+  # Terminal görünümü. SSH oturumunu gerçek bir terminal gibi gösterir
+  # (renkler, imleç, geçmiş). Kendi terminalimizi yazmak, kaçış dizilerini
+  # baştan uygulamak demekti.
+  xterm: ^4.0.0
+
+  # Jeton ve SSH parolası için şifreli depolama.
+  #
+  # NEDEN shared_preferences DEĞİL: shared_preferences düz XML dosyasına
+  # yazar. Uzaktan kontrol jetonu sunucunun TAM DENETİMİNİ verir; onu düz
+  # metin saklamak, telefonu eline geçiren birine sunucuyu da vermek olurdu.
+  # Bu paket Android'de EncryptedSharedPreferences kullanır.
+  flutter_secure_storage: ^9.2.2
+
+  # SHA-256: sertifika parmak izini hesaplamak icin. dart:io sertifikanin
+  # DER baytlarini verir ama ozetini almaz.
+  crypto: ^3.0.5
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

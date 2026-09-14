@@ -149,13 +149,13 @@ func (a *App) renderNetwork(w, h int) string {
 	return a.contentFrame(w, h, "Ağ", b.String())
 }
 
-// renderTunnel shows the Serveo tunnels (the cloudflared replacement). Tunnels
+// renderTunnel shows the public tunnels. Serveo yerine playit'e geçiliyor;
 // are opened automatically when a server enables WAN access; each one is an
 // `ssh -R … serveo.net` process whose public address is parsed from its output.
 func (a *App) renderTunnel(w, h int) string {
 	th := a.th
 	var b strings.Builder
-	b.WriteString(th.CardTitle.Render("◇ İnternete Açık Tüneller (Serveo)") + "\n")
+	b.WriteString(th.CardTitle.Render("◇ İnternete Açık Tüneller (playit)") + "\n")
 	if len(a.tunnels) == 0 {
 		b.WriteString(th.Muted.Render("henüz tünel yok — bir sunucuyu 'WAN' ile açtığınızda otomatik kurulur") + "\n")
 	} else {
@@ -175,9 +175,9 @@ func (a *App) renderTunnel(w, h int) string {
 			}
 		}
 	}
-	b.WriteString("\n" + th.Muted.Render("Serveo ssh üzerinden çalışır — ek kurulum/indirme yok."))
+	b.WriteString("\n" + th.Muted.Render("playit ajanı imajla gelir. İlk kullanımda bir kez telefondan onay gerekir; sonrası otomatiktir."))
 	b.WriteString("\n" + th.Muted.Render("Sunucu detayından 'İnternete Aç' sekmesi ile yönetebilirsiniz."))
-	return a.contentFrame(w, h, "Tünel (Serveo)", b.String())
+	return a.contentFrame(w, h, "Tünel (playit)", b.String())
 }
 
 func (a *App) renderPeers(w, h int) string {

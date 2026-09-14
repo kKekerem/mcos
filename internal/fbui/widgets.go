@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"image/draw"
 	"math"
+	"strings"
 
 	"mcos/internal/fbdraw"
 	"mcos/internal/fbfont"
@@ -42,6 +43,18 @@ func (u *UI) Clear() { u.P.Fill(u.dst.Bounds(), u.Pal.Bg) }
 // cubugun yeri); dst alanini disari acmadan yalnizca sinirlari veriyoruz.
 func (u *UI) Bounds() image.Rectangle { return u.dst.Bounds() }
 
+// Canvas returns the image being drawn into.
+//
+// Geçiş efektleri (fbdraw.CrossFade, SlideBlend, Zoom) tuvalin KENDİSİNİ
+// ister: pikselleri karıştırmak için widget katmanından geçmenin anlamı yok.
+func (u *UI) Canvas() *image.RGBA { return u.dst }
+
+// Pix returns the raw pixel buffer (RGBA, 4 bytes per pixel).
+//
+// Kare kopyalamak için: copy(dst, u.Pix()) tek bir memmove'dur; piksel piksel
+// dolaşmak 2 milyon çağrı demektir.
+func (u *UI) Pix() []uint8 { return u.dst.Pix }
+
 // ── Metin ───────────────────────────────────────────────────────────────────
 
 // Text draws s with its LEFT edge at x and its CELL TOP at y.
@@ -63,6 +76,65 @@ func (u *UI) TextRight(x, y int, s string, c color.RGBA) {
 func (u *UI) TextCenter(x0, x1, y int, s string, c color.RGBA) {
 	w := u.TextWidth(s)
 	u.Text(x0+(x1-x0-w)/2, y, s, c)
+}
+
+// WrapLines breaks s into lines that fit maxWidth pixels.
+//
+// ── Neden gerekli? ──────────────────────────────────────────────────────────
+// Sabit genişlikte bir alana uzun bir açıklama yazmak, metnin panelin
+// kenarından TAŞMASINA ve komşu sütunun üstüne binmesine yol açar. Kesmek
+// (…) bilgiyi kaybettirir; kaydırmak kaybettirmez.
+//
+// Kelime sınırında kırar; tek bir kelime satıra sığmıyorsa (uzun bir URL
+// gibi) onu zorla böler — aksi halde yine taşardı.
+func (u *UI) WrapLines(s string, maxWidth int) []string {
+	cols := maxWidth / u.F.CellW
+	if cols < 4 {
+		cols = 4
+	}
+	var out []string
+	for _, para := range strings.Split(s, "\n") {
+		words := strings.Fields(para)
+		if len(words) == 0 {
+			out = append(out, "")
+			continue
+		}
+		line := ""
+		for _, w := range words {
+			cand := w
+			if line != "" {
+				cand = line + " " + w
+			}
+			if len([]rune(cand)) <= cols {
+				line = cand
+				continue
+			}
+			if line != "" {
+				out = append(out, line)
+				line = ""
+			}
+			// Tek kelime sığmıyorsa zorla böl.
+			r := []rune(w)
+			for len(r) > cols {
+				out = append(out, string(r[:cols]))
+				r = r[cols:]
+			}
+			line = string(r)
+		}
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// TextWrap draws word-wrapped text and returns the y just past the last line.
+func (u *UI) TextWrap(x, y, maxWidth int, s string, c color.RGBA) int {
+	for _, line := range u.WrapLines(s, maxWidth) {
+		u.Text(x, y, line, c)
+		y += u.F.CellH
+	}
+	return y
 }
 
 // TextWidth returns the pixel width of s on the cell grid.
@@ -202,14 +274,20 @@ func (u *UI) Button(x, y int, label, key string, style ButtonStyle, focused bool
 	return image.Rect(x, y, x+w, y+h)
 }
 
-// ButtonRow lays buttons left to right and returns the total width used.
-func (u *UI) ButtonRow(x, y int, btns []Btn, focusIdx int) int {
+// ButtonRow lays buttons left to right and returns each button's rectangle.
+//
+// DİKDÖRTGENLERİ DÖNDÜRÜR çünkü fare desteği bunu ister: tıklanabilir alan,
+// çizilen alanla AYNI olmak zorundadır. İkisini ayrı hesaplamak, düzen
+// değiştiğinde sessizce kayan tıklama alanları demektir.
+func (u *UI) ButtonRow(x, y int, btns []Btn, focusIdx int) []image.Rectangle {
+	out := make([]image.Rectangle, 0, len(btns))
 	cur := x
 	for i, b := range btns {
 		r := u.Button(cur, y, b.Label, b.Key, b.Style, i == focusIdx)
+		out = append(out, r)
 		cur = r.Max.X + u.M.Gap*2
 	}
-	return cur - x
+	return out
 }
 
 // Btn describes one button in a row.
@@ -323,6 +401,37 @@ func (u *UI) StatusDot(x, y int, c color.RGBA) {
 	cy := float64(y) + float64(u.F.CellH)/2
 	u.P.FillCircle(cx, cy, u.M.MarkerR*1.5, fbdraw.Alpha(c, 0.25))
 	u.P.FillCircle(cx, cy, u.M.MarkerR*0.75, c)
+}
+
+// WarnTriangle draws a filled warning triangle in one cell.
+//
+// Font glifi DEĞİL: gömülü yazı tipinde uyarı işareti yok (bkz. font_test.go).
+// Çizilmiş üçgen her boyutta aynı görünür ve satır hizasını kaydırmaz.
+func (u *UI) WarnTriangle(x, y int, c color.RGBA) {
+	cx := float64(x) + float64(u.F.CellW)/2
+	cy := float64(y) + float64(u.F.CellH)/2
+	r := float64(u.F.CellH) * 0.40
+	u.P.FillPolygon([]fbdraw.Pt{
+		{X: cx, Y: cy - r},
+		{X: cx + r*0.92, Y: cy + r*0.72},
+		{X: cx - r*0.92, Y: cy + r*0.72},
+	}, c)
+}
+
+// RowDimmed draws a list row highlight that means "this is the current
+// section, but the keyboard is somewhere else".
+//
+// NEDEN: kullanıcı soldaki menüden sağa geçince hangisinin AKTİF olduğu belli
+// olmuyordu — iki taraf da aynı parlaklıkta vurgulanıyordu. Artık odak
+// neredeyse orası parlak, diğeri soluk kalıyor.
+func (u *UI) RowDimmed(r image.Rectangle) int {
+	u.P.FillRoundRect(
+		fbdraw.R(float64(r.Min.X), float64(r.Min.Y), float64(r.Dx()), float64(r.Dy())),
+		u.M.RadiusSmall, fbdraw.Blend(u.Pal.Bg, u.Pal.Raised, 0.55))
+	u.P.FillRoundRect(
+		fbdraw.R(float64(r.Min.X), float64(r.Min.Y)+2, u.M.StrokeFocus*1.5, float64(r.Dy())-4),
+		u.M.StrokeFocus*0.75, fbdraw.Alpha(u.Pal.Accent, 0.45))
+	return r.Min.X + u.M.PadX
 }
 
 // Badge draws a small rounded pill with text.

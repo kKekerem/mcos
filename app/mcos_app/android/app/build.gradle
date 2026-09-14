@@ -1,0 +1,55 @@
+plugins {
+    id "com.android.application"
+    id "kotlin-android"
+    // Flutter eklentisi SON sırada olmalı: Android ve Kotlin eklentilerine
+    // dayanır ve onlardan önce uygulanırsa yapılandırma hatası verir.
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
+android {
+    namespace = "gg.mcos.app"
+
+    // flutter.compileSdkVersion: Flutter SDK'nın önerdiği sürüm. Sabit bir
+    // sayı yazmak, Flutter güncellendiğinde eklentilerle uyumsuzluk üretir.
+    compileSdk = flutter.compileSdkVersion
+
+    // NDK sürümü: bazı eklentiler (flutter_secure_storage dahil) belirli bir
+    // NDK ister. Flutter'ın önerdiğini kullanmak, "NDK sürümü uyuşmuyor"
+    // hatasını önler.
+    ndkVersion = flutter.ndkVersion
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = JavaVersion.VERSION_17.toString()
+    }
+
+    defaultConfig {
+        applicationId = "gg.mcos.app"
+
+        // minSdk 23 (Android 6.0): flutter_secure_storage'ın
+        // EncryptedSharedPreferences desteği 23'ten itibaren çalışıyor.
+        // Daha eskisi, jetonu şifresiz saklamak demekti.
+        minSdk = 23
+        targetSdk = flutter.targetSdkVersion
+
+        versionCode = flutter.versionCode
+        versionName = flutter.versionName
+    }
+
+    buildTypes {
+        release {
+            // İmzalama: şimdilik hata ayıklama anahtarıyla, böylece
+            // "flutter build apk --release" bir anahtar deposu kurmadan
+            // çalışır. Mağazaya yüklemeden önce gerçek bir anahtar gerekir.
+            signingConfig = signingConfigs.debug
+        }
+    }
+}
+
+flutter {
+    source = "../.."
+}

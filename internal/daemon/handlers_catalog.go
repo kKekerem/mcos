@@ -130,6 +130,9 @@ func (d *Daemon) handleServerChangeVersion(ctx context.Context, raw json.RawMess
 		if err := d.servers.EnsureInstalled(context.Background(), s); err != nil {
 			d.log.Errorf("daemon: re-install after version change failed: %v", err)
 		}
+		// Ortak dunya eklentisi HER sunucuya kurulur: kullanici onu
+		// sonradan actiginda sunucuyu yeniden kurmak gerekmesin.
+		d.ensureLinkArtifact(s)
 	}(srv.Clone())
 
 	return ipc.OKResult{OK: true, Message: fmt.Sprintf("%s %s kuruluyor", srv.Software, srv.MCVersion)}, nil

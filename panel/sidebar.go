@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"mcos/internal/model"
+	"mcos/internal/version"
 	"mcos/panel/theme"
 )
 
@@ -30,7 +31,7 @@ var sectionNames = []string{
 	"Performans",
 	"Donanım",
 	"Ağ",
-	"Tünel (Serveo)",
+	"Tünel (playit)",
 	"MCOS Paylaşım",
 	"Ayarlar",
 }
@@ -150,5 +151,5 @@ func appVersion(st *model.SystemStatus) string {
 	if st != nil && st.Version != "" {
 		return st.Version
 	}
-	return "0.1.0"
+	return version.Version
 }

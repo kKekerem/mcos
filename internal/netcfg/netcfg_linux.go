@@ -80,6 +80,65 @@ func apply(ssid, pass string) error {
 	return nil
 }
 
+// defaultRegDomain is the regulatory domain applied when none is active.
+//
+// TR seçildi çünkü cihaz Türkiye'de kullanılıyor. Yanlış bir alan seçmek
+// yasal bir sorun değil pratik bir sorundur: fazla kısıtlı bir alan kanalları
+// kapatır, fazla geniş bir alan kartın kullanamayacağı kanalları açar.
+const defaultRegDomain = "TR"
+
+// SetRegulatoryDomain applies a wireless regulatory domain.
+//
+// ── NEDEN GEREKLİ ───────────────────────────────────────────────────────────
+// Kullanıcı şikâyeti: "wifi çalışıyor ama ağları görmüyor."
+//
+// Çekirdek CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y ile derleniyor, yani
+// cfg80211 /lib/firmware/regulatory.db (+ .p7s imzası) yüklemek ZORUNDA.
+// O dosyalar imajda YOKTU; sonuçta hiçbir alan yüklenemiyor ve çekirdek
+// gömülü "00" (dünya dolaşımı) alanına düşüyordu.
+//
+// "00" alanında kanalların çoğu NO-IR işaretlidir: kart o kanallarda AKTİF
+// tarama yapamaz, yalnızca pasif dinler. 5 GHz'in tamamı bu durumdadır.
+// Belirti tam olarak buydu — kart çalışıyor, arayüz UP oluyor, tarama boş.
+//
+// Veritabanı artık imajda (BR2_PACKAGE_WIRELESS_REGDB). Ama tek başına
+// yetmez: alanın UYGULANMASI da gerekir, yoksa çekirdek yine "00" ile
+// başlar. wpa_supplicant.conf'taki "country=TR" satırı yalnızca supplicant
+// çalışırken etkilidir; taramadan önce burada açıkça ayarlıyoruz.
+func SetRegulatoryDomain(code string) error {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if len(code) != 2 {
+		return fmt.Errorf("netcfg: geçersiz ülke kodu %q", code)
+	}
+	// iw tercih edilir (nl80211); wireless-tools yedeği eski kartlar için.
+	if err := run("iw", "reg", "set", code); err == nil {
+		return nil
+	}
+	return run("iwconfig", "reg", code)
+}
+
+// regDomainActive reports the currently active domain, or "" if unknown.
+//
+// "00" dönmesi, veritabanının yüklenemediği anlamına gelir — arayüz bunu
+// kullanıcıya söyleyebilmeli, çünkü "ağ göremiyorum" şikâyetinin en olası
+// sebebi budur.
+func regDomainActive() string {
+	out, err := output("iw", "reg", "get")
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "country ") {
+			f := strings.Fields(line)
+			if len(f) >= 2 {
+				return strings.TrimSuffix(f[1], ":")
+			}
+		}
+	}
+	return ""
+}
+
 func scan() ([]Network, error) {
 	_ = os.MkdirAll("/var/run/wpa_supplicant", 0755)
 	_ = os.MkdirAll("/run/wpa_supplicant", 0755)
@@ -89,6 +148,17 @@ func scan() ([]Network, error) {
 	_ = run("rfkill", "unblock", "wifi")
 	_ = run("rfkill", "unblock", "wlan")
 	time.Sleep(500 * time.Millisecond)
+
+	// DÜZENLEYİCİ ALANI TARAMADAN ÖNCE AYARLA.
+	//
+	// Aktif alan "00" ise (veya hiç yoksa) kanalların çoğu aktif taramaya
+	// kapalıdır ve tarama boş döner. Bu satır o durumu düzeltir.
+	if d := regDomainActive(); d == "" || d == "00" {
+		if err := SetRegulatoryDomain(defaultRegDomain); err == nil {
+			// Çekirdeğin kanal listesini yeniden hesaplaması için kısa bir an.
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
 
 	ifaces := wirelessIfaces()
 

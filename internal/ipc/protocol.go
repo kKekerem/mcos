@@ -52,6 +52,19 @@ const (
 const (
 	MethodPing = "ping"
 
+	// Uzaktan kontrol: telefon uygulamasinin bagli oldugu HTTPS koprusu.
+	MethodRemoteStatus  = "remote.status"
+	MethodRemoteEnable  = "remote.enable"
+	MethodRemoteDisable = "remote.disable"
+	MethodRemoteRotate  = "remote.rotate"
+
+	// SSH: kabuk erisimi.
+	MethodSSHStatus   = "ssh.status"
+	MethodSSHEnable   = "ssh.enable"
+	MethodSSHDisable  = "ssh.disable"
+	MethodSSHPassword = "ssh.password"
+	MethodSSHAddKey   = "ssh.addKey"
+
 	MethodSystemStatus  = "system.status"
 	MethodSystemPower   = "system.power"   // poweroff | reboot
 	MethodSystemTurbo   = "system.turbo"   // toggle global turbo mode
@@ -116,6 +129,29 @@ const (
 	MethodClusterPeers = "cluster.peers"
 	MethodClusterPair  = "cluster.pair"
 	MethodClusterTasks = "cluster.tasks"
+
+	// Etkin tarama ve elle eşleştirme.
+	//
+	// NEDEN GEREKLİ: pasif multicast keşfi ev modemlerinin çoğunda
+	// (istemci yalıtımı) çalışmaz. Kullanıcı "otomatik ağda tarasın,
+	// bulamazsak IP girelim" dedi; bu iki metot tam olarak odur.
+	MethodClusterScan       = "cluster.scan"
+	MethodClusterPairManual = "cluster.pairManual"
+	MethodClusterSecret     = "cluster.secret"
+
+	// MCOS Link — birden çok PC'nin aynı dünyayı çalıştırması.
+	MethodLinkStatus  = "link.status"
+	MethodLinkEnable  = "link.enable"
+	MethodLinkDisable = "link.disable"
+	MethodLinkEvents  = "link.events"
+
+	// playit tünel ajanı.
+	MethodPlayitStatus  = "playit.status"
+	MethodPlayitClaim   = "playit.claim"   // hesap bağlama akışını başlat
+	MethodPlayitPoll    = "playit.poll"    // bağlama tamamlandı mı?
+	MethodPlayitStart   = "playit.start"   // ajanı başlat
+	MethodPlayitStop    = "playit.stop"    // ajanı durdur
+	MethodPlayitInstall = "playit.install" // ikilileri kur/doğrula
 
 	MethodNetWiFiScan  = "net.wifiScan"  // scan for nearby access points
 	MethodNetWiFiApply = "net.wifiApply" // connect + persist a wifi network

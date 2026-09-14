@@ -55,6 +55,25 @@ BR2_TARGET_GRUB2_INSTALL_TOOLS=y
 # diskte .mod dosyasi aramamali.
 BR2_TARGET_GRUB2_BUILTIN_MODULES_PC="biosdisk part_msdos part_gpt fat ext2 normal configfile linux boot search search_fs_file search_label echo test all_video vbe vga gfxterm minicmd sleep reboot halt"
 BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="part_gpt part_msdos fat ext2 normal configfile linux boot search search_fs_file search_label echo test all_video efi_gop efi_uga gfxterm minicmd sleep reboot halt"
+# ── KABLOSUZ DÜZENLEYİCİ VERİTABANI — "Wi-Fi çalışıyor ama ağ görmüyor" ─────
+#
+# Bu paket YOKTU ve sebep tam olarak buydu.
+#
+# Çekirdek CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y ile derleniyor: cfg80211,
+# /lib/firmware/regulatory.db ve .p7s imzasını YÜKLEMEK ZORUNDA. Dosyalar
+# yoksa hiçbir düzenleyici alan yüklenemez ve çekirdek gömülü "00" (dünya
+# dolaşımı) alanına düşer.
+#
+# "00" alanında kanalların çoğu NO-IR işaretlidir: kart o kanallarda AKTİF
+# tarama yapamaz, yalnızca pasif dinleyebilir. 5 GHz'in tamamı ve 2.4 GHz'in
+# bir kısmı bu duruma girer. Sonuç kullanıcının gördüğü şeydir: Wi-Fi kartı
+# çalışır, arayüz UP olur, ama tarama boş döner veya yalnızca bir iki ağ
+# gösterir.
+#
+# Ayrıca netcfg wpa_supplicant.conf'a "country=TR" yazıyor — o satır da bu
+# veritabanı olmadan hiçbir işe yaramaz, çünkü TR alanını arayacağı tablo yok.
+BR2_PACKAGE_WIRELESS_REGDB=y
+
 BR2_PACKAGE_LINUX_FIRMWARE=y
 BR2_PACKAGE_LINUX_FIRMWARE_WHENCE=y
 BR2_PACKAGE_LINUX_FIRMWARE_BNX2=y

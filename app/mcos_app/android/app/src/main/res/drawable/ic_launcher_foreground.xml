@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Uyarlanabilir simgede guvenli alan ortadaki 72x72'dir; bloklar
+         o alanin icinde kaliyor ki hicbir launcher onlari kirpmasin. -->
+
+    <!-- sol alt blok -->
+    <path
+        android:fillColor="#8C23A99C"
+        android:pathData="M28,58 h24 a5,5 0 0 1 5,5 v24 a5,5 0 0 1 -5,5 h-24 a5,5 0 0 1 -5,-5 v-24 a5,5 0 0 1 5,-5 z" />
+    <!-- sag alt blok -->
+    <path
+        android:fillColor="#CC23A99C"
+        android:pathData="M56,58 h24 a5,5 0 0 1 5,5 v24 a5,5 0 0 1 -5,5 h-24 a5,5 0 0 1 -5,-5 v-24 a5,5 0 0 1 5,-5 z" />
+    <!-- ust blok -->
+    <path
+        android:fillColor="#FF23A99C"
+        android:pathData="M42,16 h24 a5,5 0 0 1 5,5 v24 a5,5 0 0 1 -5,5 h-24 a5,5 0 0 1 -5,-5 v-24 a5,5 0 0 1 5,-5 z" />
+</vector>

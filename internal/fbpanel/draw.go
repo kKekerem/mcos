@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"strings"
 	"time"
 
 	"mcos/internal/fbdraw"
 	"mcos/internal/fbui"
 	"mcos/internal/model"
+	"mcos/internal/version"
 )
 
 // Draw paints the whole screen.
@@ -23,17 +23,52 @@ import (
 //	│ canlı olay              kısayollar        │  <- alt çubuk
 //	└───────────────────────────────────────────┘
 //
-// Eski panelle AYNI yerleşim. Alt çubuk yeni: kullanıcı "altta biraz alan
-// olacak oradan girdiğimiz yerin kısayolu ve şu an olan şey olacak" dedi.
+// Eski panelle AYNI yerleşim. Alt çubuk yeni.
+//
+// ── ODAK ────────────────────────────────────────────────────────────────────
+// Kullanıcı "soldaki menüden sağa geçince hangisinin aktif olduğu belli
+// olmuyor" dedi. Artık odak ÜÇ ayrı işaretle belli olur:
+//
+//  1. Odaklı sütunun paneli vurgu renginde ve KALIN çerçeveli.
+//  2. Odaksız sütundaki seçili satır SOLUK vurgulanır (RowDimmed).
+//  3. Ok işareti (chevron) yalnızca odaklı sütunda çizilir.
+//
+// Üçü birden: renk körlüğünde bile fark edilir.
 func (a *App) Draw() {
 	u := a.ui
 	b := u.Bounds()
 
+	// Tıklanabilir alanlar HER KARE yeniden kurulur. Eski kareden kalan bir
+	// dikdörtgen, ekran değiştikten sonra yanlış eylemi tetiklerdi.
+	a.resetZones()
+
 	if a.Asleep() {
 		// Uykuda hiçbir şey çizilmez: ekran tamamen siyah.
-		// Donanım gerçekten karartılamıyorsa (efifb/simpledrm) görsel etki
-		// budur; cmd katmanı ayrıca FBIOBLANK dener.
 		u.P.Fill(b, color.RGBA{A: 255})
+		return
+	}
+
+	// Kilit ekranı HER ŞEYİN ÖNÜNDE: parola girilmeden altındaki hiçbir
+	// şey çizilmez. (Altını çizip üstüne pencere koymak, ekran görüntüsü
+	// alan birine sistem durumunu sızdırırdı.)
+	if a.Locked() {
+		a.drawLock(b)
+		if x, y, ok := a.PointerPos(); ok {
+			u.Cursor(x, y)
+		}
+		return
+	}
+
+	// Sihirbazlar kendi düzenlerini çizer (kenar çubuğu yok).
+	//
+	// SIRA: ilk kurulum önce gelir. İkisi birden açıksa (olmamalı) ilk
+	// kurulum daha temel olandır.
+	if s := a.setupState(); s != nil {
+		a.drawSetup(s, b)
+		return
+	}
+	if w := a.wizardState(); w != nil {
+		a.drawWizard(w, b)
 		return
 	}
 
@@ -53,6 +88,9 @@ func (a *App) Draw() {
 	a.drawContent(main)
 
 	// Açılır pencere en üstte, arkası bulanık.
+	//
+	// Perde bir kez hesaplanıp saklanır: 1080p bulanıklık ~50 ms sürüyor,
+	// her karede yapmak arayüzü dondururdu.
 	if m := a.ActiveModal(); m != nil {
 		if !a.scrim.Restore(u) {
 			a.scrim.Capture(u)
@@ -63,22 +101,72 @@ func (a *App) Draw() {
 		m.Draw(a, in)
 	}
 
-	u.StatusBar(a.LastEvent(), a.shortcuts(), a.spinFrame())
+	keys := a.shortcuts()
+	_, caps := u.StatusBar(a.LastEvent(), keys, a.spinFrame())
+	// Kısayol kapakları TIKLANABİLİR: fareyle çalışan bir kullanıcı,
+	// klavyedeki karşılığını bilmeden aynı eylemi yapabilmeli.
+	for i := range keys {
+		if i < len(caps) {
+			a.addShortcutZone(caps[i], shortcutKeyFor(keys[i].Key))
+		}
+	}
+
+	// Geçiş, imleçten ÖNCE uygulanır: imleç karıştırılırsa hayalet bırakır.
+	a.applyTransition(main)
+
+	if x, y, ok := a.PointerPos(); ok {
+		if a.busy() {
+			u.CursorBusy(x, y, a.spinFrame())
+		} else {
+			u.Cursor(x, y)
+		}
+	}
 }
 
-// sidebarWidth scales with the font so the labels always fit.
+// shortcutKeyFor maps a status-bar key cap label to the keystroke it sends.
 //
-// Sabit piksel genişliği 4K'da minik, 800x600'de devasa olurdu; en uzun
-// bölüm adına göre hesaplamak her çözünürlükte doğru sonucu verir.
+// Kapaklarda "↑↓" gibi görsel etiketler var; bunları olduğu gibi tuş olarak
+// göndermek hiçbir şey yapmaz. Eşleme burada, tek yerde.
+func shortcutKeyFor(label string) string {
+	switch label {
+	case "Enter":
+		return "enter"
+	case "Esc":
+		return "esc"
+	case "↑↓":
+		return "down"
+	case "F12":
+		return "f12"
+	}
+	// Tek harfli kısayollar ("n", "w", "e", "r", "t", "g") doğrudan geçer.
+	if len([]rune(label)) == 1 {
+		return label
+	}
+	return ""
+}
+
+// busy reports whether a long-running action is in progress.
+func (a *App) busy() bool {
+	if a.scanning() {
+		return true
+	}
+	e := a.LastEvent()
+	return e != nil && e.Kind == fbui.EventBusy
+}
+
+// contentFocused reports whether the keyboard is in the content column.
+func (a *App) contentFocused() bool { return a.Focus() == FocusContent }
+
+// sidebarWidth scales with the font so the labels always fit.
 func (a *App) sidebarWidth() int {
 	longest := 0
 	for _, n := range sectionNames {
-		if len(n) > longest {
-			longest = len([]rune(n))
+		if r := len([]rune(n)); r > longest {
+			longest = r
 		}
 	}
-	// ad + ok işareti + iki yandan dolgu
-	return (longest+3)*a.ui.F.CellW + a.ui.M.PadX*2
+	// ad + ok işareti + rozet payı + iki yandan dolgu
+	return (longest+5)*a.ui.F.CellW + a.ui.M.PadX*2
 }
 
 func (a *App) spinFrame() int {
@@ -90,13 +178,14 @@ func (a *App) spinFrame() int {
 // drawSidebar paints the navigation column.
 func (a *App) drawSidebar(r image.Rectangle) {
 	u := a.ui
-	in := u.Panel(r, "", false)
+	focused := !a.contentFocused()
+	in := u.Panel(r, "", focused)
 
 	st, _, _ := a.Snapshot()
 
 	y := in.Min.Y
 	x := u.Text(in.Min.X, y, "MCOS", u.Pal.Accent)
-	ver := "v0.1.0"
+	ver := version.Display()
 	if st != nil && st.Version != "" {
 		ver = "v" + st.Version
 	}
@@ -108,18 +197,34 @@ func (a *App) drawSidebar(r image.Rectangle) {
 	cur := a.Section()
 	for _, s := range a.visibleSections() {
 		row := image.Rect(in.Min.X-u.M.PadX/2, y, in.Max.X+u.M.PadX/2, y+u.M.RowH)
-		cx := u.Row(row, s == cur)
 		ty := y + (u.M.RowH-u.F.CellH)/2
 
+		// Tıklama alanı, çizilen satırın AYNISI.
+		a.addZone(row, zoneSidebar, int(s))
+
+		var cx int
 		col := u.Pal.TextDim
-		if s == cur {
+		switch {
+		case s == cur && focused:
+			cx = u.Row(row, true)
 			col = u.Pal.Accent
 			u.Chevron(cx-u.F.CellW, ty, 0, u.Pal.Accent)
+		case s == cur:
+			// Bu bölümdeyiz ama klavye sağda: soluk vurgulama.
+			cx = u.RowDimmed(row)
+			col = u.Pal.Text
+		default:
+			// Fare üzerindeyse ÜÇÜNCÜ bir görünüm: seçiliden soluk,
+			// normalden belirgin. Aynı görünüm olsaydı kullanıcı
+			// Enter'a bastığında hangisinin çalışacağını bilemezdi.
+			if a.hoverSidebar(s) {
+				u.HoverRow(row)
+				col = u.Pal.Text
+			}
+			cx = u.Row(row, false)
 		}
 		u.Text(cx, ty, s.Name(), col)
 
-		// Sağda küçük bir sayaç/gösterge: kullanıcı bölüme girmeden durumu
-		// görebilmeli.
 		if badge, bc := a.sidebarBadge(s); badge != "" {
 			u.TextRight(in.Max.X, ty, badge, bc)
 		}
@@ -133,7 +238,7 @@ func (a *App) sidebarBadge(s Section) (string, color.RGBA) {
 	st, servers, _ := a.Snapshot()
 	switch s {
 	case SecServers:
-		if st == nil {
+		if len(servers) == 0 {
 			return "", u.Pal.TextFaint
 		}
 		up := 0
@@ -142,23 +247,44 @@ func (a *App) sidebarBadge(s Section) (string, color.RGBA) {
 				up++
 			}
 		}
-		if len(servers) == 0 {
-			return "", u.Pal.TextFaint
-		}
 		c := u.Pal.TextFaint
 		if up > 0 {
 			c = u.Pal.OK
 		}
 		return fmt.Sprintf("%d/%d", up, len(servers)), c
 	case SecNetwork:
-		if st == nil {
-			return "", u.Pal.TextFaint
+		if st != nil && !st.Net.Internet {
+			return "yok", u.Pal.Warn
 		}
-		if !st.Net.Internet {
-			return "çevrimdışı", u.Pal.Warn
+	case SecSoftware:
+		if st != nil {
+			return itoa(len(st.JavaVersions)), u.Pal.TextFaint
+		}
+	case SecPeers:
+		if st != nil && st.PeersOnline > 0 {
+			return itoa(st.PeersOnline), u.Pal.OK
+		}
+	case SecTunnel:
+		a.mu.Lock()
+		n := 0
+		for _, t := range a.tunnels {
+			if t.Running {
+				n++
+			}
+		}
+		a.mu.Unlock()
+		if n > 0 {
+			return "açık", u.Pal.OK
 		}
 	}
 	return "", u.Pal.TextFaint
+}
+
+// contentPanel draws the section frame with the right focus styling.
+//
+// TÜM bölümler bunu kullanır; odak görünümü tek yerde tanımlı olsun diye.
+func (a *App) contentPanel(r image.Rectangle, title string) image.Rectangle {
+	return a.ui.Panel(r, title, a.contentFocused())
 }
 
 // drawContent dispatches to the per-section renderer.
@@ -168,426 +294,95 @@ func (a *App) drawContent(r image.Rectangle) {
 		a.drawDashboard(r)
 	case SecServers:
 		a.drawServers(r)
-	case SecPower:
-		a.drawPower(r)
-	case SecSettings:
-		a.drawSettings(r)
-	case SecNetwork:
-		a.drawNetwork(r)
+	case SecUSB:
+		a.drawUSB(r)
+	case SecSoftware:
+		a.drawSoftware(r)
 	case SecPerformance:
 		a.drawPerformance(r)
 	case SecDevices:
 		a.drawDevices(r)
-	default:
-		a.drawPlaceholder(r)
+	case SecNetwork:
+		a.drawNetwork(r)
+	case SecDisplay:
+		a.drawDisplay(r)
+	case SecTunnel:
+		a.drawTunnel(r)
+	case SecPeers:
+		a.drawPeers(r)
+	case SecPower:
+		a.drawPower(r)
+	case SecSettings:
+		a.drawSettings(r)
 	}
 }
 
-// ── Sistem Durumu ───────────────────────────────────────────────────────────
+// ── Ortak yardımcılar ───────────────────────────────────────────────────────
 
-func (a *App) drawDashboard(r image.Rectangle) {
+// waiting draws the "still connecting" placeholder.
+func (a *App) waiting(in image.Rectangle) {
+	a.ui.Text(in.Min.X, in.Min.Y, "Daemon'a bağlanılıyor…", a.ui.Pal.TextDim)
+}
+
+// kvList draws aligned key/value lines and returns the new y.
+func (a *App) kvList(in image.Rectangle, y int, keyCols int,
+	rows [][3]any) int {
 	u := a.ui
-	in := u.Panel(r, "Sistem Durumu", true)
-	st, servers, cfg := a.Snapshot()
-
-	if st == nil {
-		u.Text(in.Min.X, in.Min.Y, "Daemon'a bağlanılıyor…", u.Pal.TextDim)
-		return
-	}
-
-	y := in.Min.Y
-
-	// Üst satır: dört ölçüm kartı yan yana.
-	cardW := (in.Dx() - u.M.Gap*3) / 4
-	cardH := u.F.CellH * 4
-	metrics := []struct {
-		label, value string
-		pct          int
-		col          color.RGBA
-	}{
-		{"İŞLEMCI", fmt.Sprintf("%.0f%%", st.CPU.UsagePct), int(st.CPU.UsagePct), u.Pal.Accent},
-		{"BELLEK", fmt.Sprintf("%.0f%%", st.Memory.UsagePct), int(st.Memory.UsagePct), u.Pal.Accent},
-		{"SUNUCU", fmt.Sprintf("%d / %d", st.ServersUp, st.ServersTotal), pctOf(st.ServersUp, st.ServersTotal), u.Pal.OK},
-		{"ÇALIŞMA", uptimeShort(st.Uptime), 0, u.Pal.TextDim},
-	}
-	for i, m := range metrics {
-		cx := in.Min.X + i*(cardW+u.M.Gap)
-		card := image.Rect(cx, y, cx+cardW, y+cardH)
-		u.P.FillRoundRect(rect(card), u.M.Radius, u.Pal.Raised)
-
-		u.Text(card.Min.X+u.M.PadX, card.Min.Y+u.M.PadY, m.label, u.Pal.TextFaint)
-		u.Text(card.Min.X+u.M.PadX, card.Min.Y+u.M.PadY+u.F.CellH+u.M.PadY/2, m.value, m.col)
-		if m.pct > 0 {
-			u.Progress(card.Min.X+u.M.PadX, card.Max.Y-u.M.PadY-u.F.CellH/2,
-				cardW-u.M.PadX*2, m.pct)
+	for _, kv := range rows {
+		k, _ := kv[0].(string)
+		v, _ := kv[1].(string)
+		c, ok := kv[2].(color.RGBA)
+		if !ok {
+			c = u.Pal.Text
 		}
-	}
-	y += cardH + u.M.PadY*2
-
-	// Bilgi satırları.
-	kv := func(k, v string, c color.RGBA) {
-		u.Text(in.Min.X, y, k, u.Pal.TextDim)
-		u.Text(in.Min.X+u.F.CellW*18, y, v, c)
-		y += u.F.CellH + u.M.PadY/2
-	}
-	kv("İşlemci", st.CPU.Model, u.Pal.Text)
-	kv("Çekirdek", fmt.Sprintf("%d çekirdek / %d iş parçacığı", st.CPU.Cores, st.CPU.Threads), u.Pal.Text)
-	kv("Bellek", fmt.Sprintf("%s / %s", bytesShort(st.Memory.UsedBytes), bytesShort(st.Memory.TotalBytes)), u.Pal.Text)
-	if st.Net.LocalIP != "" {
-		kv("Yerel adres", st.Net.LocalIP, u.Pal.Text)
-	}
-	netCol, netTxt := u.Pal.Warn, "yok (çevrimdışı kip)"
-	if st.Net.Internet {
-		netCol, netTxt = u.Pal.OK, "var"
-	}
-	kv("İnternet", netTxt, netCol)
-	if cfg != nil && cfg.Turbo {
-		kv("Turbo", "açık", u.Pal.Warn)
-	}
-	_ = servers
-
-	// Canlı olay geçmişi: alt çubuk yalnızca sonuncuyu gösterir, burada
-	// hepsi durur. Bir sunucu gece çöktüyse sabah burada görünür.
-	y += u.M.PadY
-	u.Divider(in.Min.X, in.Max.X, y)
-	y += u.M.PadY * 2
-	u.Text(in.Min.X, y, "SON OLAYLAR", u.Pal.TextFaint)
-	y += u.F.CellH + u.M.PadY/2
-
-	ev := a.Events()
-	for i := len(ev) - 1; i >= 0 && y+u.F.CellH < in.Max.Y; i-- {
-		e := ev[i]
-		_, dot := u.EventColors(e.Kind)
-		u.StatusDot(in.Min.X, y, dot)
-		u.Text(in.Min.X+u.F.CellW+u.M.Gap, y, e.At.Format("15:04:05"), u.Pal.TextFaint)
-		u.Text(in.Min.X+u.F.CellW*11, y, e.Text, u.Pal.TextDim)
-		y += u.F.CellH + u.M.PadY/3
-	}
-}
-
-// ── Sunucular ───────────────────────────────────────────────────────────────
-
-func (a *App) drawServers(r image.Rectangle) {
-	u := a.ui
-	in := u.Panel(r, "Sunucular", true)
-	_, servers, _ := a.Snapshot()
-
-	if len(servers) == 0 {
-		u.Text(in.Min.X, in.Min.Y, "Henüz sunucu yok.", u.Pal.TextDim)
-		u.Text(in.Min.X, in.Min.Y+u.F.CellH*2,
-			"Yeni bir sunucu oluşturmak için N tuşuna basın.", u.Pal.TextFaint)
-		return
-	}
-
-	cur := a.Cursor()
-	y := in.Min.Y
-	cardH := u.F.CellH*3 + u.M.PadY*2
-
-	for i, s := range servers {
-		if y+cardH > in.Max.Y {
-			u.Text(in.Min.X, y, fmt.Sprintf("… ve %d sunucu daha", len(servers)-i), u.Pal.TextFaint)
-			break
-		}
-		card := image.Rect(in.Min.X, y, in.Max.X, y+cardH)
-		u.P.FillRoundRect(rect(card), u.M.Radius, u.Pal.Raised)
-		if i == cur {
-			u.P.StrokeRoundRect(rect(card), u.M.Radius, u.M.StrokeFocus, u.Pal.Accent)
-		}
-
-		cx := card.Min.X + u.M.PadX
-		cy := card.Min.Y + u.M.PadY
-
-		kind, label, col := serverBadge(u, s)
-		if kind == fbui.EventBusy {
-			u.Spinner(cx, cy, a.spinFrame(), col)
-		} else {
-			u.StatusDot(cx, cy, col)
-		}
-
-		nx := u.Text(cx+u.F.CellW+u.M.Gap, cy, s.Name, u.Pal.Text)
-		u.Text(nx+u.M.Gap*2, cy, string(s.Software)+" "+s.MCVersion, u.Pal.TextDim)
-
-		bw := u.TextWidth(label) + u.F.CellW*2
-		u.Badge(card.Max.X-u.M.PadX-bw, cy-u.F.CellH/6, label, col)
-
-		cy += u.F.CellH + u.M.PadY
-		info := fmt.Sprintf("Port %d", s.Port)
-		if s.RAMMB > 0 {
-			info += fmt.Sprintf("   Bellek %d MB", s.RAMMB)
-		}
-		u.Text(cx+u.F.CellW+u.M.Gap, cy, info, u.Pal.TextDim)
-
-		y = card.Max.Y + u.M.PadY
-	}
-}
-
-// serverBadge maps a server state to its indicator.
-func serverBadge(u *fbui.UI, s *model.Server) (fbui.EventKind, string, color.RGBA) {
-	switch s.State {
-	case model.StateRunning:
-		return fbui.EventOK, "ÇALIŞIYOR", u.Pal.OK
-	case model.StateStarting:
-		return fbui.EventBusy, "BAŞLIYOR", u.Pal.Warn
-	case model.StateStopping:
-		return fbui.EventBusy, "KAPANIYOR", u.Pal.Warn
-	case model.StateError:
-		return fbui.EventError, "HATA", u.Pal.Error
-	default:
-		return fbui.EventInfo, "KAPALI", u.Pal.TextFaint
-	}
-}
-
-// ── Güç ─────────────────────────────────────────────────────────────────────
-
-// powerItems are the entries of the power menu, in order.
-//
-// "Uyku" kullanıcının isteğiyle eklendi: ekran kapanır, SUNUCULAR ÇALIŞMAYA
-// DEVAM EDER. Bu ayrım menüde açıkça yazılı, çünkü "uyku" kelimesi çoğu
-// masaüstü sisteminde her şeyin durması anlamına gelir.
-var powerItems = []struct {
-	label, desc string
-	danger      bool
-}{
-	{"Uyku", "Ekranı kapatır. Sunucular çalışmaya devam eder; tuş veya fareyle uyanır.", false},
-	{"Yeniden Başlat", "Sistemi yeniden başlatır. Çalışan sunucular düzgünce durdurulur.", true},
-	{"Kapat", "Sistemi kapatır. Çalışan sunucular düzgünce durdurulur.", true},
-}
-
-func (a *App) drawPower(r image.Rectangle) {
-	u := a.ui
-	in := u.Panel(r, "Güç", true)
-	cur := a.Cursor()
-
-	y := in.Min.Y
-	for i, it := range powerItems {
-		rowH := u.F.CellH*2 + u.M.PadY*2
-		row := image.Rect(in.Min.X, y, in.Max.X, y+rowH)
-		cx := u.Row(row, i == cur)
-		ty := row.Min.Y + u.M.PadY
-
-		col := u.Pal.Text
-		if it.danger {
-			col = u.Pal.Error
-		}
-		if i == cur {
-			u.Chevron(cx-u.F.CellW, ty, 0, u.Pal.Accent)
-		}
-		u.Text(cx, ty, it.label, col)
-		u.Text(cx, ty+u.F.CellH+u.M.PadY/2, it.desc, u.Pal.TextFaint)
-		y = row.Max.Y + u.M.PadY/2
-	}
-
-	a.mu.Lock()
-	note := a.sleepMsg
-	a.mu.Unlock()
-	if note != "" {
-		y += u.M.PadY
-		u.Divider(in.Min.X, in.Max.X, y)
-		y += u.M.PadY * 2
-		u.Text(in.Min.X, y, note, u.Pal.TextFaint)
-	}
-}
-
-// ── Ayarlar ─────────────────────────────────────────────────────────────────
-
-func (a *App) drawSettings(r image.Rectangle) {
-	u := a.ui
-	in := u.Panel(r, "Ayarlar", true)
-	_, _, cfg := a.Snapshot()
-	cur := a.Cursor()
-
-	y := in.Min.Y
-	u.Text(in.Min.X, y, "TEMA", u.Pal.TextFaint)
-	y += u.F.CellH + u.M.PadY
-
-	active := ""
-	if cfg != nil {
-		active = cfg.Theme
-	}
-	for i, name := range fbui.ThemeOrder {
-		row := image.Rect(in.Min.X, y, in.Max.X, y+u.M.RowH)
-		cx := u.Row(row, i == cur)
-		ty := y + (u.M.RowH-u.F.CellH)/2
-
-		u.Radio(cx, ty, name == active)
-		col := u.Pal.Text
-		if i == cur {
-			col = u.Pal.Accent
-		}
-		nx := u.Text(cx+u.F.CellW+u.M.Gap, ty, fbui.ThemeLabel(name), col)
-
-		// Vurgu rengini yerinde göster: kullanıcı seçmeden önce görsün.
-		sw := fbui.DefaultPalette.WithAccent(name).Accent
-		u.P.FillRoundRect(
-			fbdraw.R(float64(nx+u.M.Gap*2), float64(ty)+float64(u.F.CellH)*0.2,
-				float64(u.F.CellW)*3, float64(u.F.CellH)*0.6),
-			float64(u.F.CellH)*0.3, sw)
-		y += u.M.RowH
-	}
-
-	y += u.M.PadY
-	u.Divider(in.Min.X, in.Max.X, y)
-	y += u.M.PadY * 2
-	u.Text(in.Min.X, y, "Tema seçmek için ↑↓ ve Enter.", u.Pal.TextFaint)
-	y += u.F.CellH + u.M.PadY
-	u.Text(in.Min.X, y, "Ekran çözünürlüğü \"Ekran\" bölümünden değiştirilir "+
-		"(yeniden başlatma gerekir).", u.Pal.TextFaint)
-}
-
-// ── Ağ ──────────────────────────────────────────────────────────────────────
-
-func (a *App) drawNetwork(r image.Rectangle) {
-	u := a.ui
-	in := u.Panel(r, "Ağ", true)
-	st, _, _ := a.Snapshot()
-	if st == nil {
-		u.Text(in.Min.X, in.Min.Y, "Daemon'a bağlanılıyor…", u.Pal.TextDim)
-		return
-	}
-
-	y := in.Min.Y
-	col, txt := u.Pal.Warn, "İnternet yok — çevrimdışı kip"
-	if st.Net.Internet {
-		col, txt = u.Pal.OK, "İnternet bağlantısı var"
-	}
-	u.StatusDot(in.Min.X, y, col)
-	u.Text(in.Min.X+u.F.CellW+u.M.Gap, y, txt, col)
-	y += u.F.CellH + u.M.PadY*2
-
-	u.Text(in.Min.X, y, "ARAYÜZLER", u.Pal.TextFaint)
-	y += u.F.CellH + u.M.PadY
-
-	for _, n := range st.Net.NICs {
-		if y+u.M.RowH > in.Max.Y {
-			break
-		}
-		dot := u.Pal.TextFaint
-		switch {
-		case n.Up && n.Link:
-			dot = u.Pal.OK
-		case n.Up:
-			dot = u.Pal.Warn
-		}
-		u.StatusDot(in.Min.X, y, dot)
-		x := u.Text(in.Min.X+u.F.CellW+u.M.Gap, y, n.Name, u.Pal.Text)
-		kind := n.Kind
-		if kind == "" {
-			kind = "other"
-		}
-		u.Text(x+u.M.Gap*2, y, kind, u.Pal.TextFaint)
-		if n.IPv4 != "" {
-			u.TextRight(in.Max.X, y, n.IPv4, u.Pal.TextDim)
-		}
-		y += u.M.RowH
-	}
-}
-
-// ── Performans ──────────────────────────────────────────────────────────────
-
-func (a *App) drawPerformance(r image.Rectangle) {
-	u := a.ui
-	in := u.Panel(r, "Performans", true)
-	st, _, cfg := a.Snapshot()
-	if st == nil {
-		u.Text(in.Min.X, in.Min.Y, "Daemon'a bağlanılıyor…", u.Pal.TextDim)
-		return
-	}
-
-	y := in.Min.Y
-	bar := func(label string, pct float64, detail string) {
-		u.Text(in.Min.X, y, label, u.Pal.TextDim)
-		u.TextRight(in.Max.X, y, detail, u.Pal.Text)
-		y += u.F.CellH + u.M.PadY/2
-		u.Progress(in.Min.X, y, in.Dx(), int(pct))
-		y += u.F.CellH + u.M.PadY
-	}
-	bar("İşlemci", st.CPU.UsagePct, fmt.Sprintf("%.0f%%", st.CPU.UsagePct))
-	bar("Bellek", st.Memory.UsagePct,
-		fmt.Sprintf("%s / %s", bytesShort(st.Memory.UsedBytes), bytesShort(st.Memory.TotalBytes)))
-	for _, d := range st.Disks {
-		bar("Disk "+d.Mount, d.UsagePct,
-			fmt.Sprintf("%s / %s", bytesShort(d.UsedBytes), bytesShort(d.TotalBytes)))
-		if y+u.F.CellH*3 > in.Max.Y {
-			break
-		}
-	}
-
-	y += u.M.PadY
-	u.Divider(in.Min.X, in.Max.X, y)
-	y += u.M.PadY * 2
-
-	on := cfg != nil && cfg.Turbo
-	u.Check(in.Min.X, y, on)
-	txt := "Turbo kapalı"
-	col := u.Pal.TextDim
-	if on {
-		txt, col = "Turbo AÇIK", u.Pal.Warn
-	}
-	u.Text(in.Min.X+u.F.CellW+u.M.Gap, y, txt, col)
-	y += u.M.RowH
-	u.Text(in.Min.X, y, "Turbo açıkken kaynak sınırları yok sayılır ve sunucular", u.Pal.TextFaint)
-	y += u.F.CellH
-	u.Text(in.Min.X, y, "yüksek öncelikle çalıştırılır. T tuşuyla değiştirin.", u.Pal.TextFaint)
-}
-
-// ── Donanım ─────────────────────────────────────────────────────────────────
-
-func (a *App) drawDevices(r image.Rectangle) {
-	u := a.ui
-	in := u.Panel(r, "Donanım", true)
-	st, _, _ := a.Snapshot()
-	if st == nil {
-		u.Text(in.Min.X, in.Min.Y, "Daemon'a bağlanılıyor…", u.Pal.TextDim)
-		return
-	}
-	y := in.Min.Y
-	kv := func(k, v string) {
 		if v == "" {
-			return
+			continue
 		}
 		u.Text(in.Min.X, y, k, u.Pal.TextDim)
-		u.Text(in.Min.X+u.F.CellW*16, y, v, u.Pal.Text)
+		u.Text(in.Min.X+u.F.CellW*keyCols, y, v, c)
 		y += u.F.CellH + u.M.PadY/2
 	}
-	kv("İşlemci", st.CPU.Model)
-	kv("Çekirdek", fmt.Sprintf("%d / %d", st.CPU.Cores, st.CPU.Threads))
-	if st.CPU.MHz > 0 {
-		kv("Frekans", fmt.Sprintf("%d MHz", st.CPU.MHz))
+	return y
+}
+
+// sectionHint draws a dim hint line at a given y.
+func (a *App) hint(in image.Rectangle, y int, lines ...string) int {
+	u := a.ui
+	for _, l := range lines {
+		u.Text(in.Min.X, y, l, u.Pal.TextFaint)
+		y += u.F.CellH
 	}
-	if st.CPU.TempC > 0 {
-		kv("Sıcaklık", fmt.Sprintf("%.0f °C", st.CPU.TempC))
-	}
-	kv("Bellek", bytesShort(st.Memory.TotalBytes))
-	for _, g := range st.GPUs {
-		kv("Ekran kartı", strings.TrimSpace(g.Vendor+" "+g.Model))
-	}
-	for _, d := range st.Disks {
-		kv("Disk "+d.Mount, fmt.Sprintf("%s (%s)", bytesShort(d.TotalBytes), d.Filesystem))
-	}
-	if len(st.JavaVersions) > 0 {
-		var vs []string
-		for _, v := range st.JavaVersions {
-			vs = append(vs, fmt.Sprint(v))
-		}
-		kv("Java", strings.Join(vs, ", "))
+	return y
+}
+
+// selectableRows draws a list of rows and highlights the cursor, honouring focus.
+//
+// Bir bölümdeki listeler bunu kullanır: imleç görünümü ve odak davranışı
+// her ekranda AYNI olsun diye.
+func (a *App) rowHighlight(row image.Rectangle, selected bool) (int, color.RGBA) {
+	u := a.ui
+	switch {
+	case selected && a.contentFocused():
+		return u.Row(row, true), u.Pal.Accent
+	case selected:
+		return u.RowDimmed(row), u.Pal.Text
+	default:
+		return u.Row(row, false), u.Pal.Text
 	}
 }
 
-// drawPlaceholder is used for sections not yet ported to this renderer.
+// contentRow draws a selectable content row AND registers it for the mouse.
 //
-// DÜRÜSTLÜK: "yakında" yazan sahte bir ekran göstermiyoruz. Bu bölüm henüz
-// yeni çizim motoruna taşınmadı ve kullanıcı bunu bilmeli — eski panele nasıl
-// dönüleceği de yazılı.
-func (a *App) drawPlaceholder(r image.Rectangle) {
-	u := a.ui
-	sec := a.Section()
-	in := u.Panel(r, sec.Name(), true)
-	y := in.Min.Y
-	u.Text(in.Min.X, y, "Bu bölüm henüz yeni arayüze taşınmadı.", u.Pal.Text)
-	y += u.F.CellH + u.M.PadY*2
-	u.Text(in.Min.X, y, "Eski panele dönmek için F12 tuşuna basın;", u.Pal.TextDim)
-	y += u.F.CellH
-	u.Text(in.Min.X, y, "orada bu bölüm tam olarak çalışıyor.", u.Pal.TextDim)
+// TÜM içerik listeleri bunu kullanır. Tek bir yerde olması, bir ekranın
+// yanlışlıkla tıklanamaz satırlar çizmesini imkânsız kılar — ki fare
+// desteği eklenen bir arayüzde en sık yapılan hata budur.
+func (a *App) contentRow(row image.Rectangle, idx int) (int, color.RGBA) {
+	a.addZone(row, zoneRow, idx)
+	selected := a.Cursor() == idx
+	if !selected && a.hoverRow(idx) {
+		a.ui.HoverRow(row)
+	}
+	return a.rowHighlight(row, selected)
 }
 
 // ── Kısayollar ──────────────────────────────────────────────────────────────
@@ -596,29 +391,80 @@ func (a *App) drawPlaceholder(r image.Rectangle) {
 func (a *App) shortcuts() []fbui.Shortcut {
 	if a.ActiveModal() != nil {
 		return []fbui.Shortcut{
+			{Key: "↑↓", Label: "Gezin"},
+			{Key: "Enter", Label: "Seç"},
 			{Key: "Esc", Label: "Kapat"},
-			{Key: "Enter", Label: "Tamam"},
 		}
 	}
-	base := []fbui.Shortcut{{Key: "F12", Label: "Eski panel"}}
+	if !a.contentFocused() {
+		return []fbui.Shortcut{
+			{Key: "↑↓", Label: "Menü"},
+			{Key: "Enter", Label: "Aç"},
+			{Key: "g", Label: "Güç"},
+		}
+	}
 	switch a.Section() {
 	case SecServers:
-		return append([]fbui.Shortcut{
+		return []fbui.Shortcut{
 			{Key: "Enter", Label: "Başlat/Durdur"},
-			{Key: "K", Label: "Konsol"},
-			{Key: "N", Label: "Yeni"},
-		}, base...)
-	case SecPower:
-		return append([]fbui.Shortcut{{Key: "Enter", Label: "Seç"}}, base...)
-	case SecSettings:
-		return append([]fbui.Shortcut{{Key: "Enter", Label: "Temayı uygula"}}, base...)
+			{Key: "n", Label: "Yeni sunucu"},
+			{Key: "Esc", Label: "Menü"},
+		}
+	case SecSoftware:
+		return []fbui.Shortcut{
+			{Key: "Enter", Label: "Java kur"},
+			{Key: "r", Label: "Yenile"},
+			{Key: "Esc", Label: "Menü"},
+		}
+	case SecDisplay:
+		return []fbui.Shortcut{
+			{Key: "Enter", Label: "Değiştir"},
+			{Key: "Esc", Label: "Menü"},
+		}
+	case SecNetwork:
+		return []fbui.Shortcut{
+			{Key: "w", Label: "Wi-Fi"},
+			{Key: "e", Label: "Kablolu"},
+			{Key: "Esc", Label: "Menü"},
+		}
 	case SecPerformance:
-		return append([]fbui.Shortcut{{Key: "T", Label: "Turbo"}}, base...)
+		return []fbui.Shortcut{
+			{Key: "t", Label: "Turbo"},
+			{Key: "Esc", Label: "Menü"},
+		}
+	case SecUSB:
+		return []fbui.Shortcut{
+			{Key: "r", Label: "Tara"},
+			{Key: "Enter", Label: "Kur"},
+			{Key: "Esc", Label: "Menü"},
+		}
+	case SecPeers:
+		return []fbui.Shortcut{
+			{Key: "Enter", Label: "Seç"},
+			{Key: "s", Label: "Tara"},
+			{Key: "i", Label: "IP gir"},
+			{Key: "Esc", Label: "Menü"},
+		}
+	case SecTunnel:
+		return []fbui.Shortcut{
+			{Key: "Enter", Label: "Adımı çalıştır"},
+			{Key: "r", Label: "Yenile"},
+			{Key: "Esc", Label: "Menü"},
+		}
+	case SecSettings:
+		return []fbui.Shortcut{
+			{Key: "Enter", Label: "Değiştir"},
+			{Key: "Esc", Label: "Menü"},
+		}
 	}
-	return append([]fbui.Shortcut{{Key: "↑↓", Label: "Gezin"}}, base...)
+	return []fbui.Shortcut{
+		{Key: "↑↓", Label: "Gezin"},
+		{Key: "Enter", Label: "Seç"},
+		{Key: "Esc", Label: "Menü"},
+	}
 }
 
-// ── Yardımcılar ─────────────────────────────────────────────────────────────
+// ── Biçimlendirme yardımcıları ──────────────────────────────────────────────
 
 func rect(r image.Rectangle) fbdraw.Rect {
 	return fbdraw.R(float64(r.Min.X), float64(r.Min.Y), float64(r.Dx()), float64(r.Dy()))

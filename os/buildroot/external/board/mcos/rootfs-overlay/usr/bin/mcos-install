@@ -49,10 +49,14 @@ set -eu
 STATUS_FILE=/tmp/mcos-install.status
 LOG_FILE=/tmp/mcos-install.log
 TARGET_MNT=/mnt/mcos-target
+ROOT_MNT=/mnt/mcos-root
 BOOTLIB=/usr/lib/mcos/boot
 
 # Boot bölümü: çekirdek (~10 MB) + initramfs (~122 MB) + pay.
 BOOT_MB=768
+# Kok bolumu boyutu. Canli rootfs sikistirilmamis ~400 MB; 3 GB sonraki
+# guncellemeler ve kullanicinin kurdugu seyler icin rahat pay birakir.
+ROOT_MB=3072
 
 log() {
     printf '\n>> mcos-install: %s\n' "$*"
@@ -190,7 +194,17 @@ parted -s "$TARGET" mkpart primary fat32 1MiB "$(( BOOT_MB + 1 ))MiB" \
     || fail "boot bölümü oluşturulamadı"
 parted -s "$TARGET" set 1 boot on || fail "boot bayrağı ayarlanamadı"
 parted -s "$TARGET" set 1 lba on 2>/dev/null || true
-parted -s "$TARGET" mkpart primary ext4 "$(( BOOT_MB + 1 ))MiB" 100% \
+# KOK bolumu: kurulu sistem BURADAN calisir, RAM'den degil.
+#
+# Canli ISO/USB initramfs'ten acilir ve her sey RAM'dedir - bu bilerek
+# boyledir, USB'yi yipratmaz ve ISO'ya hic dokunulmaz. Ama diske kurulan
+# sistemin KALICI olmasi gerekir: yazilan dosya, kurulan paket, degisen
+# ayar reboot'tan sonra durmalidir. Bu yuzden kurulumda ayri bir ext4 KOK
+# bolumu olusturulur ve /init switch_root ile ona gecer.
+parted -s "$TARGET" mkpart primary ext4 "$(( BOOT_MB + 1 ))MiB" \
+    "$(( BOOT_MB + 1 + ROOT_MB ))MiB" \
+    || fail "kök bölümü oluşturulamadı"
+parted -s "$TARGET" mkpart primary ext4 "$(( BOOT_MB + 1 + ROOT_MB ))MiB" 100% \
     || fail "kalıcı veri bölümü oluşturulamadı"
 
 status 12 "[2/7] Bölüm tablosu çekirdeğe bildiriliyor..."
@@ -201,17 +215,21 @@ sleep 2
 # Bölüm yolları: /dev/sda1 ile /dev/nvme0n1p1 ayrımı. Ayırt edici kural aygıt
 # adının RAKAMLA bitmesidir (nvme0n1, mmcblk0 → "p" eki).
 case "$TARGET" in
-    *[0-9]) BOOT_PART="${TARGET}p1"; DATA_PART="${TARGET}p2" ;;
-    *)      BOOT_PART="${TARGET}1";  DATA_PART="${TARGET}2"  ;;
+    *[0-9]) BOOT_PART="${TARGET}p1"; ROOT_PART="${TARGET}p2"; DATA_PART="${TARGET}p3" ;;
+    *)      BOOT_PART="${TARGET}1";  ROOT_PART="${TARGET}2";  DATA_PART="${TARGET}3"  ;;
 esac
 [ -b "$BOOT_PART" ] || fail "boot bölümü görünmedi: $BOOT_PART"
+[ -b "$ROOT_PART" ] || fail "kök bölümü görünmedi: $ROOT_PART"
 [ -b "$DATA_PART" ] || fail "veri bölümü görünmedi: $DATA_PART"
 
 # ── 3/7 Dosya sistemleri ────────────────────────────────────────────────────
 
-status 22 "[3/7] Dosya sistemleri oluşturuluyor (FAT32 boot + ext4 kalıcı veri)..."
+status 22 "[3/7] Dosya sistemleri oluşturuluyor (FAT32 boot + ext4 kök + ext4 veri)..."
 mkfs.vfat -F 32 -n MCOS-BOOT "$BOOT_PART" >/dev/null 2>&1 \
     || fail "boot bölümü biçimlendirilemedi ($BOOT_PART)"
+# ETIKET KRITIK: /init kok bolumunu MCOS-ROOT etiketiyle arar.
+mkfs.ext4 -F -L MCOS-ROOT "$ROOT_PART" >/dev/null 2>&1 \
+    || fail "kök bölümü biçimlendirilemedi ($ROOT_PART)"
 # ETİKET KRİTİK: S99mcos kalıcı bölümü "MCOS-DATA" etiketiyle arar.
 mkfs.ext4 -F -L MCOS-DATA "$DATA_PART" >/dev/null 2>&1 \
     || fail "kalıcı veri bölümü biçimlendirilemedi ($DATA_PART)"
@@ -259,7 +277,17 @@ if [ -r /data/mcos/display.conf ]; then
     esac
 fi
 
-CMDLINE="$MCOS_CMDLINE_BASE"
+# KALICILIK ANAHTARI.
+#
+# Canli ISO'nun komut satirinda bu YOKTUR, bu yuzden ISO RAM'den calisir
+# ve dosyasina hic dokunulmaz. Kurulu diskin komut satirinda VARDIR:
+# /init bunu gorunce MCOS-ROOT bolumunu baglar ve switch_root ile icine
+# gecer. Ayrimi yapan tek sey bu parametredir.
+#
+# Etiketle (LABEL=) veriliyor, aygit adiyla degil: disk siralamasi
+# acilistan aciliya degisir, /dev/sda2 bir sonraki acilista baska bir
+# disk olabilir.
+CMDLINE="$MCOS_CMDLINE_BASE mcos.root=LABEL=MCOS-ROOT"
 
 GRUB_CFG="set timeout=3
 set default=0
@@ -329,7 +357,47 @@ fi
 
 # ── 7/7 Kalıcı veriyi taşı ve doğrula ───────────────────────────────────────
 
-status 90 "[7/7] Ayarlar kalıcı bölüme taşınıyor..."
+status 86 "[7/7] Kök dosya sistemi diske yazılıyor (kalıcılık)..."
+
+# Canli sistemin TAMAMINI kok bolumune kopyala. Bundan sonra makine RAM'den
+# degil BURADAN acilir.
+#
+# Haric tutulanlar:
+#   /proc /sys /dev /run /tmp : cekirdek tarafindan saglanir, kopyalanamaz
+#   /mnt                      : kurulum sirasindaki gecici baglama noktalari
+#   /data                     : ayri bolume gider (asagida)
+#   /boot                     : cekirdek ve initrd FAT bolumunde
+mkdir -p "$ROOT_MNT"
+mount "$ROOT_PART" "$ROOT_MNT" || fail "kök bölümü bağlanamadı ($ROOT_PART)"
+
+copy_failed=""
+for d in bin etc lib lib32 lib64 opt root sbin usr var; do
+    [ -e "/$d" ] || continue
+    cp -a "/$d" "$ROOT_MNT/" 2>/dev/null || copy_failed="$copy_failed $d"
+done
+[ -n "$copy_failed" ] && log "UYARI: kopyalanamayan dizinler:$copy_failed"
+
+# Cekirdegin baglayacagi bos dizinler.
+mkdir -p "$ROOT_MNT/proc" "$ROOT_MNT/sys" "$ROOT_MNT/dev" "$ROOT_MNT/run" \
+         "$ROOT_MNT/tmp" "$ROOT_MNT/mnt" "$ROOT_MNT/data" "$ROOT_MNT/boot"
+chmod 1777 "$ROOT_MNT/tmp"
+
+# ISARET DOSYASI. /init switch_root yapmadan ONCE bunu arar: rastgele bir
+# ext4 bolumune gecmek sistemi aciliste kilitler (PID 1 bulunamaz -> panik).
+# Iceriginde ne oldugu onemli degil, VARLIGI onemli.
+{
+    echo "MCOS kalici kok dosya sistemi"
+    echo "olusturuldu: $(date 2>/dev/null || echo bilinmiyor)"
+    echo "kaynak: $TARGET"
+} > "$ROOT_MNT/etc/mcos-root"
+
+# Kurulu sistemde /init'e gerek yok (switch_root dogrudan /sbin/init calistirir)
+# ama zarari da yok; birakiyoruz ki ayni imaj her iki rolde de kullanilabilsin.
+
+sync
+umount "$ROOT_MNT" || log "UYARI: kök bölümü ayrılamadı"
+
+status 90 "[7/7] Ayarlar kalıcı bölüme taşınıyor..." 
 
 # OOBE'de girilen ayarlar (config.json, WiFi, tema, kaynak bütçesi) canlı
 # sistemin /data'sında duruyor. Yeni kalıcı bölüme kopyalanmazsa kullanıcı
@@ -340,6 +408,30 @@ if mount "$DATA_PART" "$TARGET_MNT"; then
     if [ -d /data ]; then
         cp -a /data/. "$TARGET_MNT/" 2>/dev/null || true
     fi
+    # ÇEVRİMDIŞI PAKETİ TOHUMLA.
+    #
+    # İmajla gelen sunucu dosyaları (Fabric, ViaFabric, JRE) kalıcı bölüme
+    # kopyalanır. Bundan sonra internet olmadan da sunucu kurulabilir:
+    # internal/server/providers/offline.go indirmeden ÖNCE buraya bakar.
+    #
+    # Neden initramfs'te değil de burada: initramfs tamamen RAM'e açılır;
+    # 150 MB'lık bir paketi oraya koymak her açılışta 150 MB RAM demektir —
+    # üstelik canlı ISO'da hiç kullanılmayabilir.
+    if [ -d /usr/lib/mcos/offline ]; then
+        mkdir -p "$TARGET_MNT/artifacts"
+        seeded=0
+        for f in /usr/lib/mcos/offline/*; do
+            [ -f "$f" ] || continue
+            case "$f" in */INDEX) continue ;; esac
+            if cp -n "$f" "$TARGET_MNT/artifacts/" 2>/dev/null; then
+                seeded=$(( seeded + 1 ))
+            fi
+        done
+        if [ "$seeded" -gt 0 ]; then
+            log "çevrimdışı paket tohumlandı ($seeded dosya)"
+        fi
+    fi
+
     if [ -f "$TARGET_MNT/config.json" ]; then
         log "OOBE ayarları kalıcı bölüme taşındı"
     else

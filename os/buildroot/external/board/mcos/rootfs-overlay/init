@@ -1,0 +1,171 @@
+#!/bin/sh
+# MCOS erken init — RAM sistemi ile DISK sistemi arasindaki ayrimi yapar.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# TASARIM
+# ════════════════════════════════════════════════════════════════════════════
+#
+# MCOS iki farkli sekilde calisir:
+#
+#   CANLI (ISO / USB)  : Tum sistem initramfs'ten RAM'e acilir. Yazilan hicbir
+#                        sey kalici degildir. ISO'yu degistirmedik: cekirdek
+#                        komut satirinda "mcos.root=" YOKTUR, bu betik hemen
+#                        normal init'e devreder ve davranis bugunkuyle AYNIDIR.
+#
+#   KURULU (SSD/HDD)   : mcos-install diske gercek bir ext4 kok dosya sistemi
+#                        yazar ve acilis satirina "mcos.root=LABEL=MCOS-ROOT"
+#                        ekler. Bu betik o bolumu baglar ve switch_root ile
+#                        ICINE GECER. Artik sistem RAM'de degil DISKTE calisir;
+#                        yazilan her sey kalicidir.
+#
+# Yani ayrimi yapan tek sey KOMUT SATIRIDIR. ISO dosyasina dokunulmaz.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# EN ONEMLI KURAL: ASLA ACILISI ENGELLEME
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Disk kokune gecis herhangi bir noktada basarisiz olursa (bolum yok, dosya
+# sistemi bozuk, icerik eksik) bu betik SESSIZCE canli sisteme doner. Yarim
+# kalmis bir gecis, kullaniciyi acilmayan bir makineyle birakir - bu, kalici
+# olmamaktan cok daha kotudur.
+#
+# Bu yuzden her adim tek tek dogrulanir ve her hata "canli sisteme don"
+# anlamina gelir.
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export PATH
+
+NEWROOT=/mnt/newroot
+
+# log, hem ekrana hem cekirdek gunlugune yazar.
+#
+# Erken acilista henuz panel yok; kullanicinin gordugu tek sey bu satirlardir.
+# Sessiz kalmak, gecisin neden olmadigini anlasilmaz yapardi.
+log() {
+    echo "mcos-init: $1"
+    [ -w /dev/kmsg ] && echo "mcos-init: $1" > /dev/kmsg 2>/dev/null
+    return 0
+}
+
+# ── Erken bagli dosya sistemleri ────────────────────────────────────────────
+#
+# /dev cekirdek tarafindan otomatik baglanir (CONFIG_DEVTMPFS_MOUNT=y), ama
+# /proc olmadan komut satirini okuyamayiz.
+[ -d /proc ] || mkdir -p /proc
+[ -d /sys ] || mkdir -p /sys
+mountpoint -q /proc 2>/dev/null || mount -t proc proc /proc 2>/dev/null
+mountpoint -q /sys 2>/dev/null || mount -t sysfs sysfs /sys 2>/dev/null
+
+# live_boot, canli sisteme devreder ve BIR DAHA GERI DONMEZ.
+#
+# Bagladigimiz dosya sistemlerini birakiyoruz: /etc/inittab bunlari kendisi
+# baglar ve ust uste baglamak /proc'u iki kez yiginlar.
+live_boot() {
+    umount /sys 2>/dev/null || true
+    umount /proc 2>/dev/null || true
+    exec /sbin/init "$@"
+}
+
+# ── Komut satirindan kok aygitini oku ───────────────────────────────────────
+#
+# "root=" DEGIL "mcos.root=" kullaniyoruz. Sebep: "root=" cekirdegin kendi
+# parametresidir ve initramfs varken cekirdek onu yok sayar ama bazi
+# kurtarma araclari yanlis yorumlar. Kendi adimizi kullanmak karisikligi
+# tamamen ortadan kaldirir.
+CMDLINE=""
+[ -r /proc/cmdline ] && CMDLINE="$(cat /proc/cmdline)"
+
+ROOTSPEC=""
+for arg in $CMDLINE; do
+    case "$arg" in
+        mcos.root=*) ROOTSPEC="${arg#mcos.root=}" ;;
+        mcos.live)   ROOTSPEC="" ; break ;;   # acik "canli calis" istegi
+    esac
+done
+
+if [ -z "$ROOTSPEC" ]; then
+    # ISO / USB yolu: bugunku davranisin AYNISI.
+    live_boot
+fi
+
+log "kalici kok isteniyor: $ROOTSPEC"
+
+# ── Aygiti coz ──────────────────────────────────────────────────────────────
+#
+# LABEL=... bicimi tercih edilir: disk siralamasi acilistan aciliya degisir,
+# /dev/sda2 bir sonraki acilista baska bir disk olabilir. Etiket sabittir.
+resolve_dev() {
+    case "$1" in
+        LABEL=*)
+            lbl="${1#LABEL=}"
+            if [ -x /usr/bin/mcos-findfs ]; then
+                /usr/bin/mcos-findfs "$lbl" 2>/dev/null && return 0
+            fi
+            findfs "LABEL=$lbl" 2>/dev/null && return 0
+            [ -e "/dev/disk/by-label/$lbl" ] && { echo "/dev/disk/by-label/$lbl"; return 0; }
+            return 1
+            ;;
+        UUID=*)
+            findfs "$1" 2>/dev/null && return 0
+            return 1
+            ;;
+        /dev/*)
+            [ -b "$1" ] && { echo "$1"; return 0; }
+            return 1
+            ;;
+    esac
+    return 1
+}
+
+# Aygitlarin belirmesi zaman alabilir (USB numaralandirma, SATA taramasi).
+# Birkac saniye beklemek, "bolum yok" diye canli sisteme dusmekten iyidir.
+DEV=""
+i=0
+while [ "$i" -lt 10 ]; do
+    DEV="$(resolve_dev "$ROOTSPEC" || true)"
+    [ -n "$DEV" ] && [ -b "$DEV" ] && break
+    DEV=""
+    i=$((i + 1))
+    sleep 1
+done
+
+if [ -z "$DEV" ]; then
+    log "kok aygiti bulunamadi ($ROOTSPEC) - canli sisteme donuluyor"
+    live_boot
+fi
+log "kok aygiti: $DEV"
+
+# ── Bagla ve DOGRULA ────────────────────────────────────────────────────────
+mkdir -p "$NEWROOT"
+if ! mount -t ext4 -o rw,noatime "$DEV" "$NEWROOT" 2>/dev/null; then
+    log "kok baglanamadi ($DEV) - canli sisteme donuluyor"
+    live_boot
+fi
+
+# MCOS kokunu DOGRULA. Rastgele bir ext4 bolumune switch_root yapmak sistemi
+# aciliste kilitler: /sbin/init yoksa cekirdek PID 1'i kaybeder ve panik verir.
+# Iki kosul birden aranir: calistirilabilir init VE bizim isaret dosyamiz.
+if [ ! -x "$NEWROOT/sbin/init" ] || [ ! -f "$NEWROOT/etc/mcos-root" ]; then
+    log "gecerli bir MCOS koku degil ($DEV) - canli sisteme donuluyor"
+    umount "$NEWROOT" 2>/dev/null || true
+    live_boot
+fi
+
+# ── Gecis ───────────────────────────────────────────────────────────────────
+#
+# switch_root eski kokun TUM iceriGini siler, bu yuzden onceden bagladigimiz
+# dosya sistemlerini yeni kokun altina TASIMAK zorundayiz. Tasimazsak
+# /proc ve /sys yeni sistemde eksik kalir.
+mkdir -p "$NEWROOT/proc" "$NEWROOT/sys" "$NEWROOT/dev" "$NEWROOT/run" "$NEWROOT/tmp"
+mount -o move /proc "$NEWROOT/proc" 2>/dev/null || mount -t proc proc "$NEWROOT/proc" 2>/dev/null
+mount -o move /sys "$NEWROOT/sys" 2>/dev/null || mount -t sysfs sysfs "$NEWROOT/sys" 2>/dev/null
+mount -o move /dev "$NEWROOT/dev" 2>/dev/null || true
+
+log "diske geciliyor: $DEV"
+exec switch_root "$NEWROOT" /sbin/init
+
+# Buraya ULASILMAMALI. switch_root basarisiz olduysa elimizde yarim bir durum
+# var: /proc ve /sys tasinmis, eski kok hala ayakta. Yine de acilmayi
+# denemeliyiz - acilmayan bir makine her zaman en kotu sonuctur.
+log "switch_root basarisiz - canli sistem deneniyor"
+exec /sbin/init

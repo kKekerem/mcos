@@ -5,3 +5,8 @@ devpts          /dev/pts      devpts   mode=0620,gid=5,nosuid,noexec 0 0
 tmpfs           /tmp          tmpfs    mode=1777            0     0
 tmpfs           /run          tmpfs    mode=0755,nosuid     0     0
 sysfs           /sys          sysfs    nosuid,noexec,nodev 0     0
+# cgroup v2: kaynak sinirlarinin UYGULANDIGI yer.
+#
+# Bu satir olmadan /sys/fs/cgroup bos kalir ve "sunucu basina CPU payi"
+# ayari hicbir sey yapmaz - eskiden tam olarak oyleydi.
+cgroup2         /sys/fs/cgroup cgroup2  nosuid,noexec,nodev  0     0

@@ -47,7 +47,26 @@ MCOS_MODES='1920x1080 1680x1050 1600x900 1440x900 1366x768 1280x1024 1280x800 12
 #   vt.global_cursor_default=0 imleç yanıp sönmesin (kendi arayüzümüzü çiziyoruz)
 #   root= YOK                 sistem initramfs'ten çalışır; root= verilirse
 #                             "VFS: Cannot open root device" paniği alınır
-MCOS_CMDLINE_BASE='console=tty0 consoleblank=0 loglevel=4 fbcon=nodefer vt.global_cursor_default=0'
+#
+# ── loglevel NEDEN 4 DEGIL 6? ──────────────────────────────────────────────
+# Olculdu (QEMU, donanim hizlandirmasiz — kullanicinin VirtualBox'i da oyle):
+#
+#   t=2..6 sn    GRUB menusu
+#   t=8..20 sn   TAMAMEN SIYAH EKRAN   <-- "enter'a basiyorum sonra siyah ekran"
+#   t=25 sn      acilis animasyonu
+#
+# loglevel=4 yalnizca KERN_ERR ve ustunu basar. Normal bir acilista o siddette
+# tek bir mesaj bile yoktur: cekirdek, cerceve arabellegi konsoluna gectigi an
+# (~0.9 sn) ekrani temizler ve o andan userspace'e kadar HICBIR SEY yazmaz.
+# Yani siyahlik bir ariza degil, TASARIM GEREGI sessizlikti — ama kullanici
+# bunu ayirt edemez ve makineyi bozuk sanip kapatir.
+#
+# loglevel=6 (KERN_INFO) normal acilis kaydini gosterir. Cirkin degil: metin
+# yalnizca ~8 saniye gorunur, sonra S04splash panel VT'sine gecip animasyonu
+# acar ve o metin bir daha gorunmez. Onemli olan su: ekranda bir sey AKAR,
+# yani makine calisiyordur. Gozlemlenemeyen bir acilis, bu hata raporunun ta
+# kendisini uretti.
+MCOS_CMDLINE_BASE='console=tty0 consoleblank=0 loglevel=6 fbcon=nodefer vt.global_cursor_default=0'
 
 # Kurtarma girdisinin komut satırı: grafik kipi hiç denenmez.
 MCOS_CMDLINE_RECOVERY='console=tty0 nomodeset vga=normal loglevel=7'

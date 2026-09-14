@@ -85,6 +85,15 @@ func downloadTo(ctx context.Context, client *http.Client, url, dir, filename str
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
+	dstPath := filepath.Join(dir, filename)
+
+	// CEVRIMDISI DEPO ONCE. Dosya daha once indirilmis veya imajla birlikte
+	// tohumlanmissa ag hic gerekmez. Bu satir olmadan internetsiz bir
+	// makinede hicbir sunucu kurulamiyordu.
+	if cacheLookup(url, dstPath) {
+		return dstPath, nil
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", err
@@ -92,20 +101,27 @@ func downloadTo(ctx context.Context, client *http.Client, url, dir, filename str
 	req.Header.Set("User-Agent", "mcos/0.1")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		// Ag hatasi: dosya depoda da yoksa kullaniciya NE oldugunu soyle.
+		return "", fmt.Errorf("%w (%s)", ErrOffline, url)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download %s: status %s", url, resp.Status)
 	}
-	dst := filepath.Join(dir, filename)
-	f, err := os.Create(dst)
+	f, err := os.Create(dstPath)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
 	if _, err := io.Copy(f, resp.Body); err != nil {
+		f.Close()
 		return "", err
 	}
-	return dst, nil
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+
+	// Bir daha indirmemek icin depoya yaz. Hata yok sayilir: depoya
+	// yazamamak indirmeyi basarisiz saymaz.
+	cacheStore(url, dstPath)
+	return dstPath, nil
 }

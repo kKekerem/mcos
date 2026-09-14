@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-MCOS_VERSION = 0.1.0
+MCOS_VERSION = 1.0.1
 # Sync ONLY the cross-compiled linux binaries (built by 'make linux'); pointing
 # at the repo root makes the local rsync drag in os/buildroot/buildroot (the
 # whole Buildroot source, hundreds of MB) — that stalls the build and bloats
@@ -21,6 +21,9 @@ define MCOS_INSTALL_TARGET_CMDS
 	$(INSTALL) -D -m 0755 $(@D)/mcos-panel $(TARGET_DIR)/usr/bin/mcos-panel
 	$(INSTALL) -D -m 0755 $(@D)/mcos-detect $(TARGET_DIR)/usr/bin/mcos-detect
 	$(INSTALL) -D -m 0755 $(@D)/mcos-panel-fb $(TARGET_DIR)/usr/bin/mcos-panel-fb
+	# Acilis animasyonu. Panelden AYRI bir ikili: servisler baslarken
+	# calisir ve panel hazir olunca son karesini birakip cikar.
+	$(INSTALL) -D -m 0755 $(@D)/mcos-splash $(TARGET_DIR)/usr/bin/mcos-splash
 endef
 
 $(eval $(generic-package))
