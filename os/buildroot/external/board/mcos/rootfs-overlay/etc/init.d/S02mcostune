@@ -1,0 +1,76 @@
+#!/bin/sh
+# MCOS çekirdek ayarları: bir Minecraft sunucusu için bellek, disk ve ağ.
+#
+# NEDEN: kullanıcı SD karta kurulu sistemde "performans felaket",
+# "the server has not responded for 10 seconds sürekli" dedi. Ölçülen/çıkarılan
+# sebepler ve karşılıkları aşağıda; her biri geri alınabilir sysfs/procfs
+# ayarıdır, hiçbiri kalıcı donanım değişikliği değildir.
+
+yaz() { [ -w "$1" ] && echo "$2" > "$1" 2>/dev/null; }
+
+start() {
+    # ── Bellek ──────────────────────────────────────────────────────────
+    # Kirli sayfa sınırı: varsayılan (RAM'in %20'si) 8 GB'lık makinede
+    # 1,6 GB demek. Yavaş SD karta o kadar veri bir anda boşaltılırken
+    # yazan her iş parçacığı (sunucunun oyuncu/bölge kaydı dahil) bekletilir.
+    # Küçük eşikler: sürekli, küçük boşaltmalar; uzun duraklama yok.
+    yaz /proc/sys/vm/dirty_background_bytes 16777216
+    yaz /proc/sys/vm/dirty_bytes 67108864
+    yaz /proc/sys/vm/dirty_expire_centisecs 1500
+    # zram ile takas ucuz (sıkıştırma RAM içinde): kök dosya sisteminin soğuk
+    # sayfaları sıkıştırılıp sunuculara bellek açılır.
+    yaz /proc/sys/vm/swappiness 100
+    yaz /proc/sys/vm/vfs_cache_pressure 50
+    # Büyük sayfalar yalnızca isteyene (JVM -XX:+UseTransparentHugePages);
+    # "always" birleştirme duraklamalarına yol açar, defer+madvise açmaz.
+    yaz /sys/kernel/mm/transparent_hugepage/enabled madvise
+    yaz /sys/kernel/mm/transparent_hugepage/defrag defer+madvise
+    yaz /sys/kernel/mm/transparent_hugepage/khugepaged/defrag 1
+
+    # zram takası: RAM'in yarısı kadar, lz4 (hızlı). Bir kez kurulur.
+    if [ -e /sys/block/zram0 ] && ! grep -q '^/dev/zram0' /proc/swaps 2>/dev/null; then
+        kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+        yaz /sys/block/zram0/comp_algorithm lz4
+        yaz /sys/block/zram0/disksize "$((kb / 2))K"
+        mkswap /dev/zram0 >/dev/null 2>&1 && { swapon -p 100 /dev/zram0 2>/dev/null || swapon /dev/zram0 2>/dev/null; }
+    fi
+
+    # ── Disk ────────────────────────────────────────────────────────────
+    # SD/USB/SATA: mq-deadline okumalara son tarih verir (toplu yazma
+    # sürerken bölge dosyası okuması sıraya girmesin). NVMe: zamanlayıcısız
+    # en hızlısı. Okuma önbelleği yavaş ortamda biraz büyük.
+    for q in /sys/block/*/queue; do
+        d=$(basename "$(dirname "$q")")
+        case "$d" in
+            nvme*) yaz "$q/scheduler" none ;;
+            mmcblk*|sd*|vd*) yaz "$q/scheduler" mq-deadline; yaz "$q/read_ahead_kb" 512 ;;
+        esac
+    done
+
+    # ── Ağ ──────────────────────────────────────────────────────────────
+    # Kalabalık sunucu: aynı anda bağlanan yüzlerce oyuncu için kuyruk.
+    yaz /proc/sys/net/core/somaxconn 8192
+    yaz /proc/sys/net/ipv4/tcp_max_syn_backlog 8192
+    yaz /proc/sys/net/core/netdev_max_backlog 16384
+    yaz /proc/sys/net/ipv4/tcp_fastopen 3
+    yaz /proc/sys/net/ipv4/tcp_slow_start_after_idle 0
+    # Her oyuncu bir soket: sistem geneli dosya sınırı (süreç sınırını
+    # mcosd kendisi yükseltir, çocuklar devralır).
+    yaz /proc/sys/fs/file-max 2097152
+    yaz /proc/sys/fs/nr_open 2097152
+
+    # ── İşlemci (turbo kapalıyken taban) ────────────────────────────────
+    # Enerji tercihini "dengeli performans"a çek: bazı BIOS'lar
+    # "balance_power" bırakıyor, sunucu yükünde frekans geç yükseliyor.
+    for f in /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference; do
+        yaz "$f" balance_performance
+    done
+    return 0
+}
+
+case "$1" in
+    start|restart|reload) start ;;
+    stop) ;;
+    *) echo "Kullanim: $0 {start|stop|restart}"; exit 1 ;;
+esac
+exit 0

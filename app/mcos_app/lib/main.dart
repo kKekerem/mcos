@@ -8,6 +8,7 @@ import 'services/store.dart';
 import 'theme/app_theme.dart';
 import 'theme/palette.dart';
 import 'widgets/mcos_logo.dart';
+import 'services/panel_text.dart';
 
 void main() {
   // Flutter bağlayıcısı: SystemChrome'u runApp'ten önce çağırmak için şart.
@@ -169,7 +170,7 @@ class _Welcome extends StatelessWidget {
                 ),
                 const SizedBox(height: 20),
                 const Text(
-                  'MCOS panelinde:  Sol menü → Uzaktan Kontrol',
+                  'MCOS panelinde:  $panelRemotePath',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Palette.textFaint, fontSize: 12),
                 ),

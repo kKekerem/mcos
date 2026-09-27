@@ -96,14 +96,22 @@ const pointerQueue = 256
 
 // Activity reports user input activity and pointer motion from evdev devices.
 type Activity struct {
+	// mu, aygıt listesini korur: yeniden tarama ve kopan aygıtın okuyucusu
+	// onu ayrı goroutine'lerden değiştiriyor.
+	mu     sync.Mutex
 	files  []*os.File
 	kinds  []Kind
 	names  []string
+	paths  map[string]bool
 	last   atomic.Int64 // son etkinliğin UnixNano değeri
 	closed atomic.Bool
 	wake   chan struct{}
 	ptr    chan PointerEvent
+	media  chan string
+	stop   chan struct{}
 	once   sync.Once
+	// onNew, yeniden taramada bulunan her yeni aygıt için çağrılır (günlük).
+	onNew func(name string, k Kind)
 
 	// Ekran boyutu: touchpad ve dokunmatik ekran ham değerlerini piksele
 	// çevirmek için gerekir. Atomik, çünkü okuyucu goroutine'lerden okunur.
@@ -117,8 +125,11 @@ type Activity struct {
 // kaç aygıt izlendiğini öğrenebilir.
 func WatchActivity() *Activity {
 	a := &Activity{
-		wake: make(chan struct{}, 1),
-		ptr:  make(chan PointerEvent, pointerQueue),
+		wake:  make(chan struct{}, 1),
+		ptr:   make(chan PointerEvent, pointerQueue),
+		media: make(chan string, 16),
+		stop:  make(chan struct{}),
+		paths: map[string]bool{},
 	}
 	a.last.Store(time.Now().UnixNano())
 	// Panel SetScreen çağırana kadar makul bir varsayılan: 1080p. Yanlış
@@ -127,8 +138,49 @@ func WatchActivity() *Activity {
 	a.scrW.Store(1920)
 	a.scrH.Store(1080)
 
+	a.scan()
+	go a.rescanLoop()
+	return a
+}
+
+// rescanInterval, yeni girdi aygıtlarının ne sıklıkla arandığı.
+//
+// ── Yakalanan gerçek eksik ──────────────────────────────────────────────────
+//
+// Aygıtlar yalnızca panel açılırken BİR KEZ taranıyordu. Oysa:
+//   - I2C-HID touchpad'ler çekirdek açılışının GEÇ bir aşamasında belirir
+//     (pinctrl/GPIO sürücüsü hazır olunca, ertelenmiş probe ile) — panel o
+//     sırada çoktan açılmış olabilir. Kullanıcının "gerçek PC'lerde touchpad
+//     yok" şikâyetinin kullanıcı alanındaki payı budur.
+//   - Sonradan takılan USB fare ya da klavye hiç görülmüyordu.
+//
+// 2 saniye: takılan farenin "çalışmıyor" sanılmayacağı kadar kısa, boşta
+// neredeyse maliyetsiz (tek bir dizin listesi).
+const rescanInterval = 2 * time.Second
+
+func (a *Activity) rescanLoop() {
+	t := time.NewTicker(rescanInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-a.stop:
+			return
+		case <-t.C:
+			a.scan()
+		}
+	}
+}
+
+// scan opens every /dev/input/event* that is not open yet.
+func (a *Activity) scan() {
 	paths, _ := filepath.Glob("/dev/input/event*")
 	for _, p := range paths {
+		a.mu.Lock()
+		acik := a.paths[p]
+		a.mu.Unlock()
+		if acik || a.closed.Load() {
+			continue
+		}
 		f, err := os.OpenFile(p, os.O_RDONLY, 0)
 		if err != nil {
 			// İzin yoksa veya aygıt kaybolduysa sessizce atla: tek bir
@@ -136,16 +188,56 @@ func WatchActivity() *Activity {
 			continue
 		}
 		c := probe(f)
+		a.mu.Lock()
+		a.paths[p] = true
 		a.files = append(a.files, f)
 		a.kinds = append(a.kinds, c.Kind)
 		a.names = append(a.names, c.Name)
-		go a.read(f, c)
+		cb := a.onNew
+		a.mu.Unlock()
+		if cb != nil {
+			cb(c.Name, c.Kind)
+		}
+		go a.read(p, f, c)
 	}
-	return a
 }
 
+// OnNewDevice registers a callback for devices found after startup.
+func (a *Activity) OnNewDevice(fn func(name string, k Kind)) {
+	a.mu.Lock()
+	a.onNew = fn
+	a.mu.Unlock()
+}
+
+// forget removes a device whose reader stopped (USB çıkarıldı).
+func (a *Activity) forget(path string, f *os.File) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.paths, path)
+	for i := range a.files {
+		if a.files[i] == f {
+			a.files = append(a.files[:i], a.files[i+1:]...)
+			a.kinds = append(a.kinds[:i], a.kinds[i+1:]...)
+			a.names = append(a.names[:i], a.names[i+1:]...)
+			break
+		}
+	}
+	_ = f.Close()
+}
+
+// MediaKeys yields laptop media key presses: "volumeup", "volumedown", "mute".
+//
+// Bu tuşlar (Fn+F3 vb., Fn kilidi kapalıyken çoğu dizüstüde doğrudan F3)
+// TTY'ye HİÇBİR karakter göndermez; yalnızca evdev'de görünürler. Panel
+// bunları diğer tuşlarla aynı yoldan işler (fbpanel.volumeKey).
+func (a *Activity) MediaKeys() <-chan string { return a.media }
+
 // Devices returns how many input devices are being watched.
-func (a *Activity) Devices() int { return len(a.files) }
+func (a *Activity) Devices() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.files)
+}
 
 // Pointers returns a description of every pointer device found.
 //
@@ -153,6 +245,8 @@ func (a *Activity) Devices() int { return len(a.files) }
 // dediğinde ilk soru "sistem fareyi görüyor mu?" olur. Liste boşsa yanıt
 // hemen bellidir.
 func (a *Activity) Pointers() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	var out []string
 	for i, k := range a.kinds {
 		if k == KindOther {
@@ -169,6 +263,8 @@ func (a *Activity) Pointers() []string {
 
 // HasPointer reports whether any mouse/touchpad/touchscreen was found.
 func (a *Activity) HasPointer() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	for _, k := range a.kinds {
 		if k != KindOther {
 			return true
@@ -190,13 +286,18 @@ func (a *Activity) SetScreen(w, h int) {
 func (a *Activity) Pointer() <-chan PointerEvent { return a.ptr }
 
 // read consumes events from one device.
-func (a *Activity) read(f *os.File, c caps) {
+func (a *Activity) read(path string, f *os.File, c caps) {
 	buf := make([]byte, inputEventSize*32)
 	dec := newPointerDecoder(a, c)
 	for {
 		n, err := f.Read(buf)
 		if err != nil {
-			return // aygıt kayboldu (USB çıkarıldı) veya kapatıldı
+			// Aygıt kayboldu (USB çıkarıldı) veya kapatıldı. Listeden düşür
+			// ki aynı düğüm yeniden belirirse (tekrar takılırsa) açılsın.
+			if !a.closed.Load() {
+				a.forget(path, f)
+			}
+			return
 		}
 		if a.closed.Load() {
 			return
@@ -212,6 +313,14 @@ func (a *Activity) read(f *os.File, c caps) {
 			// biriken hareket o anda gönderilir.
 			if typ != evSyn {
 				a.mark()
+			}
+			if typ == evKey {
+				if ad, ok := mediaKey(code, val); ok {
+					select {
+					case a.media <- ad:
+					default: // panel yetişemiyorsa fazla basış düşer
+					}
+				}
 			}
 			if dec != nil {
 				dec.feed(typ, code, val)
@@ -266,11 +375,38 @@ func (a *Activity) Touch() { a.mark() }
 func (a *Activity) Close() error {
 	a.once.Do(func() {
 		a.closed.Store(true)
+		close(a.stop)
+		a.mu.Lock()
 		for _, f := range a.files {
 			_ = f.Close()
 		}
+		a.mu.Unlock()
 	})
 	return nil
+}
+
+// Medya tuşu kodları (linux/input-event-codes.h).
+const (
+	keyMute       = 113
+	keyVolumeDown = 114
+	keyVolumeUp   = 115
+)
+
+// mediaKey maps an EV_KEY event to a panel key name.
+//
+// val: 1 = basış, 2 = basılı tutma tekrarı, 0 = bırakma. Ses aç/kıs basılı
+// tutulunca TEKRARLAMALI (seviye akarak değişsin); sessiz ise yalnızca
+// basışta — tekrarında her 30 ms'de bir aç/kapa yapardı.
+func mediaKey(code uint16, val int32) (string, bool) {
+	switch code {
+	case keyVolumeUp:
+		return "volumeup", val == 1 || val == 2
+	case keyVolumeDown:
+		return "volumedown", val == 1 || val == 2
+	case keyMute:
+		return "mute", val == 1
+	}
+	return "", false
 }
 
 // ── İmleç çözücü ────────────────────────────────────────────────────────────
@@ -302,11 +438,40 @@ type pointerDecoder struct {
 	wheel  int
 
 	// Mutlak aygıtlar için son konum (ham birim).
-	haveLast   bool
-	lastX      int32
-	lastY      int32
-	curX, curY int32
-	gotX, gotY bool
+	//
+	// ── Düzeltilen gerçek hata: EKSENLER AYRI İZLENMELİ ─────────────────
+	//
+	// Burada tek bir haveLast bayrağı vardı ve hareket YALNIZCA hem X hem
+	// Y aynı pakette geldiğinde hesaplanıyordu. Ama çekirdek DEĞİŞMEYEN
+	// bir ekseni GÖNDERMEZ (drivers/input/input.c: aynı değer bastırılır).
+	//
+	// Sonuç ölçüldü (ELAN1200 aralıklarıyla, 1920x1080):
+	//
+	//	saf YATAY sürükleme, 30 kare  -> 0 olay, 0 piksel
+	//	saf DİKEY sürükleme,  30 kare -> 0 olay, 0 piksel
+	//	çapraz (iki eksen de değişir) -> 29 olay, çalışıyor
+	//	karışık (X her kare, Y her 4.) -> paketlerin %77,5'i DÜŞÜYOR
+	//
+	// Yani touchpad "bazen çalışmıyor" değil, DÜZ hareket hiç çalışmıyordu
+	// ve eğik hareketin dörtte üçü yutuluyordu. Kullanıcının "takılıyor"
+	// dediği hissin girdi tarafındaki payı budur.
+	//
+	// Artık her eksen kendi referansını tutuyor: gelmeyen eksenin farkı
+	// sıfır sayılıyor, gelen eksen normal işleniyor.
+	// İKİ AYRI KAVRAM, bilerek ayrıldı:
+	//
+	//	curX/curY + haveX/haveY : o eksenin BİLİNEN son konumu. Bir kez
+	//	                          geldikten sonra hep geçerlidir.
+	//	lastX/lastY + refX/refY : touchpad farkının ölçüldüğü REFERANS.
+	//	                          Yeni dokunuşta sıfırlanır (sıçrama olmasın).
+	//
+	// Bunları tek bayrakta birleştirmek, dokunmatik ekranda ilk dokunuşun
+	// yutulmasına yol açıyordu.
+	curX, curY   int32
+	haveX, haveY bool
+	lastX, lastY int32
+	refX, refY   bool
+	gotX, gotY   bool
 
 	// Çoklu dokunmada YALNIZCA ilk parmak (slot 0) imleci sürer. İkinci
 	// parmağın olaylarını hareket sanmak, iki parmakla kaydırırken imlecin
@@ -329,7 +494,17 @@ func newPointerDecoder(a *Activity, c caps) *pointerDecoder {
 	if c.Kind == KindOther {
 		return nil
 	}
-	return &pointerDecoder{a: a, c: c, kind: c.Kind}
+	d := &pointerDecoder{a: a, c: c, kind: c.Kind}
+	if c.Hover {
+		// Mutlak işaretçinin BAŞLANGIÇ konumu çekirdekte zaten var
+		// (EVIOCGABS "value"). Onu bilinen konum saymazsak ilk hareket
+		// kaybolabilir: çekirdek DEĞİŞMEYEN ekseni göndermez, VNC
+		// istemcisi imleci önce yalnızca dikey oynatırsa X hiç gelmez ve
+		// haveX yanlış kalır -> imleç yerinde sayar.
+		d.curX, d.haveX = c.RangeX.Value, true
+		d.curY, d.haveY = c.RangeY.Value, true
+	}
+	return d
 }
 
 // feed consumes one raw event.
@@ -353,11 +528,11 @@ func (d *pointerDecoder) feed(typ, code uint16, val int32) {
 			d.slot = val
 		case absX, absMTPosX:
 			if d.slot == 0 {
-				d.curX, d.gotX = val, true
+				d.curX, d.gotX, d.haveX = val, true, true
 			}
 		case absY, absMTPosY:
 			if d.slot == 0 {
-				d.curY, d.gotY = val, true
+				d.curY, d.gotY, d.haveY = val, true, true
 			}
 		}
 
@@ -370,9 +545,9 @@ func (d *pointerDecoder) feed(typ, code uint16, val int32) {
 			// İkinci parmak indiğinde/kalktığında konum referansı geçersiz:
 			// sürücü ilk parmağın konumunu yeniden bildirmeden hareket
 			// hesaplamak sıçramaya yol açar.
-			d.haveLast = false
+			d.refX, d.refY = false, false
 		case btnToolTripl:
-			d.haveLast = false
+			d.refX, d.refY = false, false
 		case btnLeft:
 			d.button(ButtonLeft, val != 0)
 		case btnRight:
@@ -397,12 +572,13 @@ func (d *pointerDecoder) onTouch(down bool) {
 		d.btnDuringTouch = false
 		// YENİ dokunuşta referansı sıfırla: parmak pad'in başka bir
 		// köşesine indiğinde eski konumdan fark almak imleci fırlatırdı.
-		d.haveLast = false
+		// BİLİNEN konum (haveX/haveY) korunur; bozulan yalnızca referanstır.
+		d.refX, d.refY = false, false
 		return
 	}
 	wasTouching := d.touching
 	d.touching = false
-	d.haveLast = false
+	d.refX, d.refY = false, false
 	if !wasTouching {
 		return
 	}
@@ -469,20 +645,39 @@ func (d *pointerDecoder) flush() {
 	switch d.kind {
 	case KindTouchscreen:
 		// Dokunmatik ekranda parmağın DEĞDİĞİ nokta imlecin gittiği yerdir.
-		if d.gotX && d.gotY && d.touching {
+		//
+		// İKİ eksen de en az bir kez görülmüş olmalı, ama AYNI pakette
+		// gelmeleri gerekmez: değişmeyen eksenin son değeri hâlâ geçerlidir.
+		//
+		// Hover aygıtında (VNC, sanal tablet) temas YOKTUR: bildirilen her
+		// konum imlecin yeridir. Temas şartı burada VNC faresini tamamen
+		// öldürüyordu (bkz. absPointerKind).
+		if (d.gotX || d.gotY) && d.haveX && d.haveY && (d.touching || d.c.Hover) {
 			x, okX := mapAxis(d.curX, d.c.RangeX, scrW)
 			y, okY := mapAxis(d.curY, d.c.RangeY, scrH)
 			if okX && okY {
 				d.a.emit(PointerEvent{Kind: d.kind, HasAbs: true,
-					AbsX: int(x), AbsY: int(y)})
+					AbsX: int(math.Round(x)), AbsY: int(math.Round(y))})
 			}
 		}
+		// Tekerlek: mutlak işaretçiler (VNC) tekerleği REL_WHEEL olarak
+		// bildirir. Bu dal eskiden emitMotion'ı hiç çağırmıyordu, yani
+		// biriken tekerlek adımı sessizce kayboluyordu. dx/dy burada hep
+		// sıfır; gönderilen yalnızca tekerlektir.
+		d.emitMotion()
 
 	case KindTouchpad:
-		if d.gotX && d.gotY && d.touching {
-			if d.haveLast {
-				rdx := float64(d.curX - d.lastX)
-				rdy := float64(d.curY - d.lastY)
+		if (d.gotX || d.gotY) && d.touching {
+			// Gelmeyen eksenin farkı SIFIR: çekirdek onu göndermediyse o
+			// eksende hareket YOKTUR (bkz. haveX/haveY yorumu).
+			if d.refX || d.refY {
+				var rdx, rdy float64
+				if d.gotX && d.refX {
+					rdx = float64(d.curX - d.lastX)
+				}
+				if d.gotY && d.refY {
+					rdy = float64(d.curY - d.lastY)
+				}
 				spanX := float64(d.c.RangeX.Max - d.c.RangeX.Min)
 				spanY := float64(d.c.RangeY.Max - d.c.RangeY.Min)
 				if spanX > 0 && spanY > 0 {
@@ -508,8 +703,14 @@ func (d *pointerDecoder) flush() {
 					}
 				}
 			}
-			d.lastX, d.lastY = d.curX, d.curY
-			d.haveLast = true
+			// Referans YALNIZCA gelen eksende güncellenir: gelmeyen
+			// eksenin son değeri hâlâ geçerli.
+			if d.gotX {
+				d.lastX, d.refX = d.curX, true
+			}
+			if d.gotY {
+				d.lastY, d.refY = d.curY, true
+			}
 		}
 		d.emitMotion()
 

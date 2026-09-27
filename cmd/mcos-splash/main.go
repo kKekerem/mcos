@@ -34,7 +34,6 @@ import (
 	"math"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -56,20 +55,39 @@ const frameInterval = 33 * time.Millisecond
 //
 // Tek satırlık düz metin. Yoksa varsayılan mesaj kullanılır — yani init
 // betiği bunu hiç yazmazsa açılış ekranı yine de düzgün çalışır.
-const defaultStageFile = "/run/mcos-splash.msg"
+// ── Neden /run DEĞİL /dev altında ───────────────────────────────────────────
+//
+// Açılış animasyonu artık initramfs'in /init'inden, yani busybox init'ten
+// ÖNCE başlıyor (kullanıcının isteği: "direkt acılırken ilk animasyon
+// baslasın"). O anda /run sıradan bir dizindir; inittab'in "mount -a" satırı
+// birkaç saniye sonra ÜSTÜNE tmpfs bağlar ve o ana kadar yazılmış her şey
+// görünmez olur — durum dosyası, PID dosyası, "hazırım" bayrağı, hepsi.
+//
+// Sonuç sessiz ve tuhaf olurdu: S04splash animasyonun çalıştığını göremeyip
+// İKİNCİ bir animasyon başlatır, ilki ise artık kimsenin yazmadığı bir durum
+// dosyasını okumaya devam ederdi.
+//
+// /dev devtmpfs'tir ve TEK BİR çekirdek örneğidir: ikinci kez bağlansa bile
+// aynı ağacı gösterir, içeriği kaybolmaz. Bu yüzden açılış koordinasyonu
+// oraya taşındı.
+const mcosRunDir = "/dev/.mcos"
+
+const defaultStageFile = mcosRunDir + "/stage"
 
 func main() {
 	var (
 		fbPath  = flag.String("fb", "/dev/fb0", "framebuffer aygıtı")
 		ttyPath = flag.String("tty", "/dev/tty", "konsol aygıtı")
-		until   = flag.String("until", "/run/mcos-panel.ready",
+		until   = flag.String("until", mcosRunDir+"/ready",
 			"bu dosya oluşunca çık")
 		stage = flag.String("stage", defaultStageFile, "durum metni dosyası")
-		save  = flag.String("save", "/run/mcos-splash.rgba",
+		save  = flag.String("save", mcosRunDir+"/frame.rgba",
 			"son kareyi buraya yaz (panel geçişi için)")
 		timeout = flag.Duration("timeout", 45*time.Second, "en fazla bekleme")
 		fontPx  = flag.Float64("font", 0, "yazı boyutu (0 = otomatik)")
 		shot    = flag.String("screenshot", "", "bir kare çizip PNG yaz ve çık")
+		brand   = flag.Bool("brand", false,
+			"ekran görüntüsünde YALNIZCA marka karesi (ilerleme ve donanım yok)")
 		minShow = flag.Duration("min", 1200*time.Millisecond,
 			"en az bu kadar göster (yanıp sönmeyi engeller)")
 		keep = flag.Bool("keep", false,
@@ -120,14 +138,14 @@ func main() {
 		return
 	}
 
-	if err := run(*fbPath, *ttyPath, *until, *stage, *save, *shot,
+	if err := run(*fbPath, *ttyPath, *until, *stage, *save, *shot, *brand,
 		*timeout, *minShow, *fontPx, *keep); err != nil {
 		fmt.Fprintln(os.Stderr, "mcos-splash:", err)
 		os.Exit(1)
 	}
 }
 
-func run(fbPath, ttyPath, until, stage, save, shot string,
+func run(fbPath, ttyPath, until, stage, save, shot string, brandOnly bool,
 	timeout, minShow time.Duration, fontPx float64, keep bool) error {
 
 	// ── Ekran görüntüsü kipi: donanım gerekmez ──────────────────────────
@@ -138,7 +156,21 @@ func run(fbPath, ttyPath, until, stage, save, shot string,
 		if err != nil {
 			return err
 		}
-		drawSplash(ui, 18, 62, "Sunucular hazırlanıyor…")
+		if brandOnly {
+			// ── Neden AYRI bir kare ─────────────────────────────────────
+			//
+			// Bu kare GRUB'un arka planı olarak kullanılıyor, yani ekranda
+			// çekirdek daha yüklenmeden görünüyor. O anda ilerleme diye bir
+			// şey YOK ve donanım da OKUNMADI.
+			//
+			// Kullanıcı "ekrandaki açıklamalar gerçek olsun" dedi. Bir
+			// ilerleme halkasını %62'de göstermek ya da işlemci adı yazmak
+			// tam olarak o kuralı çiğnerdi: ikisi de uydurma olurdu.
+			// Geriye doğru olan tek şey kalıyor — bu makine MCOS.
+			drawBrand(ui)
+		} else {
+			drawSplash(ui, 18, 62, "Sunucular hazırlanıyor…", hardwareLine())
+		}
 		return fbdev.SavePNG(canvas, shot)
 	}
 
@@ -204,22 +236,49 @@ func run(fbPath, ttyPath, until, stage, save, shot string,
 	start := time.Now()
 	deadline := start.Add(timeout)
 	frame := 0
+	pct := 0
 	msg := "Sistem başlatılıyor…"
+	// ── Donanım satırı: BAŞARILI OLANA KADAR yeniden denenir ───────────
+	//
+	// Bir kez okumak YETMİYOR ve sebebi ölçüldü. Animasyon artık initramfs'in
+	// /init'inden başlıyor; /init hemen ardından canlı sisteme devrederken
+	// /proc ve /sys'i SÖKÜYOR (live_boot) ve busybox init onları birkaç yüz
+	// milisaniye sonra yeniden bağlıyor. Animasyon tam o pencerede açılırsa
+	// /proc/cpuinfo yoktur ve satır sonsuza kadar boş kalırdı — QEMU'da
+	// gözlendi: ekranda donanım yerine sabit slogan yazıyordu.
+	//
+	// Saniyede bir yeniden denemek bunu kapatıyor. Okuma başarılı olduğunda
+	// bir daha denenmez; yani maliyeti yalnızca ilk saniyelerde birkaç
+	// /proc okumasıdır.
+	hw := hardwareLine()
 
 	for {
-		// ── İlerleme ────────────────────────────────────────────────────
-		// Gerçek bir yüzde yok (açılışın ne kadar sürdüğünü kimse bilmiyor).
-		// Zamandan türetilen ve 92'de DURAN bir eğri kullanıyoruz: halka
-		// asla "%100 ama hâlâ bekliyor" duruma düşmez, ki bu en can sıkıcı
-		// ilerleme çubuğu hatasıdır.
-		el := time.Since(start)
-		pct := int(92 * (1 - math.Exp(-el.Seconds()/4.0)))
-
-		if s := readStage(stage); s != "" {
-			msg = s
+		// ── İlerleme: GERÇEK aşamalardan ───────────────────────────────
+		//
+		// Yüzde artık süreden değil, açılışın BİTEN ADIMLARINDAN geliyor
+		// (bkz. stage.go ve /usr/bin/mcos-stage). Bir adım bittiğinde onu
+		// bitiren betik yüzdeyi yazıyor.
+		//
+		// İki koruma var:
+		//   - Yüzde GERİ GİTMEZ. Sıra dışı bir yazım (ör. eski bir betik)
+		//     halkayı geri saramaz; ilerleme çubuğunun geri gitmesi,
+		//     kullanıcıya "bir şeyler bozuldu" dedirtir.
+		//   - Aşama bildirimi hiç gelmezse (tüm betikler eski) halka
+		//     kıpırdamaz ama yavaşça soluklaşan bir bekleme göstergesi
+		//     zaten dönüyor; "donmuş" görünmez.
+		if hw == "" && frame%30 == 0 {
+			hw = hardwareLine()
 		}
 
-		drawSplash(ui, frame, pct, msg)
+		st := readStageInfo(stage)
+		if st.pct > pct {
+			pct = st.pct
+		}
+		if st.text != "" {
+			msg = st.text
+		}
+
+		drawSplash(ui, frame, pct, msg, hw)
 		if err := dev.Flip(canvas); err != nil {
 			return err
 		}
@@ -230,7 +289,7 @@ func run(fbPath, ttyPath, until, stage, save, shot string,
 		if ready && time.Since(start) >= minShow {
 			// Son kareyi %100'e tamamla: yarım kalmış bir halka, geçişte
 			// göze batar.
-			drawSplash(ui, frame, 100, "Hazır")
+			drawSplash(ui, frame, 100, "Hazır", hw)
 			_ = dev.Flip(canvas)
 			if save != "" {
 				// Geçiş karesi: panel buradan yakınlaşarak açılacak.
@@ -280,7 +339,33 @@ func newUI(canvas *image.RGBA, fontPx float64, screenH int) (*fbui.UI, error) {
 }
 
 // drawSplash paints one frame of the boot animation.
-func drawSplash(u *fbui.UI, frame, pct int, msg string) {
+// drawBrand paints the still frame used as GRUB's background.
+//
+// Açılış animasyonunun İLK karesiyle aynı kompozisyon, ama hareketli ve
+// bilinmeyen her şey çıkarılmış: ilerleme halkası yok (henüz ilerleme yok),
+// donanım satırı yok (henüz okunmadı), durum metni yok (henüz bir şey
+// yapılmıyor). Ekranda kalan her şey o anda DOĞRU.
+//
+// Böylece kullanıcı güç düğmesine bastıktan ~1 saniye sonra MCOS logosunu
+// görüyor ve çekirdek yüklenene kadar o logo duruyor; animasyon devraldığında
+// aynı yerde aynı logo olduğu için geçiş görünmüyor.
+func drawBrand(u *fbui.UI) {
+	b := u.Bounds()
+	u.P.Fill(b, u.Pal.Bg)
+
+	cx := float64(b.Min.X+b.Max.X) / 2
+	cy := float64(b.Min.Y) + float64(b.Dy())*0.42
+	size := math.Min(float64(b.Dx()), float64(b.Dy())) * 0.13
+
+	u.Logo(cx, cy, size, u.Pal.Accent)
+
+	y := int(cy+size*1.35) + u.M.PadY*4
+	u.TextCenter(b.Min.X, b.Max.X, y, "MCOS", u.Pal.Text)
+	y += u.F.CellH + u.M.PadY/2
+	u.TextCenter(b.Min.X, b.Max.X, y, version.Display(), u.Pal.TextFaint)
+}
+
+func drawSplash(u *fbui.UI, frame, pct int, msg, hw string) {
 	b := u.Bounds()
 	u.P.Fill(b, u.Pal.Bg)
 
@@ -313,31 +398,21 @@ func drawSplash(u *fbui.UI, frame, pct int, msg string) {
 
 	u.TextCenter(b.Min.X, b.Max.X, y, msg, u.Pal.TextDim)
 
-	// Altta tek satırlık ürün tanımı: ilk açılışta kullanıcı ne kurduğunu
-	// hatırlasın.
+	// ── Altta GERÇEK donanım ───────────────────────────────────────────
+	//
+	// Burada eskiden sabit bir slogan vardı ("Minecraft Sunucu İşletim
+	// Sistemi"). Artık makinenin kendisi yazıyor: işlemci, çekirdek sayısı,
+	// bellek — hepsi /proc'tan, hiçbiri tahmin değil.
+	//
+	// Okunamazsa slogan geri geliyor: boş bir satır bırakmak, ekranın
+	// yarım çizildiği izlenimi verirdi.
 	bottom := b.Max.Y - u.F.CellH - u.M.PadY*2
-	u.TextCenter(b.Min.X, b.Max.X, bottom,
-		"Minecraft Sunucu İşletim Sistemi", u.Pal.TextFaint)
-}
-
-// readStage reads the one-line status the init script may have written.
-func readStage(path string) string {
-	if path == "" {
-		return ""
+	if hw != "" {
+		u.TextCenter(b.Min.X, b.Max.X, bottom, hw, u.Pal.TextFaint)
+	} else {
+		u.TextCenter(b.Min.X, b.Max.X, bottom,
+			"Minecraft Sunucu İşletim Sistemi", u.Pal.TextFaint)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	s := strings.TrimSpace(string(data))
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	// Çok uzun bir satır ekranın dışına taşar; kesmek tek doğru davranış.
-	if r := []rune(s); len(r) > 64 {
-		s = string(r[:63]) + "…"
-	}
-	return s
 }
 
 func fileExists(p string) bool {

@@ -58,6 +58,13 @@ const (
 	MethodRemoteDisable = "remote.disable"
 	MethodRemoteRotate  = "remote.rotate"
 
+	// Ekran paylaşımı (RFB/VNC): RealVNC Viewer gibi istemcilerle bağlanma.
+	MethodVNCStatus   = "vnc.status"
+	MethodVNCEnable   = "vnc.enable"
+	MethodVNCDisable  = "vnc.disable"
+	MethodVNCRotate   = "vnc.rotate"   // parolayı yenile (bağlıları keser)
+	MethodVNCViewOnly = "vnc.viewOnly" // girdiyi aç/kapat
+
 	// SSH: kabuk erisimi.
 	MethodSSHStatus   = "ssh.status"
 	MethodSSHEnable   = "ssh.enable"
@@ -74,6 +81,12 @@ const (
 	MethodTierSet       = "tier.set"
 	MethodConfigGet     = "config.get"
 	MethodConfigSet     = "config.set"
+
+	// Sistem güncellemesi: USB'deki yeni ISO ile, veri kaybı olmadan
+	// (daemon/handlers_update.go, rootfs-overlay/usr/bin/mcos-update).
+	MethodSystemUpdateScan   = "system.updateScan"   // USB'deki MCOS ISO'larını listele
+	MethodSystemUpdate       = "system.update"       // güncellemeyi arka planda başlat
+	MethodSystemUpdateStatus = "system.updateStatus" // güncellemenin ilerlemesi/sonucu
 
 	MethodServerList    = "server.list"
 	MethodServerGet     = "server.get"
@@ -95,6 +108,9 @@ const (
 
 	MethodServerScanUSBMods    = "server.scanUSBMods"    // scan USB drives for .jar files
 	MethodServerInstallUSBMods = "server.installUSBMods" // copy selected USB .jar files to mods/plugins
+	// USB'den sunucu klasörü aktarma (dünya, modlar, eklentiler, ayarlar).
+	MethodServerScanUSBFolders = "server.scanUSBFolders"
+	MethodServerImportUSB      = "server.importUSB"
 
 	MethodJavaList     = "java.list"
 	MethodJavaInstall  = "java.install"
@@ -136,8 +152,16 @@ const (
 	// (istemci yalıtımı) çalışmaz. Kullanıcı "otomatik ağda tarasın,
 	// bulamazsak IP girelim" dedi; bu iki metot tam olarak odur.
 	MethodClusterScan       = "cluster.scan"
+	MethodClusterScanStart  = "cluster.scanStart"  // canlı tarama: başlat
+	MethodClusterScanStatus = "cluster.scanStatus" // canlı tarama: yokla
 	MethodClusterPairManual = "cluster.pairManual"
 	MethodClusterSecret     = "cluster.secret"
+
+	// Anahtarsız (kodla) eşleştirme: iki ekranda aynı 6 haneli kod, düğümde
+	// "Kabul et", MCOS'ta onay. Bkz. internal/cluster/pairoffer.go.
+	MethodClusterPairOffer   = "cluster.pairOffer"
+	MethodClusterPairConfirm = "cluster.pairConfirm"
+	MethodClusterPairCancel  = "cluster.pairCancel"
 
 	// MCOS Link — birden çok PC'nin aynı dünyayı çalıştırması.
 	MethodLinkStatus  = "link.status"
@@ -156,4 +180,9 @@ const (
 	MethodNetWiFiScan  = "net.wifiScan"  // scan for nearby access points
 	MethodNetWiFiApply = "net.wifiApply" // connect + persist a wifi network
 	MethodNetWiredUp   = "net.wiredUp"   // bring up wired interfaces + DHCP
+
+	// Canlı tarama: başlat + durumu yokla. net.wifiScan (bloklayan) uyumluluk
+	// için duruyor; telefon uygulaması ve kurulum sihirbazı onu kullanıyor.
+	MethodNetWiFiScanStart  = "net.wifiScanStart"  // non-blocking: start a scan
+	MethodNetWiFiScanStatus = "net.wifiScanStatus" // poll partial results
 )

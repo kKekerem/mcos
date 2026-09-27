@@ -48,14 +48,17 @@ fi
 
 echo "== 2. Kurulu disk KALICI =="
 
-if code "$INSTALL" | grep -q 'mcos\.root=LABEL=MCOS-ROOT'; then
-    pass "kurulum mcos.root=LABEL=MCOS-ROOT yazıyor"
+# Kök etiketi her kurulumda BENZERSİZ: "MCOS-ROOT-<6 hex>". Sabit "MCOS-ROOT"
+# eski bir disk takılıyken /init'in ESKİ kökü açmasına yol açıyordu.
+if code "$INSTALL" | grep -q 'mcos\.root=LABEL=\$ROOT_LABEL' &&
+   code "$INSTALL" | grep -q 'ROOT_LABEL="MCOS-ROOT-'; then
+    pass "kurulum mcos.root=LABEL=MCOS-ROOT-<kimlik> yazıyor"
 else
     fail "kurulum kalıcılık parametresini yazmıyor — disk yine RAM'den açılır"
 fi
 
-if code "$INSTALL" | grep -q 'mkfs.ext4 .*-L MCOS-ROOT'; then
-    pass "kök bölümü MCOS-ROOT etiketiyle biçimlendiriliyor"
+if code "$INSTALL" | grep -q 'mkfs.ext4 .*-L "\$ROOT_LABEL"'; then
+    pass "kök bölümü MCOS-ROOT-<kimlik> etiketiyle biçimlendiriliyor"
 else
     fail "MCOS-ROOT etiketli kök bölümü yok"
 fi

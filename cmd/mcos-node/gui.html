@@ -1,0 +1,101 @@
+<header class="ust">
+  <div class="logo">M</div>
+  <div>
+    <h1>MCOS Düğüm</h1>
+    <div class="alt">Bu bilgisayarı MCOS'a ikinci makine olarak ekler</div>
+  </div>
+  <div class="bosluk"></div>
+  <span class="rozet" id="rozet"><span class="nokta" id="rozetNokta"></span><span id="rozetMetin">Yükleniyor…</span></span>
+</header>
+
+<!-- Eşleştirme istekleri: MCOS'ta "Eşleştir"e basılınca burada BÜYÜK bir
+     kart çıkar; kod iki ekranda aynıysa "Kabul et". -->
+<div id="teklifler"></div>
+
+<section class="durum" id="durum">
+  <div class="simge" id="durumSimge">…</div>
+  <div class="metin">
+    <div class="baslik" id="durumBaslik">Yükleniyor…</div>
+    <div class="aciklama" id="durumAciklama"></div>
+  </div>
+</section>
+
+<div id="kutular"></div>
+
+<div class="izgara">
+  <section class="kart" id="nasilKart">
+    <h2>Nasıl eşleşilir</h2>
+    <ol class="adimlar">
+      <li>MCOS ekranında: <b>Sol menü → MCOS Paylaşım → Ağı tara</b></li>
+      <li>Listede <b id="adimAd">bu PC</b>'yi seçip <b>Eşleştir</b>'e basın</li>
+      <li>Bu pencerede bir <b>kod</b> çıkar. MCOS'taki kodla aynıysa <b>Kabul et</b>, MCOS'ta <b>Kodlar aynı, onayla</b></li>
+    </ol>
+    <div class="soluk" style="font-size:12.5px;margin-top:10px">
+      Taramada çıkmazsa MCOS'ta <b>IP adresi gir…</b> →
+      <span class="mono" id="ipIpucu">—</span>
+      <button class="kucuk" id="kopyala" title="Adresi panoya kopyala">Kopyala</button>
+    </div>
+  </section>
+
+  <section class="kart">
+    <h2>Eşleşen MCOS cihazları <span class="say" id="esSay"></span></h2>
+    <div class="liste" id="esler"></div>
+  </section>
+
+  <section class="kart">
+    <h2>Arka plan servisi</h2>
+    <div class="kv">
+      <span class="k">Durum</span>
+      <span class="v" id="pcNot">—</span>
+      <span class="k">Bu PC</span>
+      <span class="v"><b id="pcAd">—</b> · <span class="mono" id="pcAdres">—</span></span>
+      <span class="k">Sürüm</span>
+      <span class="v dim" id="pcSurum">—</span>
+    </div>
+    <div class="dugmeler">
+      <button class="birincil" id="baslat">Başlat</button>
+      <button id="durdur">Durdur</button>
+      <button id="klasor">Veri klasörünü aç</button>
+    </div>
+    <div style="margin-top:14px">
+      <label class="anahtar"><input type="checkbox" id="otobaslat"><span class="ray"></span><span>Oturum açılışında başlat</span></label>
+      <div class="soluk" id="otoNot" style="font-size:12.5px;margin-top:4px"></div>
+    </div>
+  </section>
+
+  <section class="kart tam">
+    <h2>Bu PC'deki sunucular <span class="say" id="srvSay"></span></h2>
+    <div id="sunucular"></div>
+  </section>
+
+  <section class="kart tam">
+    <details class="gelismis" id="gelismis">
+      <summary>Gelişmiş: eşleştirme anahtarını elle gir</summary>
+      <div class="soluk" style="margin-bottom:10px">
+        Normalde gerekmez: kodla eşleşince anahtar MCOS'tan otomatik gelir.
+        Kodla eşleşme olmazsa (eski MCOS sürümü) anahtarı buraya yapıştırın —
+        MCOS'ta <b>MCOS Paylaşım → Eşleştirme anahtarını göster</b>.
+      </div>
+      <div id="anahtarDurum" class="kv" style="display:none">
+        <span class="k">Anahtar</span>
+        <span class="v"><span class="mono" id="anahtarIpucu"></span></span>
+      </div>
+      <form id="anahtarForm" autocomplete="off">
+        <label class="alan" for="anahtar">Eşleştirme anahtarı</label>
+        <input type="text" id="anahtar" spellcheck="false" placeholder="MCOS ekranındaki anahtarı buraya yapıştırın">
+        <label class="alan" for="ad">Bu PC'nin MCOS'ta görünecek adı</label>
+        <input type="text" id="ad" spellcheck="false">
+        <div class="dugmeler">
+          <button type="submit" id="kaydet">Kaydet</button>
+        </div>
+      </form>
+    </details>
+  </section>
+
+  <section class="kart tam">
+    <h2>Günlük <span class="sag soluk mono" id="gunlukYol" style="font-size:11.5px"></span></h2>
+    <pre class="gunluk" id="gunluk">—</pre>
+  </section>
+</div>
+
+<div class="alt-not" id="altNot">Bu pencereyi kapatmak düğümü durdurmaz: düğüm arka planda çalışmaya devam eder.</div>

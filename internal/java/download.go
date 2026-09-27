@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
@@ -34,12 +35,55 @@ func adoptiumOSArch() (osName, arch string) {
 }
 
 // temurinURL returns the Adoptium "latest GA" binary URL for a Java major.
-func temurinURL(major int) string {
+//
+// image "jre" ya da "jdk". Önce JRE denenir: sunucu çalıştırmak için javac
+// gerekmez ve JRE ~52 MB iken JDK ~200 MB'tır (Temurin 25, 2026-09-26). Eskiden
+// hep JDK indiriliyordu; yavaş bir bağlantıda "Java kuruluyor" dakikalarca
+// sürüyordu. JDK yalnızca JRE yayımlanmamış bir ana sürüm için yedektir.
+func temurinURL(major int, image string) string {
 	osName, arch := adoptiumOSArch()
 	return fmt.Sprintf(
-		"https://api.adoptium.net/v3/binary/latest/%d/ga/%s/%s/jdk/hotspot/normal/eclipse?project=jdk",
-		major, osName, arch,
+		"https://api.adoptium.net/v3/binary/latest/%d/ga/%s/%s/%s/hotspot/normal/eclipse?project=jdk",
+		major, osName, arch, image,
 	)
+}
+
+// LocalArchiveDirs: indirmeden ÖNCE Temurin arşivinin arandığı dizinler.
+//
+// Neden: 26.x sunucuları Java 25 ister ve imaja gömülü olan yalnızca Java
+// 21'dir (25'i de rootfs'e açmak canlı ISO'da her açılışta +144 MB RAM ve
+// açılış boyutu sınırının aşılması demekti; bkz. scripts/test-boot-logic.sh).
+// Java 25 arşivi bunun yerine çevrimdışı pakette gelir; mcos-install onu
+// kalıcı bölüme (/data/artifacts) tohumlar. Burada bulunursa internetsiz
+// kurulur. Değişken: sınamalar geçici bir dizin verir.
+var LocalArchiveDirs = []string{"/data/artifacts", "dist/java", "dist/offline"}
+
+// localArchive finds a Temurin archive for major in LocalArchiveDirs.
+//
+// Ad kalıbı Adoptium'unkidir: OpenJDK25U-jre_x64_linux_hotspot_25.0.4.1_1.tar.gz.
+// Çevrimdışı paket adın başına URL özeti ekler ("<16 hane>-OpenJDK25U-…"),
+// bu yüzden önek serbesttir. İşletim sistemi ve mimari ADDA denetlenir:
+// Windows düğümünde bir linux arşivi açmak çalışmayan bir java bırakırdı.
+func localArchive(major int) string {
+	osName, arch := adoptiumOSArch()
+	ext := ".tar.gz"
+	if osName == "windows" {
+		ext = ".zip"
+	}
+	for _, image := range []string{"jre", "jdk"} {
+		pat := fmt.Sprintf("*OpenJDK%dU-%s_%s_%s_hotspot_*%s", major, image, arch, osName, ext)
+		for _, dir := range LocalArchiveDirs {
+			matches, _ := filepath.Glob(filepath.Join(dir, pat))
+			sort.Strings(matches)
+			// En yeni yama sürümü en sonda (ad sürümü içerir).
+			for i := len(matches) - 1; i >= 0; i-- {
+				if st, err := os.Stat(matches[i]); err == nil && st.Size() > 1<<20 {
+					return matches[i]
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // downloadFile fetches url into a temp file and returns its path.

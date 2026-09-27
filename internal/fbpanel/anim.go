@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"mcos/internal/fbdraw"
+	"mcos/internal/sound"
 )
 
 // Bu dosya EKRANLAR ARASI GEÇİŞLERİ yönetir.
@@ -155,11 +156,23 @@ func (a *App) beginTransition(kind transKind) {
 	// aralıkta bir arka plan goroutine'i (kurulum sihirbazı, eş taraması)
 	// 180 ms'lik bir soluklaşma isteyebilir ve açılış yakınlaşmasını
 	// sessizce yok ederdi. Açılış jesti, o kısa geçişten daha önemli.
+	started := false
 	if a.trans == nil || !a.trans.pending {
 		a.trans = &transition{kind: kind, start: time.Now(), dur: transDuration}
 		a.dirty = true
+		started = true
 	}
 	a.mu.Unlock()
+
+	// Geçiş sesi YALNIZCA kayma geçişlerinde: pencere açılış/kapanışı kendi
+	// sesini OpenModal/CloseModal'da çalıyor ve ikisini birlikte çalmak tek
+	// bir hareket için iki ses demekti.
+	//
+	// KİLİT DIŞINDA: playSound yapılandırmayı okumak için a.mu'yu kendisi
+	// alır (bkz. sound.go).
+	if started && (kind == transSlideDown || kind == transSlideUp) {
+		a.playSound(sound.Nav)
+	}
 }
 
 // BeginIntro starts the first-boot zoom-in from a captured splash frame.
@@ -202,13 +215,14 @@ func (a *App) BeginIntro(from *image.RGBA) {
 // Bekleyen bir açılış geçişi yoksa hiçbir şey yapmaz.
 func (a *App) armIntro() {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.trans == nil || !a.trans.pending {
+		a.mu.Unlock()
 		return
 	}
 	a.trans.pending = false
 	a.trans.start = time.Now()
 	a.dirty = true
+	a.mu.Unlock()
 }
 
 // snapshotFrameLocked copies the canvas into prevFrame. Caller holds a.mu.

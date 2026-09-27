@@ -39,6 +39,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"mcos/internal/ipc"
@@ -147,13 +148,49 @@ func (s *Server) Addr() string {
 	return s.ln.Addr().String()
 }
 
-// Serve listens until ctx is cancelled.
-func (s *Server) Serve(ctx context.Context) error {
+// Port returns the TCP port actually bound (0 before Listen).
+func (s *Server) Port() int {
+	if s.ln == nil {
+		return 0
+	}
+	if a, ok := s.ln.Addr().(*net.TCPAddr); ok {
+		return a.Port
+	}
+	return 0
+}
+
+// Listen binds the port without serving yet.
+//
+// ── Neden Serve'den ayrı ────────────────────────────────────────────────────
+//
+// Eskiden portu Serve açıyordu ve daemon Serve'ü bir goroutine'de
+// çağırıyordu: remote.enable portun açılıp açılmadığını BİLMEDEN
+// "running": true ve parmak izini döndürüyordu. Ölçülen: port doluyken
+// remote.enable {"port":47299} → running:true; panel QR'ı gösteriyor,
+// telefon "bağlantıyı reddetti" alıyor, hata yalnızca günlükte. Artık
+// daemon Listen'i EŞZAMANLI çağırıyor ve hata panele ulaşıyor.
+func (s *Server) Listen() error {
+	if s.ln != nil {
+		return nil
+	}
 	ln, err := net.Listen("tcp", s.opt.Addr)
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return fmt.Errorf("uzaktan erişim portu (%s) başka bir program tarafından kullanılıyor — "+
+			"başka bir port seçin ya da o programı kapatın", s.opt.Addr)
+	}
 	if err != nil {
 		return fmt.Errorf("uzaktan erişim portu açılamadı (%s): %w", s.opt.Addr, err)
 	}
 	s.ln = ln
+	return nil
+}
+
+// Serve listens until ctx is cancelled (Listen çağrılmadıysa önce onu yapar).
+func (s *Server) Serve(ctx context.Context) error {
+	if err := s.Listen(); err != nil {
+		return err
+	}
+	ln := s.ln
 
 	go func() {
 		<-ctx.Done()
@@ -167,7 +204,7 @@ func (s *Server) Serve(ctx context.Context) error {
 			ln.Addr(), s.cert.fingerprint)
 	}
 
-	err = s.http.ServeTLS(ln, "", "")
+	err := s.http.ServeTLS(ln, "", "")
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}

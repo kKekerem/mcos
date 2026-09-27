@@ -26,7 +26,8 @@
 #   • İlk sunucu kurulumu bir kez internet ister (53,7 MiB indirir).
 #   • O dosya /data/artifacts içine önbelleklenir.
 #   • Bundan SONRA aynı sürümden sunucu kurmak tamamen çevrimdışı çalışır.
-#   • Java, Fabric ve Via modları zaten imajla gelir — hiç indirilmez.
+#   • Java 21 rootfs'e gömülü; Fabric ve Via modları imajla gelir — hiç
+#     indirilmez.
 #
 # Bu, yasal olarak ulaşılabilecek en iyi noktadır.
 #
@@ -39,12 +40,27 @@
 # takvim sürümlemesine geçti (26.1, 26.2...), bu yüzden 1.21.11 sabit ve
 # uzun ömürlü bir hedef.
 
-# ── Java 21 (Temurin JRE) ───────────────────────────────────────────────────
+# ── Java 21 ARTIK BURADA DEĞİL ──────────────────────────────────────────────
 #
-# Minecraft 1.21.11'in manifesti javaVersion.majorVersion=21 diyor.
-# Lisans: GPLv2 + Classpath İstisnası — imajda dağıtılabilir.
-# 49,6 MiB sıkıştırılmış / 157,6 MiB açılmış.
-jre21|https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_x64_linux_hotspot_21.0.12.1_1.tar.gz
+# JRE eskiden bu pakette gelip /data/artifacts'a tohumlanıyordu — ama hiç
+# KULLANILMIYORDU. QEMU'da ölçüldü: arşiv /data/artifacts'ta dururken, ağ
+# kapalıyken "mcosctl java install 21" api.adoptium.net'e gidip "lookup ...
+# CIKIS=1" ile düştü. internal/java kendi URL'ine (api.adoptium.net/.../jdk)
+# indiriyor ve çevrimdışı depoya (providers.cacheLookup) hiç bakmıyordu.
+# Sonuç: ISO'da ve kalıcı bölümde 50'şer MB ölü ağırlık.
+#
+# Java 21 artık rootfs'e GÖMÜLÜ: builtin-java.conf + builtin-java.sh
+# (post-build) + internal/java/builtin.go. Buraya geri eklemeyin; aynı
+# arşivin ikinci kopyası olur.
+
+# ── Java 25 (Minecraft 26.x) ────────────────────────────────────────────────
+#
+# Mojang'ın sürüm manifesti 26.1–26.3 için javaVersion.majorVersion = 25
+# diyor (2026-09-26'da okundu). Gömülü olan yalnızca Java 21: 26.x sunucusu
+# internetsiz makinede hiç kurulamıyordu. Rootfs'e AÇILMAZ (RAM; bkz.
+# post-build.sh): arşiv olarak gelir, mcos-install /data/artifacts'a tohumlar,
+# internal/java ilk 26.x sunucusunda oradan kurar. Lisans: GPLv2 + Classpath.
+java25-jre|https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_linux_hotspot_25.0.4.1_1.tar.gz
 
 # ── Fabric çalışma zamanı ───────────────────────────────────────────────────
 #

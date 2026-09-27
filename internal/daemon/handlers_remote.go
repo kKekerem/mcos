@@ -14,7 +14,6 @@ import (
 	"mcos/internal/ipc"
 	"mcos/internal/model"
 	"mcos/internal/remote"
-	"mcos/internal/sshd"
 	"mcos/internal/store"
 )
 
@@ -124,6 +123,16 @@ func (d *Daemon) handleRemoteEnable(_ context.Context, raw json.RawMessage) (any
 	if err := d.saveConfigCopy(&cp); err != nil {
 		return nil, err
 	}
+	// Port değiştiyse çalışan köprü ESKİ portta dinliyor: startRemote
+	// "zaten çalışıyor" deyip dönüyordu. Ölçülen: 47223'te çalışırken
+	// remote.enable {"port":47299} → durum port 47299 diyordu (QR da onu
+	// taşıyordu), köprü ise hâlâ 47223'teydi.
+	d.remoteSt.mu.Lock()
+	cur := d.remoteSt.srv
+	d.remoteSt.mu.Unlock()
+	if cur != nil && cur.Port() != cp.Remote.Port {
+		d.stopRemote()
+	}
 	if err := d.startRemote(); err != nil {
 		return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: err.Error()}
 	}
@@ -199,6 +208,12 @@ func (d *Daemon) startRemote() error {
 		Log:     d.log,
 	})
 	if err != nil {
+		return err
+	}
+	// Port BURADA, eşzamanlı açılıyor (bkz. remote.Server.Listen): açılamazsa
+	// hata panele gider; eskiden goroutine'de açılıyordu ve remote.enable
+	// dolu portta bile "running": true döndürüyordu.
+	if err := srv.Listen(); err != nil {
 		return err
 	}
 
@@ -297,7 +312,12 @@ func (d *Daemon) handleSSHPassword(_ context.Context, raw json.RawMessage) (any,
 			Message: fmt.Sprintf("SSH parolası en az %d karakter olmalı", minSSHPassword),
 		}
 	}
-	if err := sshd.SetPassword("root", p.Password); err != nil {
+	// Yöneticinin yöntemi: özeti saf Go ile hesaplar, /etc/shadow'a VE
+	// kalıcı veri klasörüne yazar. Eskiden burada harici chpasswd çağrılıyordu;
+	// imajda olmadığı için kullanıcı "chpasswd bulunamadı" alıyordu, olsaydı
+	// bile parola RAM'deki /etc/shadow ile birlikte yeniden başlatmada
+	// silinirdi.
+	if err := d.ssh.SetPassword("root", p.Password); err != nil {
 		return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: err.Error()}
 	}
 
@@ -307,6 +327,17 @@ func (d *Daemon) handleSSHPassword(_ context.Context, raw json.RawMessage) (any,
 	cp.SSH.PasswordSet = true
 	if err := d.saveConfigCopy(&cp); err != nil {
 		return nil, err
+	}
+	// SSH açıksa yeniden uygula: parola yokken sunucu parola girişi KAPALI
+	// başlatılmıştı (bkz. sshd.writeSSHDConfig); yeniden başlatmadan yeni
+	// parola işe yaramazdı. Apply, ayar değişmediyse hiçbir şey yapmaz.
+	if cp.SSH.Enabled {
+		if err := d.ssh.Apply(cp.SSH); err != nil {
+			return nil, &ipc.Error{
+				Code:    ipc.CodeUnavailable,
+				Message: "parola kaydedildi ama SSH yeniden başlatılamadı: " + err.Error(),
+			}
+		}
 	}
 	return d.ssh.Status(cp.SSH), nil
 }

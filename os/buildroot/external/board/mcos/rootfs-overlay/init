@@ -56,6 +56,88 @@ log() {
 mountpoint -q /proc 2>/dev/null || mount -t proc proc /proc 2>/dev/null
 mountpoint -q /sys 2>/dev/null || mount -t sysfs sysfs /sys 2>/dev/null
 
+# ════════════════════════════════════════════════════════════════════════════
+# ACILIS ANIMASYONU — EN ERKEN NOKTA
+# ════════════════════════════════════════════════════════════════════════════
+#
+# ── Kullanicinin istegi ─────────────────────────────────────────────────────
+#
+#   "acılırken linux logları felan gözüküyo o da gözükmesin direkt acılırken
+#    ilk animasyon baslasın"
+#
+# ── Neden BURASI ────────────────────────────────────────────────────────────
+#
+# Animasyon eskiden etc/init.d/S04splash'ten baslıyordu; o da busybox init'in
+# sysinit sirasinda, yani /init bittikten SONRA. Olculen (QEMU, hizlandirma
+# yok): cekirdek 18. saniyede hala konsola log basiyor, animasyon 26. saniyede
+# basliyordu. Aradaki 8 saniye kullanicinin gordugu "linux loglari" idi.
+#
+# Burasi userspace'in ILK anidir: initramfs acilmis, /init calisiyor, baska
+# hicbir sey henuz baslamamis. Animasyonu buradan baslatmak, cekirdek
+# mesajlarinin cizilecegi VT'yi grafik kipine almak demektir; yani loglar
+# artik EKRANA hic dusmez (gunluge dusmeye devam eder, dmesg ile okunur).
+#
+# ── Neden /dev/.mcos ────────────────────────────────────────────────────────
+#
+# Su anda /run sıradan bir dizin. inittab'in "mount -a" satiri birkac saniye
+# sonra USTUNE tmpfs bagliyor ve buraya yazilan her sey gorunmez oluyordu:
+# durum dosyasi, PID, "hazirim" bayragi. devtmpfs (/dev) ise tek bir cekirdek
+# ornegidir, ikinci kez baglansa bile ayni agaci gosterir.
+MCOS_RUN="/dev/.mcos"
+
+start_early_splash() {
+    [ -x /usr/bin/mcos-splash ] || return 0
+    # Animasyon kapatilabilir: mcos.noanim ya da yapilandirmadaki bayrak.
+    grep -q 'mcos\.noanim' /proc/cmdline 2>/dev/null && return 0
+
+    # /dev henuz bagli olmayabilir (initramfs'te CONFIG_DEVTMPFS_MOUNT
+    # calismaz: cekirdek yalnizca GERCEK koku baglarken otomatik bagliyor).
+    mountpoint -q /dev 2>/dev/null || mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+    # ── Cerceve arabellegini KISA SURE bekle ───────────────────────────
+    #
+    # /dev/fb0 cekirdek aygit kurulumunda olusuyor ve bu, /init calismaya
+    # basladiginda genellikle BITMIS oluyor (fbcon=nodefer + simpledrm).
+    # Ama gercek bir DRM surucusunun (i915, amdgpu) baglanmasi birkac yuz
+    # milisaniye surebilir.
+    #
+    # Beklemeden vazgecersek animasyon hic baslamaz ve S04splash'e kalir;
+    # cekirdek artik SESSIZ oldugu icin o arada ekran TAMAMEN SIYAH olur —
+    # yani duzeltilen sikayetin ta kendisi geri gelir.
+    #
+    # Ust sinir 3 saniye: bulunamazsa animasyonsuz devam ediyoruz, cunku
+    # acilisi bekletmek her zaman daha kotudur.
+    i=0
+    while [ ! -c /dev/fb0 ] && [ "$i" -lt 30 ]; do
+        usleep 100000 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+    [ -c /dev/fb0 ] || return 0      # cerceve arabellegi yoksa animasyon da yok
+    mkdir -p "$MCOS_RUN" 2>/dev/null || return 0
+
+    # Cekirdek mesajlarini SUSTUR: komut satirindaki "quiet" cogunu keser ama
+    # bu, sonradan yuklenen suruculerin mesajlarini da kapatir.
+    echo 0 > /proc/sys/kernel/printk 2>/dev/null || true
+
+    /usr/bin/mcos-stage init 2>/dev/null || true
+    : > "$MCOS_RUN/splash.started" 2>/dev/null || true
+    rm -f "$MCOS_RUN/ready" "$MCOS_RUN/frame.rgba" 2>/dev/null || true
+
+    # tty2: panelin de kullandigi konsol. Animasyon orayi grafik kipine alir
+    # ve chvt ile one getirir; boylece tty1'e akan metin gorunmez.
+    chvt 2 >/dev/null 2>&1 || true
+    /usr/bin/mcos-splash \
+        --fb /dev/fb0 --tty /dev/tty2 \
+        --until "$MCOS_RUN/ready" \
+        --stage "$MCOS_RUN/stage" \
+        --save "$MCOS_RUN/frame.rgba" \
+        --timeout 180s --keep >/dev/null 2>&1 &
+    echo $! > "$MCOS_RUN/splash.pid" 2>/dev/null || true
+    return 0
+}
+
+start_early_splash
+
 # live_boot, canli sisteme devreder ve BIR DAHA GERI DONMEZ.
 #
 # Bagladigimiz dosya sistemlerini birakiyoruz: /etc/inittab bunlari kendisi
@@ -137,7 +219,11 @@ log "kok aygiti: $DEV"
 
 # ── Bagla ve DOGRULA ────────────────────────────────────────────────────────
 mkdir -p "$NEWROOT"
-if ! mount -t ext4 -o rw,noatime "$DEV" "$NEWROOT" 2>/dev/null; then
+# lazytime + commit=30: SD kart/USB'de her dosya erişiminde zaman damgası
+# yazmak ve 5 sn'de bir günlük (journal) boşaltmak küçük, dağınık yazmalar
+# demekti; yavaş ortamda bunlar sunucunun okumalarını bekletiyordu.
+if ! mount -t ext4 -o rw,noatime,lazytime,commit=30 "$DEV" "$NEWROOT" 2>/dev/null &&
+   ! mount -t ext4 -o rw,noatime "$DEV" "$NEWROOT" 2>/dev/null; then
     log "kok baglanamadi ($DEV) - canli sisteme donuluyor"
     live_boot
 fi
@@ -145,8 +231,95 @@ fi
 # MCOS kokunu DOGRULA. Rastgele bir ext4 bolumune switch_root yapmak sistemi
 # aciliste kilitler: /sbin/init yoksa cekirdek PID 1'i kaybeder ve panik verir.
 # Iki kosul birden aranir: calistirilabilir init VE bizim isaret dosyamiz.
-if [ ! -x "$NEWROOT/sbin/init" ] || [ ! -f "$NEWROOT/etc/mcos-root" ]; then
+#
+# Tek istisna: YARIM KALMIS bir guncelleme esitlemesi (asagida). O sirada
+# /sbin ya da /etc silinmis olabilir; isaret dosyasinin kopyasi
+# $NEWROOT/.mcos-esitleme'de durur ve esitleme bu acilista yeniden denenir.
+# Bu dosyayi yalnizca asagidaki esitle() yazar, o da ancak dogrulamadan
+# gecmis bir MCOS kokune.
+ESITLEME="$NEWROOT/.mcos-esitleme"
+YARIM=0
+[ -f "$ESITLEME" ] && YARIM=1
+if [ "$YARIM" = 0 ] && { [ ! -x "$NEWROOT/sbin/init" ] || [ ! -f "$NEWROOT/etc/mcos-root" ]; }; then
     log "gecerli bir MCOS koku degil ($DEV) - canli sisteme donuluyor"
+    umount "$NEWROOT" 2>/dev/null || true
+    live_boot
+fi
+
+# ── GUNCELLEME ESITLEMESI: yeni sistem diske (p2) kopyalanir ────────────────
+#
+# Neden BURADA: initramfs (RAM'deki bu sistem) TEK GERCEK KAYNAKTIR; p2 onun
+# diske yazilmis kopyasidir. mcos-update USB'deki yeni ISO'dan yalnizca p1'deki
+# bzImage/initrd.img'yi degistirir. Yeni initrd ile acildigimizda RAM'deki
+# /etc/mcos-build-id p2'dekinden farklidir: yeni sistemi p2'ye kopyalariz ve
+# oyle geceriz. Boylece guncelleme icin p1'i yazmak YETER; /data (p3) ayri
+# bolumdur ve burada HIC dokunulmaz (sunucular, dunyalar, ayarlar korunur).
+#
+# Yalnizca sistem dizinleri degisir. proc sys dev run tmp mnt media data,
+# lost+found ve bagli bolumler listede YOK. /etc/mcos-root (kurulumun
+# isaret dosyasi, yeni rootfs'te yok) korunur.
+#
+# Firmware eksiksizdir: mcos-fwprune acilistan SONRA calisir, su anda RAM'deki
+# /lib/firmware tam.
+#
+# Yarim kalirsa (elektrik kesildi, disk doldu): yarim sisteme GECILMEZ, canli
+# sisteme donulur. Kimlik en SON yazildigi ve .mcos-esitleme durdugu icin bir
+# sonraki acilis esitlemeyi bastan dener.
+esitleme_gerekli() {
+    # Eski derleme (kimlik yok): esitleme yok, davranis eskisiyle ayni.
+    [ -s /etc/mcos-build-id ] || return 1
+    [ "$YARIM" = 1 ] && return 0
+    [ "$(cat /etc/mcos-build-id 2>/dev/null)" != "$(cat "$NEWROOT/etc/mcos-build-id" 2>/dev/null)" ]
+}
+
+esitle() {
+    if [ "$YARIM" = 0 ]; then
+        # Isaret dosyasinin kopyasi ONCE diske iner: /etc silindikten sonra
+        # kesilirse bir sonraki acilis bu kokun MCOS oldugunu buradan bilir.
+        cp "$NEWROOT/etc/mcos-root" "$ESITLEME.tmp" || return 1
+        sync
+        mv -f "$ESITLEME.tmp" "$ESITLEME" || return 1
+        sync
+    fi
+    rm -f "$NEWROOT/etc/mcos-build-id"
+    for d in bin etc lib lib32 lib64 opt root sbin usr var init; do
+        [ -e "/$d" ] || [ -L "/$d" ] || continue
+        rm -rf "${NEWROOT:?}/$d" || return 1
+        cp -a "/$d" "$NEWROOT/" || return 1
+        if [ "$d" = etc ]; then
+            # Kimlik en sona kalir; isaret dosyasi geri konur.
+            rm -f "$NEWROOT/etc/mcos-build-id"
+            cp "$ESITLEME" "$NEWROOT/etc/mcos-root" || return 1
+        fi
+    done
+    for d in proc sys dev run tmp mnt data boot; do
+        mkdir -p "$NEWROOT/$d" 2>/dev/null || true
+    done
+    chmod 1777 "$NEWROOT/tmp" 2>/dev/null || true
+    sync
+    cp /etc/mcos-build-id "$NEWROOT/etc/mcos-build-id" || return 1
+    sync
+    rm -f "$ESITLEME"
+    sync
+    return 0
+}
+
+if esitleme_gerekli; then
+    log "yeni sistem diske yaziliyor: $(cat "$NEWROOT/etc/mcos-build-id" 2>/dev/null || echo eski) -> $(cat /etc/mcos-build-id)"
+    if esitle; then
+        log "guncelleme kuruldu: $(cat /etc/mcos-build-id) (/data korundu)"
+    else
+        log "guncelleme diske yazilamadi - canli sisteme donuluyor (sonraki acilista yeniden denenecek)"
+        sync
+        umount "$NEWROOT" 2>/dev/null || true
+        live_boot
+    fi
+fi
+
+# Son denetim: yarim bir esitleme bu acilista tamamlanamadiysa (ör. p1 elle
+# eski initrd'ye dondurulmus, kimlik yok) yarim koke GECILMEZ.
+if [ ! -x "$NEWROOT/sbin/init" ] || [ ! -f "$NEWROOT/etc/mcos-root" ] || [ -f "$ESITLEME" ]; then
+    log "disk koku eksik (yarim guncelleme) - canli sisteme donuluyor"
     umount "$NEWROOT" 2>/dev/null || true
     live_boot
 fi

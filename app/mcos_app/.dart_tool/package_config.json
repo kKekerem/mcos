@@ -39,7 +39,7 @@
     },
     {
       "name": "code_assets",
-      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/code_assets-2.0.0",
+      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/code_assets-1.2.1",
       "packageUri": "lib/",
       "languageVersion": "3.10"
     },
@@ -93,7 +93,7 @@
     },
     {
       "name": "flutter",
-      "rootUri": "file:///home/kkekerem/tools/flutter/packages/flutter",
+      "rootUri": "file:///home/kkekerem/toolchains/flutter/packages/flutter",
       "packageUri": "lib/",
       "languageVersion": "3.11"
     },
@@ -141,19 +141,19 @@
     },
     {
       "name": "flutter_test",
-      "rootUri": "file:///home/kkekerem/tools/flutter/packages/flutter_test",
+      "rootUri": "file:///home/kkekerem/toolchains/flutter/packages/flutter_test",
       "packageUri": "lib/",
       "languageVersion": "3.11"
     },
     {
       "name": "flutter_web_plugins",
-      "rootUri": "file:///home/kkekerem/tools/flutter/packages/flutter_web_plugins",
+      "rootUri": "file:///home/kkekerem/toolchains/flutter/packages/flutter_web_plugins",
       "packageUri": "lib/",
       "languageVersion": "3.11"
     },
     {
       "name": "hooks",
-      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/hooks-2.2.0",
+      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/hooks-2.0.2",
       "packageUri": "lib/",
       "languageVersion": "3.10"
     },
@@ -225,13 +225,19 @@
     },
     {
       "name": "meta",
-      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/meta-1.19.0",
+      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/meta-1.18.3",
       "packageUri": "lib/",
       "languageVersion": "3.5"
     },
     {
+      "name": "mobile_scanner",
+      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/mobile_scanner-7.4.2",
+      "packageUri": "lib/",
+      "languageVersion": "3.7"
+    },
+    {
       "name": "objective_c",
-      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/objective_c-9.6.0",
+      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/objective_c-9.5.0",
       "packageUri": "lib/",
       "languageVersion": "3.10"
     },
@@ -321,13 +327,13 @@
     },
     {
       "name": "record_use",
-      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/record_use-1.1.1",
+      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/record_use-0.6.0",
       "packageUri": "lib/",
       "languageVersion": "3.10"
     },
     {
       "name": "sky_engine",
-      "rootUri": "file:///home/kkekerem/tools/flutter/bin/cache/pkg/sky_engine",
+      "rootUri": "file:///home/kkekerem/toolchains/flutter/bin/cache/pkg/sky_engine",
       "packageUri": "lib/",
       "languageVersion": "3.11"
     },
@@ -375,7 +381,7 @@
     },
     {
       "name": "vector_math",
-      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/vector_math-2.4.2",
+      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/vector_math-2.4.0",
       "packageUri": "lib/",
       "languageVersion": "3.10"
     },
@@ -384,6 +390,12 @@
       "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/vm_service-15.3.0",
       "packageUri": "lib/",
       "languageVersion": "3.5"
+    },
+    {
+      "name": "web",
+      "rootUri": "file:///home/kkekerem/.pub-cache/hosted/pub.dev/web-1.1.1",
+      "packageUri": "lib/",
+      "languageVersion": "3.4"
     },
     {
       "name": "win32",
@@ -424,7 +436,7 @@
   ],
   "generator": "pub",
   "generatorVersion": "3.13.3",
-  "flutterRoot": "file:///home/kkekerem/tools/flutter",
+  "flutterRoot": "file:///home/kkekerem/toolchains/flutter",
   "flutterVersion": "3.47.4",
   "pubCache": "file:///home/kkekerem/.pub-cache"
 }

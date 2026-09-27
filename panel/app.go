@@ -427,6 +427,13 @@ func (a *App) handleKey(m tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, doJavaInstall(a.cl, 8)
 		}
 
+	case "5":
+		// Minecraft 26.x Java 25 ister (bkz. view_misc.go).
+		if a.section == secSoftware {
+			a.flash = "Java 25 (Temurin JDK) indirmesi başlatıldı…"
+			return a, doJavaInstall(a.cl, 25)
+		}
+
 	case "p":
 		if a.section == secSettings {
 			a.flash = "USB kalıcı yapılıyor…"
@@ -516,7 +523,7 @@ func (a *App) moveCursor(d int) {
 	case secServers:
 		a.serverCursor = clampInt(a.serverCursor+d, 0, len(a.servers)-1)
 	case secSoftware:
-		a.rowCursor = clampInt(a.rowCursor+d, 0, 3)
+		a.rowCursor = clampInt(a.rowCursor+d, 0, len(javaRowMajors)-1)
 	case secDevices:
 		if len(a.wifiNets) > 0 {
 			a.wifiCursor = clampInt(a.wifiCursor+d, 0, len(a.wifiNets)-1)
@@ -548,7 +555,7 @@ func (a *App) activate() (tea.Model, tea.Cmd) {
 			return a, fetchServer(a.cl, id)
 		}
 	case secSoftware:
-		majors := []int{17, 21, 11, 8}
+		majors := javaRowMajors
 		if a.rowCursor >= 0 && a.rowCursor < len(majors) {
 			m := majors[a.rowCursor]
 			a.flash = fmt.Sprintf("Java %d indirmesi başlatılıyor...", m)

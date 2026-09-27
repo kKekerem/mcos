@@ -56,14 +56,82 @@ fi
 # 4) Son çare: her blok aygıtı tek tek yokla. busybox blkid seçenek almaz ama
 #    kendisine verilen aygıt için LABEL="..." satırı basar, bu yüzden bu yol
 #    hem busybox hem util-linux ile çalışır.
-if command -v blkid >/dev/null 2>&1; then
-    for dev in /dev/sd[a-z][0-9]* /dev/nvme*n*p* /dev/mmcblk*p* /dev/vd[a-z][0-9]* /dev/hd[a-z][0-9]*; do
-        [ -b "$dev" ] || continue
-        if blkid "$dev" 2>/dev/null | grep -q "LABEL=\"$LABEL\""; then
-            printf '%s\n' "$dev"
-            exit 0
-        fi
-    done
-fi
+# ── Etiketi KENDİMİZ okuyoruz ───────────────────────────────────────────────
+#
+# ── Yakalanan gerçek hata ──────────────────────────────────────────────────
+#
+# Kullanıcı "USB'ye kalıcılık yapılmıyor, persist hatası veriyor" dedi.
+# Çalışan sistemde ölçüldü: etiket arama yollarının HEPSİ kırıktı.
+#
+#   findfs                 -> imajda YOK ("sh: findfs: not found")
+#   blkid /dev/sr0         -> BOŞ çıktı (busybox blkid iso9660 okumuyor)
+#   /dev/disk/by-label/    -> dizin YOK (mdev etiket bağlantısı kurmuyor)
+#   tarama döngüsü         -> yalnızca BÖLÜMLERE bakıyordu (/dev/sda1 gibi);
+#                             tüm disk (/dev/sda) ve optik (/dev/sr0) yoktu
+#
+# Oysa etiket oradaydı: /dev/sr0'ın 32808. baytından "MCOS" okunuyor.
+# Yani sorun diskte değil, ARAMADAYDI.
+#
+# Artık etiket doğrudan dosya sistemi superbloğundan okunuyor. Hiçbir dış
+# araca bağımlılık yok — bir aracın imajda olup olmadığına güvenmek, bu
+# hatanın ta kendisiydi.
+#
+#   iso9660 : "CD001" imzası 32769'da; birim etiketi 32808'de, 32 bayt
+#   ext2/3/4: 0xEF53 imzası 1080'de;   etiket 1144'te, 16 bayt
+#   FAT32   : "FAT32" 82'de;           etiket 71'de,   11 bayt
+#   FAT16   : "FAT"   54'te;           etiket 43'te,   11 bayt
+
+# etiket_oku <aygit> -> etiketi yazdirir (bulunamazsa bos)
+etiket_oku() {
+    dev="$1"
+
+    # iso9660
+    if [ "$(dd if="$dev" bs=1 skip=32769 count=5 2>/dev/null)" = "CD001" ]; then
+        dd if="$dev" bs=1 skip=32808 count=32 2>/dev/null \
+            | tr -d '\000' | sed 's/[[:space:]]*$//'
+        return 0
+    fi
+
+    # ext2/3/4: imza kucuk sonlu 0x53 0xEF
+    if [ "$(dd if="$dev" bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "53ef" ]; then
+        dd if="$dev" bs=1 skip=1144 count=16 2>/dev/null \
+            | tr -d '\000' | sed 's/[[:space:]]*$//'
+        return 0
+    fi
+
+    # FAT32
+    if [ "$(dd if="$dev" bs=1 skip=82 count=5 2>/dev/null)" = "FAT32" ]; then
+        dd if="$dev" bs=1 skip=71 count=11 2>/dev/null \
+            | tr -d '\000' | sed 's/[[:space:]]*$//'
+        return 0
+    fi
+
+    # FAT12/16
+    if [ "$(dd if="$dev" bs=1 skip=54 count=3 2>/dev/null)" = "FAT" ]; then
+        dd if="$dev" bs=1 skip=43 count=11 2>/dev/null \
+            | tr -d '\000' | sed 's/[[:space:]]*$//'
+        return 0
+    fi
+
+    return 1
+}
+
+# TUM blok aygitlari: bolumler DE tum diskler DE optik DE.
+#
+# Sira onemli: bolumler once denenir, cunku aranan sey genelde bir bolumdur
+# (MCOS-DATA). Tum disk taramasi canli ISO icin gerekli - ham yazilmis bir
+# USB'de etiket BOLUMDE degil, AYGITIN KENDISINDE durur.
+for dev in \
+    /dev/sd[a-z][0-9]* /dev/nvme*n*p* /dev/mmcblk*p* /dev/vd[a-z][0-9]* /dev/hd[a-z][0-9]* \
+    /dev/sd[a-z] /dev/nvme*n[0-9] /dev/mmcblk[0-9] /dev/vd[a-z] /dev/hd[a-z] \
+    /dev/sr[0-9]
+do
+    [ -b "$dev" ] || continue
+    if [ "$(etiket_oku "$dev" 2>/dev/null)" = "$LABEL" ]; then
+        printf '%s\n' "$dev"
+        exit 0
+    fi
+done
+
 
 exit 1

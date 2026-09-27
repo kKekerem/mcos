@@ -1,0 +1,53 @@
+<header class="ust">
+  <div class="logo">M</div>
+  <div>
+    <h1>MCOS USB Kurucu</h1>
+    <div class="alt">MCOS'u bir USB belleğe kalıcı olarak kurar</div>
+  </div>
+  <div class="bosluk"></div>
+  <span class="rozet" id="surum">…</span>
+</header>
+
+<div id="kutular"></div>
+
+<div class="izgara">
+  <section class="kart tam">
+    <h2>1 · İmaj <span class="say" id="imSay"></span>
+      <span class="sag"><button class="kucuk" id="imYenile">Yenile</button></span></h2>
+    <div class="liste" id="imajlar"><div class="bos">Aranıyor…</div></div>
+  </section>
+
+  <section class="kart tam">
+    <h2>2 · Hedef USB bellek <span class="say" id="aySay"></span>
+      <span class="sag"><button class="kucuk" id="ayYenile">Yenile</button></span></h2>
+    <div class="liste" id="aygitlar"><div class="bos">Aranıyor…</div></div>
+    <div class="soluk" style="font-size:12.5px;margin-top:8px">Sistem diski ve dahili diskler burada hiçbir zaman listelenmez.</div>
+  </section>
+
+  <section class="kart tam" id="onayKart">
+    <h2>3 · Onay</h2>
+    <div class="kv" style="margin-bottom:10px">
+      <span class="k">Hedef</span><span class="v" id="ozetAygit"><span class="soluk">aygıt seçilmedi</span></span>
+      <span class="k">İmaj</span><span class="v" id="ozetImaj"><span class="soluk">imaj seçilmedi</span></span>
+      <span class="k">Doğrulama</span><span class="v dim" id="ozetDogrula">—</span>
+    </div>
+    <div class="kutu hata" id="silUyari"><div class="ic"><b>Bu aygıttaki TÜM veri silinecek.</b> Geri alınamaz.</div></div>
+    <label class="alan" for="onay">Onaylamak için aygıt yolunu aynen yazın: <span class="mono" id="onayYol">—</span></label>
+    <input type="text" id="onay" spellcheck="false" autocomplete="off" disabled>
+    <div class="dugmeler">
+      <button class="tehlike" id="yaz" disabled>USB'ye yaz</button>
+      <span class="soluk" id="yazNeden" style="align-self:center;font-size:12.5px"></span>
+    </div>
+  </section>
+
+  <section class="kart tam" id="ilerlemeKart" style="display:none">
+    <h2>İlerleme</h2>
+    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:8px">
+      <b id="asama">—</b><span class="dim" id="yuzde"></span>
+      <span class="bosluk" style="flex:1"></span><span class="dim mono" id="ayrinti"></span>
+    </div>
+    <div class="cubuk"><div id="cubuk"></div></div>
+    <div id="sonuc" style="margin-top:12px"></div>
+    <div class="dugmeler"><button id="iptal">Durdur</button></div>
+  </section>
+</div>

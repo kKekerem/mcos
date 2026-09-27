@@ -32,7 +32,11 @@ import (
 // uygulayamamak, sunucuyu hiç başlatmamaktan iyidir.
 
 // cgroupRoot is where the unified hierarchy is mounted (see /etc/fstab).
-const cgroupRoot = "/sys/fs/cgroup"
+//
+// Değişken, çünkü turbo sınamaları sunucu kimlikli (ID) süreç başlatıyor;
+// sabit kalsaydı sınama geliştirme makinesinin GERÇEK /sys/fs/cgroup'una
+// dizin açmaya çalışırdı. Sınamalar bunu boş bir geçici dizine çevirir.
+var cgroupRoot = "/sys/fs/cgroup"
 
 // mcosSlice is the parent group holding every managed server.
 //
@@ -170,10 +174,10 @@ func ApplyCgroup(id string, pid int, lim Limits) string {
 			[]byte(strconv.FormatInt(bytes, 10)), 0o644); err == nil {
 			applied = append(applied, fmt.Sprintf("bellek %d MB", lim.MemoryMB))
 		}
-		// memory.high biraz altta: sert sınıra çarpıp OOM ile öldürülmek
-		// yerine önce baskı uygulanır ve JVM geri çekilme şansı bulur.
-		_ = os.WriteFile(filepath.Join(dir, "memory.high"),
-			[]byte(strconv.FormatInt(bytes*90/100, 10)), 0o644)
+		// memory.high KONMAZ (max kalır). Eşiğe dayanan grubu çekirdek her
+		// bellek isteğinde uyutup sayfa önbelleğini geri aldırır; bu, oyun
+		// döngüsünü saniyelerce durduruyordu ("10 saniyedir yanıt yok").
+		_ = os.WriteFile(filepath.Join(dir, "memory.high"), []byte("max"), 0o644)
 	} else {
 		_ = os.WriteFile(filepath.Join(dir, "memory.max"), []byte("max"), 0o644)
 		_ = os.WriteFile(filepath.Join(dir, "memory.high"), []byte("max"), 0o644)

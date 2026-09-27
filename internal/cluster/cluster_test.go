@@ -63,7 +63,7 @@ func TestAuthorizeTask(t *testing.T) {
 			m, _ := newTestManager(tc.secret)
 			m.addPeerForTest(tc.peerIP, tc.paired)
 
-			err := m.authorizeTask(tc.reqIP, tc.reqToken)
+			err := m.authorizeTask(tc.reqIP, tc.reqToken, nil)
 			if tc.wantErr && err == nil {
 				t.Errorf("authorizeTask = nil, reddedilmeliydi")
 			}

@@ -66,14 +66,43 @@ func (u *UI) Scrim(r image.Rectangle) {
 	// AYARLANDI: önce cellH*3/4 idi ve arka plan tamamen tanınmaz hale
 	// geliyordu. Amaç arkadaki ekranı YOK ETMEK değil, geri plana itmek —
 	// kullanıcı hangi ekranın üstünde olduğunu görmeye devam etmeli.
-	radius := u.F.CellH / 4
-	if radius < 3 {
-		radius = 3
+	//
+	// ── BUZLU CAM: düşük iç çözünürlükte ────────────────────────────────
+	//
+	// Kullanıcı: "blurlu olsun hani netflix vardır ya çözünürlük tamdır ama
+	// düşük gibidir". Bulanıklık yüksek frekansı zaten sildiği için perdeyi
+	// tam çözünürlükte hesaplamanın görsel getirisi yok; 1/4'te hesaplanıp
+	// büyütülüyor (fbdraw.BlurScaled). Ölçüldü (1080p, BenchmarkOlcum
+	// "pencere-ilk-kare"): tam çözünürlükte 31 ms — her pencere açılışında
+	// 60 Hz'de iki kare atlanıyordu. Ucuzladığı için yarıçap da biraz
+	// büyütüldü (hücre/4 -> hücre/2): arkadaki ekran tanınabilir kalıyor ama
+	// artık gerçekten "buzlu cam" gibi duruyor. Pencerenin kendisi ve metni
+	// tam çözünürlükte, keskin.
+	radius := u.F.CellH / 2
+	if radius < 4 {
+		radius = 4
 	}
-	fbdraw.Blur(u.dst, r, radius)
-	// Karartma bulanıklıktan SONRA: önce karartsaydık bulanıklık karartmayı
-	// kenarlardan geri yayardı ve perde kenarı halkalanırdı.
-	fbdraw.Dim(u.dst, r, u.Pal.Bg, 0.25)
+	olcek := 4
+	if radius < 8 {
+		olcek = 2 // küçük ekranda küçük yarıçap: 1/4'te blok blok görünürdü
+	}
+	// Karartma bulanıklıktan SONRA uygulanıyor (önce karartsaydık bulanıklık
+	// karartmayı kenarlardan geri yayardı) — ama AYRI bir tam ekran geçiş
+	// olarak değil: büyütmenin kendisi arka plan rengine çekiyor (Tint). Ayrı
+	// Dim geçişi profilde kare süresinin %11'iydi. Hafif gren koyu zeminde
+	// bulanıklığın bantlaşmasını siler.
+	r = r.Intersect(u.dst.Bounds())
+	if r.Empty() {
+		return
+	}
+	var k fbdraw.Small
+	k.Downscale(u.dst, r, olcek)
+	rs := (radius + olcek/2) / olcek
+	if rs < 1 {
+		rs = 1
+	}
+	k.Blur(rs)
+	k.Compose(u.dst, r, fbdraw.ComposeOpts{Tint: u.Pal.Bg, TintAmt: 0.30, Grain: 1})
 }
 
 // ScrimCache stores a pre-rendered blurred backdrop.
@@ -147,14 +176,34 @@ func (u *UI) Modal(w, h int, title string) image.Rectangle {
 // Tek bir yarı saydam dikdörtgen yerine giderek soluklaşan birkaç halka:
 // gerçek gölge kenarı keskin olmaz.
 func (u *UI) shadow(r image.Rectangle) {
+	// ── Düzeltilen gerçek darboğaz ──────────────────────────────────────
+	//
+	// Burada altı TAM BOY yarı saydam yuvarlak dikdörtgen çiziliyordu ve
+	// altısının da içi, hemen ardından çizilen OPAK pencere paneliyle
+	// örtülüyordu. Yani her karede altı kez ~235.000 pikselin alfa harmanı
+	// hesaplanıp sonra üzerine yazılıyordu: görünmeyen iş.
+	//
+	// Ölçüldü: altı tam katman 6,36 ms, yalnızca dış şerit 0,118 ms (54x).
+	//
+	// Ayrıca dikey kaydırma KESİRLİYDİ (g*0,6). fbdraw'ın hızlı yolu tam
+	// sayı hizası istiyor (bkz. fastEligible), yani gölge o yoldan da
+	// yararlanamıyordu. Kaydırma artık tam sayıya yuvarlanıyor; görsel fark
+	// yarım pikselin altında.
+	//
+	// Çizilen şey DEĞİŞMİYOR: aynı altı katman, aynı alfalar, aynı
+	// yarıçaplar. Yalnızca panelin ALTINDA kalan kısım atlanıyor.
 	steps := 6
 	for i := steps; i >= 1; i-- {
 		g := float64(i)
 		alpha := 0.05 * (1 - float64(i-1)/float64(steps))
-		u.P.FillRoundRect(
-			fbdraw.R(float64(r.Min.X)-g, float64(r.Min.Y)-g+g*0.6,
-				float64(r.Dx())+2*g, float64(r.Dy())+2*g),
-			u.M.Radius+g, fbdraw.Alpha(color.RGBA{A: 255}, alpha))
+		dy := math.Round(g * 0.6)
+		kutu := fbdraw.R(
+			math.Round(float64(r.Min.X)-g),
+			math.Round(float64(r.Min.Y)-g+dy),
+			math.Round(float64(r.Dx())+2*g),
+			math.Round(float64(r.Dy())+2*g))
+		u.P.FillRoundRectExcept(kutu, u.M.Radius+g,
+			fbdraw.Alpha(color.RGBA{A: 255}, alpha), r)
 	}
 }
 
@@ -211,7 +260,8 @@ func (u *UI) StatusBar(ev *Event, keys []Shortcut, spin int) (image.Rectangle, [
 	h := u.StatusBarH()
 	bar := image.Rect(b.Min.X, b.Max.Y-h, b.Max.X, b.Max.Y)
 
-	u.P.Fill(bar, u.Pal.Surface)
+	u.P.FillRoundRectImage(fbdraw.R(float64(bar.Min.X), float64(bar.Min.Y),
+		float64(bar.Dx()), float64(bar.Dy())), 0, u.GlassLayer())
 	// Üst kenarda ince ayırıcı: çubuğun içerikten ayrıldığı belli olsun.
 	u.P.HLine(float64(bar.Min.X), float64(bar.Max.X), float64(bar.Min.Y),
 		u.M.DividerStroke, u.Pal.Divider)

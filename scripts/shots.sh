@@ -60,11 +60,17 @@ shot 11 13-ayarlar       --content
 
 echo "== açılır pencereler (bulanık arka plan) =="
 shot 6  20-modal-liste   --content --modal list
+shot 6  20a-tarama-canli --content --modal scan
+shot 6  20b-tarama-bos   --content --modal scan-empty
 shot 6  21-modal-parola  --content --modal password
 shot 10 22-modal-onay    --content --modal confirm
 shot 11 23-modal-fare    --content --modal pointer
+shot 11 23a-modal-ses    --content --modal sound
+shot 11 23b-modal-vnc    --content --modal vnc
 shot 9  24-modal-metin   --content --modal text
 shot 0  25-kilit-ekrani  --modal lock
+shot 0  26-kapaniyor     --power poweroff
+shot 0  27-yeniden-baslat --power reboot
 
 echo "== kurulum sihirbazı =="
 setup_shot 0 30-oobe-hosgeldiniz

@@ -46,6 +46,13 @@ func (fabricProvider) Install(ctx context.Context, mcVersion, dir, javaBin strin
 
 	// Fabric serves a self-contained server launcher jar that resolves the rest
 	// of its libraries on first run — no installer execution required.
+	//
+	// 26.x için ek bir şey gerekmiyor: sürüm gizlenmeden (unobfuscated)
+	// yayımlandığından meta, intermediary olarak "net.fabricmc:intermediary:
+	// 0.0.0" bildiriyor (meta.fabricmc.net/v2/versions/loader/26.3,
+	// 2026-09-27) — eşleme dosyası yok. Çevrimdışı paketteki
+	// intermediary-1.21.11.jar yalnızca 1.21.11 içindir; 26.x'e karşılığı
+	// eklenmez çünkü böyle bir dosya yayımlanmıyor.
 	dlURL := fmt.Sprintf("%s/versions/loader/%s/%s/%s/server/jar", fabricMeta, mcVersion, loader, installer)
 	if lg != nil {
 		lg.Infof("fabric: downloading launcher (loader %s, installer %s)", loader, installer)

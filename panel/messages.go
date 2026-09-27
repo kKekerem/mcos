@@ -163,7 +163,9 @@ func doTurbo(cl *Client, enabled bool) tea.Cmd {
 // doPersist runs the "make this USB persistent" flow on the daemon.
 func doPersist(cl *Client) tea.Cmd {
 	return func() tea.Msg {
-		m, err := cl.Persist("")
+		// ok=false: canlı DVD/ISO gibi salt okunur bir ortamdan açılmış;
+		// arıza değil, m zaten ne yapılacağını söylüyor.
+		m, _, err := cl.Persist("")
 		if err != nil {
 			return actionMsg{err: err}
 		}

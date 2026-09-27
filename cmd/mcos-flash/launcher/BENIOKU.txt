@@ -1,0 +1,31 @@
+﻿MCOS - USB KURUCU (Windows)
+===========================
+
+Bu klasördeki araç MCOS'u bir USB belleğe KALICI olarak kurar: sunucularınız,
+ayarlarınız ve Java kurulumları yeniden başlatınca kaybolmaz.
+
+İÇİNDEKİLER
+  mcos-flash.exe   USB kurucu (yönetici izni ister)
+  mcos-flash.bat   aynı kurucu; pencere hata olsa da açık kalır
+  mcos-usb.img     MCOS disk imajı - hem UEFI hem eski (BIOS) bilgisayarda açılır
+
+KULLANIM
+  1. USB belleği takın (en az 4 GB önerilir; ÜZERİNDEKİ HER ŞEY SİLİNİR).
+  2. mcos-flash.exe'ye çift tıklayın, "Evet" ile yönetici izni verin.
+  3. Listeden USB'yi seçin; onay için ekranda gösterilen aygıt yolunu
+     elle yazın (bilerek böyle: yanlış diske yazmayı önlemek için).
+  4. Yazma ve doğrulama bitince USB'yi çıkarıp MCOS'u açacağınız bilgisayara
+     takın; açılışta USB'yi seçin (çoğu bilgisayarda F12, F11, F8 ya da Esc).
+
+İLK AÇILIŞ
+  Veri bölümü ilk açılışta USB'nin sonuna kadar kendiliğinden büyütülür;
+  32 GB'lik bir bellekte sunucular için ~30 GB kullanılabilir.
+
+SIK SORULANLAR
+  * "Sistem diski listede yok" - bilerek: kurucu Windows'un kurulu olduğu
+    diski hiçbir koşulda göstermez.
+  * USB açılmıyor - BIOS/UEFI ayarlarında "Secure Boot"u kapatın ve USB'yi
+    açılış sırasında ilk sıraya alın.
+  * Ventoy kullanıyorum - MCOS ISO'sunu (mcos-x86_64.iso) Ventoy'a
+    kopyalamanız yeterli; bu kurucuya gerek yok. Ventoy'da kalıcılık için
+    MCOS'u panelden bir diske kurun.

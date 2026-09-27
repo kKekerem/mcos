@@ -62,11 +62,11 @@ func TestSameNameDifferentIdIsNotSelf(t *testing.T) {
 	a := newNamedManager(t, "mcos-1")
 	b := newNamedManager(t, "mcos-1")
 
-	if a.isSelf(b.nodeID, b.nodeName) {
+	if a.isSelf(b.nodeID, b.name()) {
 		t.Error("aynı adlı KOMŞU, bu makinenin kendisi sanıldı — " +
 			"tarama ve elle eşleştirme bu yüzden çalışmıyordu")
 	}
-	if !a.isSelf(a.nodeID, a.nodeName) {
+	if !a.isSelf(a.nodeID, a.name()) {
 		t.Error("makine kendini tanımadı")
 	}
 }

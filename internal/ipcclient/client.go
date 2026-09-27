@@ -160,6 +160,57 @@ func (cl *Client) ServerVersions(software model.Software) (ipc.ServerVersionsRes
 	return res, err
 }
 
+// ── Ekran paylaşımı (VNC) ─────────────────────────────────────────────────
+
+// VNCStatus mirrors daemon.VNCStatus.
+type VNCStatus struct {
+	Enabled   bool     `json:"enabled"`
+	Running   bool     `json:"running"`
+	Port      int      `json:"port"`
+	Password  string   `json:"password,omitempty"`
+	ViewOnly  bool     `json:"viewOnly"`
+	Clients   int      `json:"clients"`
+	Addresses []string `json:"addresses,omitempty"`
+	Input     bool     `json:"input"`
+	Note      string   `json:"note,omitempty"`
+}
+
+// VNCGet returns the screen-sharing status.
+func (cl *Client) VNCGet() (VNCStatus, error) {
+	var res VNCStatus
+	err := cl.call(ipc.MethodVNCStatus, nil, &res)
+	return res, err
+}
+
+// VNCEnable turns screen sharing on (generating a password if needed).
+func (cl *Client) VNCEnable() (VNCStatus, error) {
+	var res VNCStatus
+	err := cl.call(ipc.MethodVNCEnable, nil, &res)
+	return res, err
+}
+
+// VNCDisable turns screen sharing off.
+func (cl *Client) VNCDisable() (VNCStatus, error) {
+	var res VNCStatus
+	err := cl.call(ipc.MethodVNCDisable, nil, &res)
+	return res, err
+}
+
+// VNCRotate replaces the password, cutting off connected viewers.
+func (cl *Client) VNCRotate() (VNCStatus, error) {
+	var res VNCStatus
+	err := cl.call(ipc.MethodVNCRotate, nil, &res)
+	return res, err
+}
+
+// VNCViewOnly switches between "watch only" and full control.
+func (cl *Client) VNCViewOnly(on bool) (VNCStatus, error) {
+	var res VNCStatus
+	err := cl.call(ipc.MethodVNCViewOnly,
+		map[string]bool{"viewOnly": on}, &res)
+	return res, err
+}
+
 // ── Network (Wi-Fi) ───────────────────────────────────────────────────────
 
 func (cl *Client) WiFiScan() ([]ipc.WiFiNetwork, error) {
@@ -168,9 +219,31 @@ func (cl *Client) WiFiScan() ([]ipc.WiFiNetwork, error) {
 	return res.Networks, err
 }
 
+// WiFiScanStart kicks off a scan and returns immediately with the session
+// state. Poll WiFiScanStatus for partial results.
+func (cl *Client) WiFiScanStart() (ipc.WiFiScanProgress, error) {
+	var res ipc.WiFiScanProgress
+	err := cl.call(ipc.MethodNetWiFiScanStart, nil, &res)
+	return res, err
+}
+
+// WiFiScanStatus returns what the running (or last) scan has found so far.
+func (cl *Client) WiFiScanStatus() (ipc.WiFiScanProgress, error) {
+	var res ipc.WiFiScanProgress
+	err := cl.call(ipc.MethodNetWiFiScanStatus, nil, &res)
+	return res, err
+}
+
+// WiFiApply connects to a wireless network and waits for it to actually work.
+//
+// callLong KULLANILIYOR: bu çağrı artık ilişkilendirmeyi BEKLİYOR ve zayıf
+// sinyalde 20 saniyeye kadar sürebiliyor (bkz. netcfg.waitAssociated).
+// Paylaşılan bağlantıda kalsaydı o süre boyunca panelin yoklaması, tuşları ve
+// faresi TAMAMEN DONARDI — hem de tam "bağlanıyor" animasyonunun döndüğü anda.
 func (cl *Client) WiFiApply(ssid, pass string) error {
 	var res ipc.OKResult
-	return cl.call(ipc.MethodNetWiFiApply, ipc.WiFiApplyParams{SSID: ssid, Password: pass}, &res)
+	return cl.callLong(ipc.MethodNetWiFiApply,
+		ipc.WiFiApplyParams{SSID: ssid, Password: pass}, &res)
 }
 
 // WiredUp brings up wired interfaces and requests DHCP (daemon-side, best-effort).
@@ -181,16 +254,35 @@ func (cl *Client) WiredUp() error {
 
 // ── Catalog (mods / plugins) ──────────────────────────────────────────────
 
+// CatalogSearch searches Modrinth for content the server can load.
+//
+// callLong KULLANILIR: daemon Modrinth'e 30 sn zaman aşımıyla gider. Yavaş bir
+// bağlantıda bu süre boyunca paylaşılan bağlantının kilidi tutulsaydı panelin
+// yoklaması (sunucu durumu, konsol) ve tuşları donardı.
 func (cl *Client) CatalogSearch(serverID, query string) ([]ipc.CatalogItem, error) {
-	var res ipc.CatalogSearchResult
-	err := cl.call(ipc.MethodCatalogSearch, ipc.CatalogSearchParams{ServerID: serverID, Query: query}, &res)
+	res, err := cl.CatalogSearchWith(ipc.CatalogSearchParams{ServerID: serverID, Query: query})
 	return res.Items, err
 }
 
+// CatalogSearchWith is CatalogSearch with every option, returning the applied
+// filters too (for "paper · 1.21.1 · 21 sonuç").
+func (cl *Client) CatalogSearchWith(p ipc.CatalogSearchParams) (ipc.CatalogSearchResult, error) {
+	var res ipc.CatalogSearchResult
+	err := cl.callLong(ipc.MethodCatalogSearch, p, &res)
+	return res, err
+}
+
+// CatalogInstall installs a project; returns the written file name.
 func (cl *Client) CatalogInstall(serverID, slug string) (string, error) {
-	var res ipc.OKResult
-	err := cl.callLong(ipc.MethodCatalogInstall, ipc.CatalogInstallParams{ServerID: serverID, Slug: slug}, &res)
+	res, err := cl.CatalogInstallWith(ipc.CatalogInstallParams{ServerID: serverID, Slug: slug})
 	return res.Message, err
+}
+
+// CatalogInstallWith installs with options and reports how the file was chosen.
+func (cl *Client) CatalogInstallWith(p ipc.CatalogInstallParams) (ipc.CatalogInstallResult, error) {
+	var res ipc.CatalogInstallResult
+	err := cl.callLong(ipc.MethodCatalogInstall, p, &res)
+	return res, err
 }
 
 func (cl *Client) ScanUSBMods() ([]model.USBJar, error) {
@@ -291,9 +383,17 @@ func (cl *Client) Power(action string) error {
 
 // Turbo toggles the global turbo mode; returns the new state.
 func (cl *Client) Turbo(enabled bool) (bool, error) {
+	res, err := cl.TurboDetail(enabled)
+	return res.Enabled, err
+}
+
+// TurboDetail toggles turbo and also returns what it actually changed on the
+// hardware. Panel bunu "Turbo açıldı" yerine gerçek sonucu yazmak için
+// kullanır (örn. "performans kipi, P-çekirdekleri 0-7, fanlar %100").
+func (cl *Client) TurboDetail(enabled bool) (ipc.TurboResult, error) {
 	var res ipc.TurboResult
 	err := cl.call(ipc.MethodSystemTurbo, ipc.TurboParams{Enabled: enabled}, &res)
-	return res.Enabled, err
+	return res, err
 }
 
 // Disks lists candidate block devices for the "make USB persistent" flow.
@@ -304,11 +404,23 @@ func (cl *Client) Disks() ([]ipc.DiskTarget, error) {
 }
 
 // Persist makes the booted USB (or the given device) persistent by adding an
-// MCOS-DATA partition. Returns a human-readable result message.
-func (cl *Client) Persist(device string) (string, error) {
+// MCOS-DATA partition.
+//
+// Üç ayrı sonuç var ve üçü de farklı gösterilmeli:
+//
+//	ok=true,  err=nil  → kalıcılık kuruldu
+//	ok=false, err=nil  → bu ortamda GEÇERLİ DEĞİL (canlı DVD/ISO salt okunur);
+//	                     arıza yok, msg kullanıcıya ne yapacağını söylüyor
+//	          err!=nil → gerçek hata
+//
+// Eskiden ikinci durum yoktu: canlı ISO'dan açan kullanıcı sihirbazın sonunda
+// her seferinde "USB kalıcı yapılamadı" görüyordu.
+func (cl *Client) Persist(device string) (msg string, ok bool, err error) {
 	var res ipc.OKResult
-	err := cl.call(ipc.MethodSystemPersist, ipc.PersistParams{Device: device}, &res)
-	return res.Message, err
+	// Uzun çağrı: Ventoy'da kalıcılık dosyası sıfırla doldurulur (4 GiB;
+	// USB 2'de dakikalar). Paylaşılan bağlantıda panelin yoklaması donardı.
+	err = cl.callLong(ipc.MethodSystemPersist, ipc.PersistParams{Device: device}, &res)
+	return res.Message, res.OK, err
 }
 
 // ── Backup ──────────────────────────────────────────────────────────────
@@ -426,4 +538,23 @@ func (cl *Client) TunnelStart(code string) error {
 func (cl *Client) TunnelStop(code string) error {
 	var res ipc.OKResult
 	return cl.call(ipc.MethodTunnelStop, ipc.TunnelStatusParams{Code: code}, &res)
+}
+
+// ScanUSBServerFolders lists importable server folders on attached USB drives.
+func (cl *Client) ScanUSBServerFolders() ([]model.USBServerFolder, error) {
+	var res ipc.USBFoldersResult
+	err := cl.callLong(ipc.MethodServerScanUSBFolders, struct{}{}, &res)
+	return res.Items, err
+}
+
+// ImportUSBServer copies a USB folder in as a new server (uzun sürebilir:
+// dünya yüzlerce MB olabilir; kendi bağlantısında koşar).
+func (cl *Client) ImportUSBServer(dev, rel, name string) (*model.Server, error) {
+	// Yanıt server.create ile aynı biçimde: {"server": {...}}.
+	var res ipc.ServerResult
+	err := cl.callLong(ipc.MethodServerImportUSB, ipc.ImportUSBParams{Device: dev, RelPath: rel, Name: name}, &res)
+	if err == nil && res.Server == nil {
+		return nil, errors.New("daemon sunucu bilgisi döndürmedi")
+	}
+	return res.Server, err
 }

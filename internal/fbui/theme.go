@@ -104,6 +104,7 @@ type Metrics struct {
 	DividerStroke float64 // ayırıcı çizgi kalınlığı
 	ButtonH       int     // buton yüksekliği
 	ButtonMinW    int     // buton en az genişliği
+	ButtonGap     int     // yan yana butonlar arası boşluk
 	RowH          int     // liste satırı yüksekliği
 	MarkerR       float64 // radyo/onay işaret yarıçapı
 }
@@ -127,8 +128,15 @@ func MetricsFor(cellW, cellH int) Metrics {
 
 		ButtonH:    cellH*2 - cellH/3,
 		ButtonMinW: cellW * 14,
-		RowH:       cellH + cellH/3,
-		MarkerR:    float64(cellH) * 0.28,
+
+		// Butonlar arası boşluk: Gap'in (hücre genişliği) üç katı, 1080p'de
+		// 36 px. Eskiden Gap*2 (24 px) idi ve kullanıcı "butonlar çok yakın"
+		// dedi. Seçili butonun beyaz halkası butonun dışına ~4,4 px taştığı
+		// için alt sınır ~9 px'tir; 36 px hem halkaları ayırır hem de iki
+		// butonu gözle "ayrı eylem" olarak okutur.
+		ButtonGap: cellW * 3,
+		RowH:      cellH + cellH/3,
+		MarkerR:   float64(cellH) * 0.28,
 	}
 }
 

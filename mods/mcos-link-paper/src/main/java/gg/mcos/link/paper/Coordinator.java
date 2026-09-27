@@ -98,15 +98,37 @@ public final class Coordinator {
     private volatile boolean warnedUnreachable;
 
     public Coordinator() {
-        String env = System.getenv("MCOS_LINK_COORDINATOR");
-        this.baseUrl = (env == null || env.isBlank())
-                ? "http://127.0.0.1:27892" : env.trim();
+        this.baseUrl = baseUrl(System.getenv("MCOS_LINK_COORDINATOR"));
         this.exec = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "mcos-link-coordinator");
             // Arka plan iş parçacığı sunucunun kapanmasını ENGELLEMEMELİ.
             t.setDaemon(true);
             return t;
         });
+    }
+
+    /**
+     * Ortam değişkeninden taban URL'yi kurar.
+     *
+     * <p><b>Yakalanan gerçek hata.</b> MCOS bir sürüm boyunca bu değişkeni
+     * ŞEMASIZ ("127.0.0.1:27892") verdi. {@code URI.create} bunu "Illegal
+     * character in scheme name" diye reddediyor, eklenti koordinatöre hiç
+     * bağlanamıyor ve ortak dünya sessizce kapalı kalıyordu. Artık şemasız
+     * bir değer "http://" ile tamamlanıyor; sondaki "/" da atılıyor, çünkü
+     * yollar "/link/..." diye ekleniyor.
+     */
+    static String baseUrl(String env) {
+        if (env == null || env.isBlank()) {
+            return "http://127.0.0.1:27892";
+        }
+        String v = env.trim();
+        if (!v.contains("://")) {
+            v = "http://" + v;
+        }
+        while (v.endsWith("/")) {
+            v = v.substring(0, v.length() - 1);
+        }
+        return v;
     }
 
     /** Düzenli yenilemeyi başlatır. */

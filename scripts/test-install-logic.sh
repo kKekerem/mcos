@@ -125,11 +125,15 @@ else
     check "kalici bolum MCOS-DATA etiketli" \
           "$([ "$(printf '%s\n' "$CODE" | grep -c 'MCOS-DATA')" -gt 0 ] && echo evet || echo hayir)" "evet"
 
-    # 4d. Hedefte grub-install/grub-mkimage ÇAĞRILMAMALI: o araçlar imajda yok
-    #     (ölçüldü: scripts/probe-target-boot.sh). Eski kod onlara güvenip
-    #     sessizce hiçbir önyükleyici yazmıyordu -> BIOS bootable görmüyordu.
-    check "grub-install cagrilmiyor" \
-          "$(printf '%s\n' "$CODE" | grep -c 'grub-install' || true)" "0"
+    # 4d. Önce build zamanında GÖMÜLEN önyükleyici kullanılmalı; grub-install
+    #     yalnızca gömülü parçalar yoksa YEDEK yoldur (imaja /lib/grub
+    #     modülleriyle eklendi). Eski kod araçların varlığına güvenip sessizce
+    #     hiçbir önyükleyici yazmıyordu -> BIOS diski bootable görmüyordu.
+    #     Değişmez: "gomulu" ataması "grub-install" atamasından ÖNCE gelir.
+    GOMULU_SATIR=$(printf '%s\n' "$CODE" | grep -n 'BIOS_YOLU=gomulu' | head -1 | cut -d: -f1)
+    YEDEK_SATIR=$(printf '%s\n' "$CODE" | grep -n 'BIOS_YOLU=grub-install' | head -1 | cut -d: -f1)
+    check "gomulu onyukleyici once, grub-install yalnizca yedek" \
+          "$([ -n "$GOMULU_SATIR" ] && { [ -z "$YEDEK_SATIR" ] || [ "$GOMULU_SATIR" -lt "$YEDEK_SATIR" ]; } && echo evet || echo hayir)" "evet"
     check "grub-mkimage cagrilmiyor" \
           "$(printf '%s\n' "$CODE" | grep -c 'grub-mkimage' || true)" "0"
 
@@ -169,7 +173,9 @@ if [ ! -f "$FINDFS" ]; then
     echo "  FAIL mcos-findfs bulunamadi"
     FAILED=1
 else
-    for m in findfs 'blkid -L' by-label '/proc/mounts\|blkid "\$dev"'; do
+    # Son çare artık blkid değil, etiketin SÜPERBLOKTAN okunması (etiket_oku):
+    # busybox blkid iso9660 okumuyor, findfs imajda yok (bkz. mcos-findfs).
+    for m in findfs 'blkid -L' by-label 'etiket_oku'; do
         check "yontem denenmis: $m" \
               "$([ "$(grep -c -- "$m" "$FINDFS")" -gt 0 ] && echo evet || echo hayir)" "evet"
     done

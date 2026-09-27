@@ -39,6 +39,13 @@ func (a *App) runAction(key string) Action {
 	case "playit-start":
 		a.tunnelActivate(int(stepTunnel))
 
+	case "scan-rescan":
+		// Canlı tarama penceresindeki "Yeniden tara" düğmesi. Eylem, açık
+		// pencerenin KENDİSİNE ait; burada yalnızca ona yönlendiriliyor.
+		if m, ok := a.ActiveModal().(*ScanModal); ok && m.onRescan != nil {
+			m.onRescan(a, m)
+		}
+
 	case "settings-theme":
 		a.openThemePicker()
 	case "settings-pointer":

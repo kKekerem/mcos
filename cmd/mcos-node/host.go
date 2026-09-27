@@ -12,7 +12,10 @@ import (
 	"sync"
 	"time"
 
+	"mcos/internal/catalog"
+	"mcos/internal/cluster"
 	"mcos/internal/java"
+	"mcos/internal/linkjar"
 	mlog "mcos/internal/log"
 	"mcos/internal/model"
 	"mcos/internal/portmgr"
@@ -57,10 +60,40 @@ type nodeHost struct {
 	// (port secimi, JavaMajor hesabi, alan atamalari) ag olmadan sinamayi
 	// mumkun kiliyor. Uretimde her zaman installAndStart'tir.
 	installFn func(*model.Server)
+	// fabricAPI, Fabric API'yi internetten mods/ klasörüne indiren SON ÇARE
+	// adımıdır (nil = downloadFabricAPI; dönüş indirilen dosyanın yolu).
+	// Testler ağa çıkmasın diye değiştirilebilir.
+	fabricAPI func(srv *model.Server, modsDir string) (string, error)
+
+	// coord, mod/eklenti eşitlemesi için (nil: sınamalarda eşitleme yok).
+	coord *cluster.LinkCoordinator
+	// pair, kodla eşleştirme istekleri ve kararları (pairing.go; nil:
+	// sınamalarda yok).
+	pair *pairTracker
+
+	installMu sync.Mutex
 
 	mu       sync.Mutex
 	lastNote string
 	busy     bool
+	files    map[string][]model.LinkFile
+}
+
+// dataDir is where a server's files live on this machine.
+func (h *nodeHost) dataDir(srv *model.Server) string {
+	if srv.DataDir != "" {
+		return srv.DataDir
+	}
+	return h.st.Paths.ServerData(srv.ID)
+}
+
+// LinkDataDir implements cluster.LinkFileHost.
+func (h *nodeHost) LinkDataDir() (string, bool) {
+	srv := h.sharedWorldServer()
+	if srv == nil {
+		return "", false
+	}
+	return h.dataDir(srv), true
 }
 
 // install runs the install step, honouring a test override.
@@ -90,6 +123,9 @@ func (h *nodeHost) LinkSpec() (model.LinkSpec, bool) {
 		LinkPort:   srv.Link.LinkPort,
 		SlabChunks: srv.Link.SlabChunks,
 		Origin:     nodeName(),
+		// Kurucu MCOS'tur: bu alan dolu olduğu sürece koordinatör kurulumu
+		// geri yaymaz (bkz. cluster.LinkCoordinator.isOrigin).
+		OriginID: srv.Link.OriginID,
 	}.Normalize(), true
 }
 
@@ -182,8 +218,9 @@ func (h *nodeHost) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 
 	// Yazılım ya da sürüm değiştiyse kurulum geçersizdir; yoksa eski jar
 	// çalışmaya devam eder ve panel yanlış sürümü gösterir.
-	if !created &&
-		(srv.Software != model.Software(spec.Software) || srv.MCVersion != spec.MCVersion) {
+	changed := !created &&
+		(srv.Software != model.Software(spec.Software) || srv.MCVersion != spec.MCVersion)
+	if changed {
 		h.servers.MarkUninstalled(srv.ID)
 	}
 
@@ -195,13 +232,20 @@ func (h *nodeHost) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 	srv.LevelSeed = spec.Seed
 	srv.Difficulty = string(spec.Difficulty)
 	srv.RAMMB, srv.CPUQuota = h.clamp(spec.RAMMB, srv.CPUQuota)
+	// Kural değiştiyse çalışan sunucu yeniden başlamalı (properties açılışta okunur).
+	rulesChanged := !created && spec.Rules != nil && !srv.Link.Rules.Equal(spec.Rules)
 	srv.Link = model.LinkConfig{
 		Mode:       model.LinkSharedWorld,
 		Difficulty: spec.Difficulty,
 		SlabChunks: spec.SlabChunks,
 		Seed:       spec.Seed,
 		LinkPort:   spec.LinkPort,
+		OriginID:   spec.OriginID,
+		Rules:      spec.Rules,
 	}
+	// Kurucunun oyun kuralları (online-mode, kip, PvP...): uyuşmazlıkta
+	// aktarılan oyuncu bu PC'nin sunucusundan atılıyordu (bkz. model.LinkRules).
+	spec.Rules.ApplyTo(srv)
 	srv.UpdatedAt = time.Now()
 
 	if err := h.st.SaveServer(srv); err != nil {
@@ -212,18 +256,92 @@ func (h *nodeHost) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 	if created {
 		verb = "oluşturuldu"
 	}
+	// Mod bu PC'de kurulabilecek mi — kurulumla AYNI seçim (linkjar). Kurulum
+	// arka planda koşuyor; paket eskiyse (yalnızca 1.21.11 jar'ı) neden
+	// MCOS'a dönen metinde görünsün, sunucu yine kurulur (MCOS kutusuyla aynı
+	// davranış, bkz. internal/daemon ApplyLinkSpec).
+	modWarn := ""
+	if _, err := linkLocator().Find(srv.Software, srv.MCVersion); err != nil {
+		modWarn = " — UYARI: " + err.Error()
+	}
+
+	// ── Zaten çalışıyorsa DOKUNMA ──────────────────────────────────────
+	// MCOS kurulumu eşitleme döngüsüyle yeniden gönderebilir (katılımcı
+	// listesi ya da port değişince). Eskiden her gönderim installAndStart'ı
+	// yeniden çalıştırıyordu: çalışan sunucuya ikinci kez "başlat" deniyor,
+	// "server already running" hatası durum satırına "başlatılamadı" diye
+	// düşüyordu. Yalnızca yazılım/sürüm değiştiyse yeniden başlatılır.
+	//
+	// Mod/eklenti listesi değiştiyse ya da eldeki dünya başka bir tohumla
+	// üretilmişse de yeniden başlatılır: ikisi de ancak açılışta etkili olur.
+	dir := h.dataDir(srv)
+	filesPending := cluster.LinkFilesPending(dir, spec.Files)
+	seedChanged := false
+	if have, err := cluster.WorldSeed(dir); err == nil && !cluster.SameSeed(have, spec.Seed) {
+		seedChanged = true
+	}
+	running := h.isRunning(srv.ID)
+	if running && !changed && !filesPending && !seedChanged && !rulesChanged {
+		h.note(fmt.Sprintf("%s çalışıyor (port %d) — kurulum eşitlendi", srv.Name, srv.Port))
+		return fmt.Sprintf("%s %s (port %d, çalışıyor)%s", srv.Name, verb, srv.Port, modWarn), srv.Port, nil
+	}
 
 	// Kurulum ve başlatma ARKA PLANDA: karşı taraf 60 saniyeden uzun süren
 	// bir indirmeyi bekleyemez, zaman aşımına uğrar ve kurulumu başarısız
 	// sanar.
-	go h.install(srv.Clone())
+	clone := srv.Clone()
+	files := append([]model.LinkFile(nil), spec.Files...)
+	go func() {
+		if running {
+			h.note(clone.Name + " yeniden başlatılıyor (kurulum değişti)")
+			h.stopAndWait(clone.ID)
+		}
+		if seedChanged {
+			// Düğüm daha önce aynı adla BAŞKA bir tohumdan kurulmuş bir
+			// ortak dünyayı yeniden kullanıyor: eski dünya silinmez,
+			// kenara alınır (bkz. cluster.RetireMismatchedWorld).
+			if moved, err := cluster.RetireMismatchedWorld(dir, clone.LevelSeed); err != nil {
+				h.log.Warnf("node: dünya kenara alınamadı: %v", err)
+			} else if len(moved) > 0 {
+				h.log.Warnf("node: tohum değişti; eski dünya kenara alındı: %s",
+					strings.Join(moved, ", "))
+			}
+		}
+		h.pendingFiles(clone.ID, files)
+		h.install(clone)
+	}()
 
-	h.note(fmt.Sprintf("%s %s (port %d) — kuruluyor", srv.Name, verb, srv.Port))
-	return fmt.Sprintf("%s %s (port %d)", srv.Name, verb, srv.Port), srv.Port, nil
+	h.note(fmt.Sprintf("%s %s (port %d) — kuruluyor%s", srv.Name, verb, srv.Port, modWarn))
+	return fmt.Sprintf("%s %s (port %d)%s", srv.Name, verb, srv.Port, modWarn), srv.Port, nil
+}
+
+// isRunning reports whether the server is up or coming up.
+func (h *nodeHost) isRunning(id string) bool {
+	if h.servers == nil {
+		return false
+	}
+	st := h.servers.State(id)
+	return st == model.StateRunning || st == model.StateStarting
+}
+
+// stopAndWait stops a server and waits (bounded) for it to exit.
+func (h *nodeHost) stopAndWait(id string) {
+	_ = h.servers.Stop(id)
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) && h.isRunning(id) {
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // installAndStart downloads the server, installs the mod and starts it.
 func (h *nodeHost) installAndStart(srv *model.Server) {
+	// Kurulumlar SIRAYLA: açılışta restorePrevious sunucuyu başlatırken
+	// kurucu kurulumu yeniden gönderebilir (düğümün elindeki özet boş
+	// olduğu için). İkisi aynı anda koşarsa ikinci Start "server already
+	// starting" ile düşer ve durum satırı çalışan bir sunucu için
+	// "başlatılamadı" yazar.
+	h.installMu.Lock()
+	defer h.installMu.Unlock()
 	h.setBusy(true)
 	defer h.setBusy(false)
 
@@ -236,6 +354,16 @@ func (h *nodeHost) installAndStart(srv *model.Server) {
 		return
 	}
 
+	// Kurucunun mod/eklentileri BAŞLATMADAN önce: yoksa bu yarı ilk
+	// açılışta modsuz üretilir ve modlu bloklar sınırda kaybolur.
+	if files, ok := h.takeFiles(srv.ID); ok && h.coord != nil {
+		h.note("modlar/eklentiler eşitleniyor…")
+		if _, err := h.coord.SyncLinkFiles(ctx, h.dataDir(srv), files); err != nil {
+			h.note("UYARI: bazı modlar/eklentiler alınamadı — " + err.Error())
+			h.log.Warnf("node: mod/eklenti eşitlemesi eksik (%s): %v", srv.Name, err)
+		}
+	}
+
 	if err := h.installLinkMod(srv); err != nil {
 		// Mod olmadan sunucu ÇALIŞIR ama ortak dünya devri olmaz. Bunu
 		// sessizce geçmek, kullanıcının sınırda takılıp kalmasına yol
@@ -244,6 +372,10 @@ func (h *nodeHost) installAndStart(srv *model.Server) {
 		h.log.Warnf("node: mod kurulamadı (%s): %v", srv.Name, err)
 	}
 
+	if h.isRunning(srv.ID) {
+		h.note(fmt.Sprintf("%s çalışıyor (port %d)", srv.Name, srv.Port))
+		return
+	}
 	h.note("sunucu başlatılıyor…")
 	if err := h.servers.Start(ctx, srv); err != nil {
 		h.note("başlatılamadı: " + err.Error())
@@ -260,14 +392,21 @@ func (h *nodeHost) installAndStart(srv *model.Server) {
 // kullaniliyor (internal/daemon/handlers_link.go): kullanici ayni klasoru iki
 // makineye kopyalayabilmeli.
 const (
-	linkModName    = "mcos-link.jar"       // Fabric / Quilt / Forge
+	linkModName    = "mcos-link.jar"       // yalnızca Fabric
 	linkPluginName = "mcos-link-paper.jar" // Paper / Purpur / Spigot
 )
 
 // linkArtifact says which file this server needs and where it goes.
+//
+// ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
+// Burada sw.SupportsMods() yazıyordu: Forge, NeoForge ve Quilt'e de Fabric
+// modu kopyalanıyordu. Forge Fabric biçimli bir modu TANIMAZ; Quilt ise
+// fabric-api yerine ayrı bir "Quilted Fabric API" ister. MCOS kutusu bu
+// hatayı çoktan düzeltmişti (internal/daemon/handlers_link.go) ama düğüm
+// eski kuralı taşıyordu — aynı kurulum iki makinede farklı davranıyordu.
 func linkArtifact(sw model.Software) (name, dir string, ok bool) {
 	switch {
-	case sw.SupportsMods():
+	case sw == model.SoftwareFabric:
 		return linkModName, "mods", true
 	case sw.SupportsPlugins():
 		return linkPluginName, "plugins", true
@@ -275,63 +414,160 @@ func linkArtifact(sw model.Software) (name, dir string, ok bool) {
 	return "", "", false
 }
 
+// linkBaseDir is the program folder the shared-world jars ship in.
+//
+// Değişken, çünkü sınamada os.Executable sınama ikilisini gösterir; sınama
+// sahte bir program klasörü verir. Üretimde her zaman exeDir.
+var linkBaseDir = exeDir
+
+// linkLocator says where this machine looks for the link jars.
+//
+// ── Yakalanan hata ──────────────────────────────────────────────────────────
+// Düğüm paketi yalnızca 1.21.11 için derlenmiş mcos-link.jar'ı taşıyordu ve
+// düğüm sürüm bile sormadan onu HER Fabric sunucusuna kopyalıyordu: MCOS
+// kutusu 26.3 ortak dünyası gönderdiğinde bu PC'deki yarı ya modsuz kalır ya
+// da açılışta düşerdi. Artık paket, her sürümün jar'ını ve indeksini
+// programın yanındaki mods/link klasöründe taşır (make node-jars) ve seçim
+// MCOS kutusundakiyle AYNI kuralla (internal/linkjar) yapılır — iki yarı aynı
+// jar'ı seçmeli.
+//
+// Arama sırası: MCOS_NODE_LINK_DIR (elle verilen klasör), <program>/mods/link,
+// <program> (klasör düzleştirilmişse), ./dist/mods/link (depodan go run).
+// Eski, indekssiz düzen (programın yanında mcos-link.jar; yalnızca 1.21.11)
+// son çare olarak tanınır.
+func linkLocator() linkjar.Locator {
+	base := linkBaseDir()
+	link := filepath.Join(base, "mods", "link")
+	dirs := []string{link, base, filepath.Join(".", "dist", "mods", "link")}
+	if d := os.Getenv("MCOS_NODE_LINK_DIR"); d != "" {
+		dirs = append([]string{d}, dirs...)
+	}
+	return linkjar.Locator{
+		Dirs: dirs,
+		LegacyDirs: []string{base, filepath.Join(base, "mods"), ".",
+			filepath.Join(".", "mods"), filepath.Join(".", "dist", "mods")},
+		// fabric-api paketle mods/link içinde gelir; eski paketlerde
+		// programın yanında ya da mods/ altındaydı.
+		DepDirs: []string{link, base, filepath.Join(base, "mods")},
+	}
+}
+
 // installLinkMod copies the shared-world mod into the server.
 //
-// Fabric mods/ klasörüne, Paper ise plugins/ klasörüne koyar. İkisi de
-// desteklenir, çünkü kullanıcı her iki yazılımı da seçebilmeli.
+// Fabric mods/ klasörüne, Paper ise plugins/ klasörüne koyar. Hangi jar:
+// sunucunun Minecraft sürümüne göre linkjar seçer; hedef ad sabittir
+// (mods/mcos-link.jar, plugins/mcos-link-paper.jar) — MCOS kutusuyla aynı.
+// Uyumsuz sürümde önceki kurulumun jar'ı KALDIRILIR: yanlış sürümün Fabric
+// modu sunucuyu açılışta düşürür (1.21.11 jar'ı 1.21.1'de NoSuchFieldError).
 func (h *nodeHost) installLinkMod(srv *model.Server) error {
 	name, sub, ok := linkArtifact(srv.Software)
 	if !ok {
-		return fmt.Errorf("%s ne mod ne eklenti yükler; ortak dünya için "+
-			"Fabric veya Paper gerekir", srv.Software)
+		if _, err := linkjar.LoaderFor(srv.Software); err != nil {
+			return err
+		}
+		return fmt.Errorf("%s ortak dünyayı desteklemiyor", srv.Software)
 	}
-	src := findLinkArtifact(name)
-	if src == "" {
-		return fmt.Errorf("%s bulunamadı (programın yanında olmalı)", name)
+	dir := filepath.Join(h.dataDir(srv), sub)
+	dst := filepath.Join(dir, name)
+	l := linkLocator()
+	res, err := l.Find(srv.Software, srv.MCVersion)
+	if err != nil {
+		if linkjar.KindOf(err) == linkjar.KindVersion {
+			_ = os.Remove(dst)
+		}
+		return err
 	}
-
-	dataDir := srv.DataDir
-	if dataDir == "" {
-		dataDir = h.st.Paths.ServerData(srv.ID)
-	}
-	dir := filepath.Join(dataDir, sub)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return copyFile(src, filepath.Join(dir, name))
+	// ── Fabric: API ÖNCE ────────────────────────────────────────────────
+	// mcos-link, fabric-api'yi SERT bağımlılık olarak bildirir. Fabric
+	// Loader eksik sert bağımlılıkta modu atlamaz, SUNUCUYU HİÇ AÇMAZ
+	// ("requires any version of fabric-api, which is missing!"). Düğüm
+	// fabric-api'yi hiç kurmuyordu: MCOS'un buraya kurduğu her Fabric ortak
+	// dünyası açılışta çöküyordu. API sağlanamıyorsa mod da kurulmaz (varsa
+	// eski kopyası da kaldırılır). Doğru sürümün fabric-api'si ve yanlış
+	// sürümdekinin temizliği: linkjar.PrepareFabricAPI.
+	if res.Loader == linkjar.Fabric && res.Dep != "" {
+		if res.DepPath == "" {
+			if p := linkjar.FabricAPIFor(l.DepDirs, srv.MCVersion); p != "" {
+				res.DepPath, res.Dep = p, linkjar.CleanCacheName(filepath.Base(p))
+			}
+		}
+		fetch := h.fabricAPI
+		if fetch == nil {
+			fetch = downloadFabricAPI
+		}
+		note, err := linkjar.PrepareFabricAPI(dir, res, srv.MCVersion, func() (string, error) {
+			return fetch(srv, dir)
+		})
+		if err != nil {
+			_ = os.Remove(dst)
+			return fmt.Errorf("%w; ortak dünya modu kurulmadı — onsuz Fabric "+
+				"sunucusu HİÇ açılmaz", err)
+		}
+		if h.log != nil {
+			h.log.Infof("node: %s: %s", srv.Name, note)
+		}
+	}
+	return copyFile(res.Jar, dst)
 }
 
-// findLinkArtifact looks for one of the two jars next to the program.
-func findLinkArtifact(name string) string {
-	if name == "" {
-		return ""
-	}
-	// Acik yol: kullanici dosyayi baska bir yerde tutuyorsa gosterebilmeli.
-	// MCOS_NODE_MOD Fabric modunu, MCOS_NODE_PLUGIN Paper eklentisini
-	// gosterir.
-	env := "MCOS_NODE_MOD"
-	if name == linkPluginName {
-		env = "MCOS_NODE_PLUGIN"
-	}
-	if p := os.Getenv(env); p != "" {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
+// copyLinkJars copies the shipped link folder (index-*.tsv + jars) to
+// <base>/mods/link.
+//
+// Windows'ta program ilk açılışta kendini %LOCALAPPDATA%\MCOS-Node\program
+// altına kopyalar; eskiden yalnızca iki sabit adlı jar yanına alınıyordu.
+// İndeks ve sürüme özel jar'lar alınmazsa kurulu program hiçbir sürümde
+// ortak dünya modu bulamazdı. Dönüş: kopyalanan dosya sayısı.
+func copyLinkJars(base string) (int, error) {
+	dst := filepath.Join(base, "mods", "link")
+	for _, src := range linkLocator().Dirs {
+		idx, _ := filepath.Glob(filepath.Join(src, "index-*.tsv"))
+		if len(idx) == 0 {
+			continue
 		}
+		if a, b := absPath(src), absPath(dst); a == b {
+			return 0, nil // zaten kurulu yerden çalışıyoruz
+		}
+		if err := os.MkdirAll(dst, 0o755); err != nil {
+			return 0, err
+		}
+		names, err := os.ReadDir(src)
+		if err != nil {
+			return 0, err
+		}
+		n := 0
+		for _, e := range names {
+			nm := e.Name()
+			if !e.Type().IsRegular() || !(strings.HasSuffix(nm, ".jar") ||
+				(strings.HasPrefix(nm, "index-") && strings.HasSuffix(nm, ".tsv"))) {
+				continue
+			}
+			if err := copyFile(filepath.Join(src, nm), filepath.Join(dst, nm)); err != nil {
+				return n, err
+			}
+			n++
+		}
+		return n, nil
 	}
+	return 0, fmt.Errorf("ortak dünya jar'ları bulunamadı: index-*.tsv yok (aranan: %s)",
+		strings.Join(linkLocator().Dirs, ", "))
+}
 
-	base := exeDir()
-	for _, p := range []string{
-		filepath.Join(base, name),
-		filepath.Join(base, "mods", name),
-		filepath.Join(".", name),
-		filepath.Join(".", "mods", name),
-		filepath.Join(".", "dist", "mods", name),
-	} {
-		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Size() > 0 {
-			return p
-		}
+func absPath(p string) string {
+	if a, err := filepath.Abs(p); err == nil {
+		return filepath.Clean(a)
 	}
-	return ""
+	return filepath.Clean(p)
+}
+
+// downloadFabricAPI fetches fabric-api from Modrinth (son çare: paket
+// fabric-api'yi zaten taşıyor, internetsiz kurulum çalışmalı).
+func downloadFabricAPI(srv *model.Server, modsDir string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	return catalog.New().InstallByID(ctx, "fabric-api", "fabric", srv.MCVersion, modsDir)
 }
 
 func copyFile(src, dst string) error {
@@ -369,6 +605,29 @@ func (h *nodeHost) clamp(ramMB, cpu int) (int, int) {
 		cpu = h.budgetCPU
 	}
 	return ramMB, cpu
+}
+
+// pendingFiles remembers the origin's jar list for the next install.
+//
+// install() test sahtesiyle değiştirilebildiği için liste parametre olarak
+// değil, sunucu kimliğiyle saklanır; restorePrevious (kurucudan liste
+// gelmeden açılış) için kayıt yoktur ve eşitleme atlanır — kurucu birkaç
+// saniye içinde kurulumu zaten yeniden gönderir.
+func (h *nodeHost) pendingFiles(id string, files []model.LinkFile) {
+	h.mu.Lock()
+	if h.files == nil {
+		h.files = map[string][]model.LinkFile{}
+	}
+	h.files[id] = files
+	h.mu.Unlock()
+}
+
+func (h *nodeHost) takeFiles(id string) ([]model.LinkFile, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	f, ok := h.files[id]
+	delete(h.files, id)
+	return f, ok
 }
 
 func (h *nodeHost) note(s string) {

@@ -8,8 +8,10 @@ import (
 
 	"mcos/internal/fbdraw"
 	"mcos/internal/fbui"
+	"mcos/internal/ipcclient"
 	"mcos/internal/model"
 	"mcos/internal/version"
+	"strings"
 )
 
 // Draw paints the whole screen.
@@ -72,19 +74,22 @@ func (a *App) Draw() {
 		return
 	}
 
-	u.Clear()
-
 	barH := u.StatusBarH()
 	content := image.Rect(b.Min.X, b.Min.Y, b.Max.X, b.Max.Y-barH)
 
 	pad := u.M.PadX
 	sideW := a.sidebarWidth()
-
-	a.drawSidebar(image.Rect(content.Min.X+pad, content.Min.Y+pad,
-		content.Min.X+pad+sideW, content.Max.Y-pad))
-
+	side := image.Rect(content.Min.X+pad, content.Min.Y+pad,
+		content.Min.X+pad+sideW, content.Max.Y-pad)
 	main := image.Rect(content.Min.X+pad*2+sideW, content.Min.Y+pad,
 		content.Max.X-pad, content.Max.Y-pad)
+
+	// Düz renk yerine ışıklı zemin: kartlar onun üstünde buzlu cam gibi
+	// durur. Kartların İÇİNE zemin yazılmıyor — birazdan camla örtülecekler
+	// (4K'da kare başına ~30 MB gereksiz kopya).
+	u.BackdropExcept(side, main)
+
+	a.drawSidebar(side)
 	a.drawContent(main)
 
 	// Açılır pencere en üstte, arkası bulanık.
@@ -98,11 +103,12 @@ func (a *App) Draw() {
 		}
 		cols, rows := m.Size()
 		in := u.Modal(cols*u.F.CellW, rows*u.F.CellH, m.Title())
-		m.Draw(a, in)
+		// Pencere kendi merkezinden büyüyerek gelir (bkz. modal_zoom.go).
+		a.drawModalZoomed(m, in)
 	}
 
 	keys := a.shortcuts()
-	_, caps := u.StatusBar(a.LastEvent(), keys, a.spinFrame())
+	_, caps := u.StatusBar(a.statusEvent(), keys, a.spinFrame())
 	// Kısayol kapakları TIKLANABİLİR: fareyle çalışan bir kullanıcı,
 	// klavyedeki karşılığını bilmeden aynı eylemi yapabilmeli.
 	for i := range keys {
@@ -265,15 +271,13 @@ func (a *App) sidebarBadge(s Section) (string, color.RGBA) {
 			return itoa(st.PeersOnline), u.Pal.OK
 		}
 	case SecTunnel:
+		// Rozet playit'i gösterir: ajan çalışıyor VE en az bir genel adres
+		// var. Eskiden kaldırılmış Serveo listesine (a.tunnels) bakıyordu;
+		// playit tüneli açıkken kenar çubuğu hiçbir şey göstermiyordu.
 		a.mu.Lock()
-		n := 0
-		for _, t := range a.tunnels {
-			if t.Running {
-				n++
-			}
-		}
+		pl := a.playit
 		a.mu.Unlock()
-		if n > 0 {
+		if pl.Running && playitHasAddress(pl) {
 			return "açık", u.Pal.OK
 		}
 	}
@@ -363,12 +367,78 @@ func (a *App) rowHighlight(row image.Rectangle, selected bool) (int, color.RGBA)
 	u := a.ui
 	switch {
 	case selected && a.contentFocused():
-		return u.Row(row, true), u.Pal.Accent
+		return u.RowSelectedAt(row, a.slidingStripe(row)), u.Pal.Accent
 	case selected:
 		return u.RowDimmed(row), u.Pal.Text
 	default:
 		return u.Row(row, false), u.Pal.Text
 	}
+}
+
+// ── Kayan seçim şeridi ──────────────────────────────────────────────────────
+
+// stripeSlideDur, seçim şeridinin bir satırdan ötekine kayma süresi.
+//
+// 120 ms: klavyeyle hızlı gezinen kullanıcıyı bekletmeyecek kadar kısa,
+// gözün hareketi izleyebileceği kadar uzun. Basılı tutulan ok tuşunda her
+// yeni hedef animasyonu o anki konumdan yeniden başlatır; şerit geride kalmaz.
+const stripeSlideDur = 120 * time.Millisecond
+
+// highlightAnim, seçim şeridinin kayma durumu.
+type highlightAnim struct {
+	key      string
+	from, to image.Rectangle
+	at       time.Time
+}
+
+// listKey identifies the list being drawn: şerit yalnızca AYNI liste içinde
+// kayar; bölüm, pencere ya da sunucu detayı değişince yeni yerinde belirir.
+func (a *App) listKey() string {
+	return fmt.Sprintf("%d/%T/%v", a.Section(), a.ActiveModal(), a.detail != nil)
+}
+
+// slidingStripe returns where the accent stripe is this frame.
+func (a *App) slidingStripe(row image.Rectangle) image.Rectangle {
+	if !a.animationsOn() {
+		return row
+	}
+	key := a.listKey()
+	now := time.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	h := &a.hl
+	if h.key != key || h.to.Empty() {
+		*h = highlightAnim{key: key, from: row, to: row, at: now.Add(-stripeSlideDur)}
+		return row
+	}
+	if h.to != row {
+		// Yeni hedef: animasyon ŞU ANKİ konumdan başlar (basılı tutulan tuşta
+		// şerit hiç zıplamaz).
+		cur := stripeAt(h, now)
+		*h = highlightAnim{key: key, from: cur, to: row, at: now}
+	}
+	return stripeAt(h, now)
+}
+
+func stripeAt(h *highlightAnim, now time.Time) image.Rectangle {
+	t := float64(now.Sub(h.at)) / float64(stripeSlideDur)
+	if t >= 1 {
+		return h.to
+	}
+	if t < 0 {
+		t = 0
+	}
+	e := fbdraw.EaseOutCubic(t)
+	lerp := func(a, b int) int { return a + int(float64(b-a)*e+0.5) }
+	return image.Rect(lerp(h.from.Min.X, h.to.Min.X), lerp(h.from.Min.Y, h.to.Min.Y),
+		lerp(h.from.Max.X, h.to.Max.X), lerp(h.from.Max.Y, h.to.Max.Y))
+}
+
+// stripeSliding reports whether the stripe is still moving (kare tikinde çiz).
+func (a *App) stripeSliding() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return !a.hl.to.Empty() && a.hl.from != a.hl.to && time.Since(a.hl.at) < stripeSlideDur
 }
 
 // contentRow draws a selectable content row AND registers it for the mouse.
@@ -405,9 +475,16 @@ func (a *App) shortcuts() []fbui.Shortcut {
 	}
 	switch a.Section() {
 	case SecServers:
+		if d := a.detailState(); d != nil {
+			return a.detailShortcuts(d)
+		}
+		// Enter artık DETAYI açar; başlat/durdur ayrı tuşlarda.
 		return []fbui.Shortcut{
-			{Key: "Enter", Label: "Başlat/Durdur"},
+			{Key: "Enter", Label: "Detay"},
+			{Key: "s", Label: "Başlat"},
+			{Key: "x", Label: "Durdur"},
 			{Key: "n", Label: "Yeni sunucu"},
+			{Key: "u", Label: "USB'den aktar"},
 			{Key: "Esc", Label: "Menü"},
 		}
 	case SecSoftware:
@@ -430,6 +507,7 @@ func (a *App) shortcuts() []fbui.Shortcut {
 	case SecPerformance:
 		return []fbui.Shortcut{
 			{Key: "t", Label: "Turbo"},
+			{Key: "d", Label: "Tanı"},
 			{Key: "Esc", Label: "Menü"},
 		}
 	case SecUSB:
@@ -500,4 +578,17 @@ func uptimeShort(sec int64) string {
 	default:
 		return fmt.Sprintf("%ddk", int(d.Minutes()))
 	}
+}
+
+// playitHasAddress reports whether the agent has at least one public address.
+func playitHasAddress(pl ipcclient.PlayitStatus) bool {
+	if strings.TrimSpace(pl.Address) != "" {
+		return true
+	}
+	for _, t := range pl.Tunnels {
+		if strings.TrimSpace(t.Address) != "" {
+			return true
+		}
+	}
+	return false
 }

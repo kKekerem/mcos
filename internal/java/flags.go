@@ -2,8 +2,6 @@ package java
 
 import (
 	"fmt"
-	"runtime"
-	"strconv"
 	"strings"
 )
 
@@ -65,6 +63,12 @@ func JVMArgs(profile string, ramMB, major int) []string {
 		"-XX:+PerfDisableSharedMem",
 		"-XX:MaxTenuringThreshold=1",
 	)
+	// Büyük sayfalar (2 MB): büyük yığında TLB ıskalarını azaltır. Çekirdek
+	// THP'yi "madvise" kipinde açar (S02mcostune); bu bayrak JVM'in yığını
+	// için madvise ister. Java 8'in bu bayrağı güvenilir değil.
+	if major >= 11 {
+		args = append(args, "-XX:+UseTransparentHugePages")
+	}
 	// Java 8 predates a couple of the experimental knobs above being stable; it
 	// still accepts the core G1 set, so we only drop the riskiest extras.
 	if major <= 8 {
@@ -81,26 +85,22 @@ func JVMArgs(profile string, ramMB, major int) []string {
 // concurrent GC thread counts pinned to the host's cores and NUMA awareness.
 // Java 8 omits the experimental thread knobs it doesn't accept.
 func turboArgs(ramMB, major int) []string {
-	args := JVMArgs(ProfileAikar, ramMB, major)
-	cores := runtime.NumCPU()
-	if cores < 1 {
-		cores = 1
-	}
-	conc := cores / 2
-	if conc < 1 {
-		conc = 1
-	}
-	extra := []string{
-		"-XX:+UseNUMA",
-		"-XX:ParallelGCThreads=" + strconv.Itoa(cores),
-		"-XX:ConcGCThreads=" + strconv.Itoa(conc),
-	}
-	if major <= 8 {
-		// Java 8's G1 accepts NUMA + thread counts but not much else here.
-		return append(args, extra...)
-	}
-	extra = append(extra, "-XX:+UseStringDeduplication")
-	return append(args, extra...)
+	// ── Yakalanan gerçek hata: turbo JVM'i YAVAŞLATIYORDU ────────────────
+	//
+	// Kullanıcı (gerçek PC, Chunky ile dünya üretimi): "turbo kapalı 50 cps,
+	// açık 30 cps". Buradaki "iş hacmi" bayrakları üretimi boğuyordu:
+	//   - ConcGCThreads = çekirdeklerin YARISI: G1'in eşzamanlı işaretleme
+	//     aşaması (Minecraft'ta sürekli) parça üretim işçilerinin yarım
+	//     makinesini alıyordu (varsayılan: ParallelGCThreads'in dörtte biri).
+	//   - ParallelGCThreads = tüm mantıksal çekirdekler (E + SMT dahil):
+	//     duraklamalar kısalmıyor, önbellek çekişmesi artıyordu.
+	//   - UseStringDeduplication: Minecraft'ta kazancı yok, GC'ye iş ekler.
+	//   - UseNUMA: tek soketli makinede anlamsız.
+	// JVM'in kendi ergonomisi bunları çekirdek sayısına göre zaten doğru
+	// seçer. Turbo artık JVM'e dokunmuyor: kazanç işlemci frekansı, güç
+	// sınırları, fanlar ve oyun döngüsünün P-çekirdeğine alınmasından geliyor
+	// (internal/turbo, supervisor/turbo.go).
+	return JVMArgs(ProfileAikar, ramMB, major)
 }
 
 func removeFlags(args []string, drop ...string) []string {

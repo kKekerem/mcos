@@ -3,10 +3,12 @@ package fbpanel
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"mcos/internal/fbui"
 	"mcos/internal/ipc"
 	"mcos/internal/model"
+	"mcos/internal/sound"
 )
 
 // Focus is which column the cursor is in.
@@ -41,13 +43,72 @@ const (
 	ActLegacyPanel
 )
 
+// ── SES SEVİYESİ ────────────────────────────────────────────────────────────
+//
+// Kullanıcı: "ses arttırma f3 kısma f4 olsun".
+//
+//	F3  / volumeup    sesi aç
+//	F4  / volumedown  sesi kıs
+//	F9  / mute        sessiz aç/kapa
+//
+// "volumeup/volumedown/mute", dizüstülerin MEDYA tuşlarıdır (Fn+F3 vb.).
+// Bunlar TTY'ye hiçbir karakter göndermez; fbinput onları evdev'den okuyup
+// bu adlarla panele iletir. Çoğu dizüstüde Fn kilidi kapalıyken F3'e basmak
+// zaten KEY_VOLUMEUP üretir — yalnızca "f3"e bakmak o makinelerde hiçbir şey
+// yapmazdı.
+//
+// F12 ESKİ PANELE ayrılmış (uzun süredir öyle ve belgeli), dokunulmadı.
+func (a *App) volumeKey(key string) bool {
+	switch key {
+	case "f3", "volumeup":
+		v := sound.VolumeUp()
+		a.showVolume(v, false)
+		// Yeni seviyeyi DUYURUYORUZ: sayıyı görmek yetmez, kullanıcı sesin
+		// ne kadar yükseldiğini kulakla ölçer.
+		a.playSound(sound.Nav)
+		return true
+	case "f4", "volumedown":
+		v := sound.VolumeDown()
+		a.showVolume(v, v == 0)
+		if v > 0 {
+			a.playSound(sound.Nav)
+		}
+		return true
+	case "f9", "mute":
+		v, sessiz := sound.ToggleMute()
+		if sessiz {
+			a.Emit(fbui.EventInfo, "Ses kapatıldı")
+		} else {
+			a.Emit(fbui.EventOK, fmt.Sprintf("Ses açıldı — %%%d", v))
+		}
+		a.showVolume(v, sessiz)
+		return true
+	}
+	return false
+}
+
 // Key handles one keystroke and returns the action the host must perform.
 //
 // Tuş atamaları ESKİ PANELLE AYNI (panel/app.go): kullanıcı kas hafızasını
 // kaybetmemeli.
 func (a *App) Key(key string) Action {
-	// Kilit ekranı HER ŞEYDEN ÖNCE gelir: parola girilmeden hiçbir kısayol
-	// çalışmamalı. (Aksi halde "q" ile panelden çıkıp kilidi atlamak
+	// Ses tuşları HER ŞEYDEN ÖNCE: kilit ekranı, açık pencere, kurulum
+	// sihirbazı — hiçbiri sesi ayarlamayı engellememeli.
+	//
+	// ── Yakalanan gerçek hata ─────────────────────────────────────────────
+	// Ses tuşları eskiden aşağıdaki switch'in İÇİNDEYDİ; kurulum sihirbazı,
+	// sunucu sihirbazı ve her açık pencere tuşu ondan ÖNCE yutuyordu. Yorum
+	// "tuşlar HER EKRANDA çalışıyor" diyordu ama ilk açılışta — kullanıcının
+	// sesi en çok ayarlamak istediği anda — hiçbiri çalışmıyordu.
+	//
+	// Kilit ekranından önce olması güvenli: F tuşları ve medya tuşları bir
+	// parolanın parçası olamaz, yani kilidi atlatmanın bir yolu açılmıyor.
+	if a.volumeKey(key) {
+		return ActNone
+	}
+
+	// Kilit ekranı kısayollardan önce gelir: parola girilmeden hiçbir
+	// kısayol çalışmamalı. (Aksi halde "q" ile panelden çıkıp kilidi atlamak
 	// mümkün olurdu.)
 	if a.Locked() {
 		return a.lockKey(key)
@@ -57,7 +118,9 @@ func (a *App) Key(key string) Action {
 	// kısayolları pencere açıkken tetiklenmemeli.
 	if m := a.ActiveModal(); m != nil {
 		if m.Key(a, key) {
-			a.CloseModal()
+			// Geri çağrı YENİ bir pencere açmış olabilir; o zaman onu
+			// kapatmıyoruz (bkz. closeModalIf).
+			a.closeModalIf(m)
 		}
 		a.Invalidate()
 		return ActNone
@@ -74,6 +137,16 @@ func (a *App) Key(key string) Action {
 	if a.wizardState() != nil {
 		return a.wizardKey(key)
 	}
+	// Sunucu detayı açıksa tuşlar ONA gider: detayda "r" yeniden başlatmak,
+	// "s" başlatmak demek; listenin "r = yenile" anlamı orada yanlış olurdu.
+	// Kullanıcı fareyle başka bir bölüme geçtiyse detay artık görünmüyor;
+	// görünmeyen bir ekranın tuşları yutması en kötü hata olurdu, kapatılır.
+	if d := a.detailState(); d != nil {
+		if a.Section() == SecServers {
+			return a.detailKey(d, key)
+		}
+		a.dropServerDetail()
+	}
 
 	switch key {
 	case "ctrl+c", "q":
@@ -88,6 +161,14 @@ func (a *App) Key(key string) Action {
 
 	case "t":
 		a.toggleTurbo()
+		return ActNone
+
+	case "d", "D":
+		// Turbo tanısı: "neden 4,4 değil 2,4 GHz" sorusunun ölçülmüş
+		// cevabı (bkz. screen_turbo.go, turboDiagModal).
+		if a.Section() == SecPerformance {
+			a.openTurboDiag()
+		}
 		return ActNone
 
 	case "tab", "shift+tab":
@@ -106,6 +187,11 @@ func (a *App) Key(key string) Action {
 
 	case "esc", "left", "h":
 		a.setFocus(FocusSidebar)
+		return ActNone
+
+	case "u", "U":
+		// USB'den sunucu aktar (dünya, modlar, eklentiler, ayarlar).
+		a.importUSBServer()
 		return ActNone
 
 	case "n", "N":
@@ -181,6 +267,13 @@ func (a *App) toggleFocus() {
 
 // moveCursor moves within the sidebar or the content list, wrapping around.
 func (a *App) moveCursor(delta int) {
+	// Fare tekerleği de buraya gelir. Detay açıkken LİSTE imleci
+	// kıpırdamamalı: detayın kendi imleci var ve Esc listeye dönerken eski
+	// satırı geri koyar.
+	if d := a.detailState(); d != nil && a.Section() == SecServers {
+		a.detailMove(d, delta)
+		return
+	}
 	if a.Focus() == FocusSidebar {
 		vis := a.visibleSections()
 		if len(vis) == 0 {
@@ -233,9 +326,9 @@ func (a *App) contentRows() int {
 		}
 		return len(st.Net.NICs)
 	case SecDisplay:
-		return len(displayModes)
+		return a.displayRowCount()
 	case SecTunnel:
-		return int(tunnelStepCount)
+		return a.tunnelRowCount() // adımlar + sunucu satırları (screen_tunnel.go)
 	case SecPeers:
 		return len(a.peersRows())
 	case SecPower:
@@ -267,11 +360,21 @@ func (a *App) activate() Action {
 	case SecSettings:
 		a.activateSetting(a.Cursor())
 	case SecDisplay:
-		a.applyDisplayMode(a.Cursor())
+		// Ekran kartı modu çalışırken değiştirebiliyorsa ANINDA uygula;
+		// değiştiremiyorsa (yalnızca firmware framebuffer'ı) eski yol:
+		// GRUB'a yaz, yeniden başlatınca etkin olsun.
+		if _, ok := a.liveSelectable(); ok {
+			a.applyDisplayRow(a.Cursor())
+		} else {
+			a.applyDisplayMode(a.Cursor())
+		}
 	case SecSoftware:
 		a.installJava(a.Cursor())
 	case SecServers:
-		a.toggleServer()
+		// Kullanıcının isteği: "sunucuya enter e basınca o ekrana gitsin".
+		// Enter eskiden sunucuyu başlatıp durduruyordu — yanlışlıkla
+		// basılınca oyuncuları atan bir tuş. Başlat/durdur s/x'te kaldı.
+		a.openServerDetail()
 	case SecPerformance:
 		a.toggleTurbo()
 	case SecNetwork:
@@ -543,91 +646,193 @@ func (a *App) installJava(idx int) {
 		return
 	}
 	major := javaOffer[idx].major
-	st, _, _ := a.Snapshot()
-	if st != nil && !st.Net.Internet {
-		a.Emit(fbui.EventError, "İnternet yok — Java indirilemez")
+	// Gömülü sürüm için "indiriliyor…" göstermek yanlış olurdu: hiçbir şey
+	// inmiyor, daemon aynı gömülü çalışma zamanını geri veriyor.
+	a.mu.Lock()
+	gomulu := false
+	for _, rt := range a.javaRuntimes {
+		if rt.Major == major && rt.Builtin {
+			gomulu = true
+		}
+	}
+	a.mu.Unlock()
+	if gomulu {
+		a.Emit(fbui.EventOK, fmt.Sprintf("Java %d sistemle gömülü geldi — kurulum gerekmez", major))
 		return
 	}
-	a.Emit(fbui.EventBusy, fmt.Sprintf("Java %d indiriliyor…", major))
-	go func() {
-		rt, err := a.cl.JavaInstall(major)
-		if err != nil {
-			a.Fail(fmt.Sprintf("Java %d kurulamadı", major), err)
-			return
-		}
-		a.Emit(fbui.EventOK, fmt.Sprintf("Java %d kuruldu (%s)", rt.Major, rt.Version))
-		a.loadSection()
-	}()
+	// ── Düzeltilen gerçek hata: İNDİRME KAPIDA REDDEDİLİYORDU ───────────
+	//
+	// Burada şu vardı:
+	//
+	//	if st != nil && !st.Net.Internet {
+	//	    a.Emit(fbui.EventError, "İnternet yok — Java indirilemez")
+	//	    return
+	//	}
+	//
+	// Yani indirme HİÇ DENENMİYORDU. Ve o bayrak yalnızca TCP PORT 53 ile
+	// ölçülüyordu — DNS normalde UDP kullanır, TCP/53 ise pek çok ISS ve
+	// kurumsal ağda ENGELLİDİR. Sonuç: HTTPS'in sorunsuz çalıştığı bir ağda
+	// kullanıcı "İnternet yok — Java indirilemez" görüyordu.
+	//
+	// Kullanıcının "javanın hiçbir sürümü indirilmiyor, internete bağlı olsa
+	// bile" şikâyeti tam olarak buydu.
+	//
+	// Artık DENENİYOR. Sınama (netprobe) da gerçek çıkışı ölçüyor ama tek
+	// başına yetki sahibi değil: bir sınama yanılabilir, indirmenin kendisi
+	// yanılamaz. Ağ gerçekten yoksa hata zaten gelir ve NEDENİ söylenir.
+	// Arka plan İŞİ olarak: kullanıcı başka ekranlara gidebilir, durum
+	// çubuğu süreyi gösterir, ikinci basış ikinci kurulum başlatmaz
+	// (bkz. jobs.go — kullanıcının "aynı ekranda kalmak zorundayım" şikâyeti).
+	a.runJob(fmt.Sprintf("java-%d", major), fmt.Sprintf("Java %d indirilip kuruluyor", major),
+		func() (string, error) {
+			rt, err := a.cl.JavaInstall(major)
+			if err != nil {
+				// Ağ sorunuysa NEDENİNİ ekle: "kurulamadı" tek başına
+				// kullanıcıya ne yapacağını söylemiyor.
+				mesaj := fmt.Sprintf("Java %d kurulamadı", major)
+				if st, _, _ := a.Snapshot(); st != nil && st.Net.Reason != "" {
+					mesaj += " — " + st.Net.Reason
+				}
+				return mesaj, err
+			}
+			return fmt.Sprintf("Java %d kuruldu (%s)", rt.Major, rt.Version), nil
+		}, a.loadSection)
 }
 
 // ── Ağ ──────────────────────────────────────────────────────────────────────
 
-// openWiFiPicker scans and shows the network list in a blurred dialog.
+// openWiFiPicker opens the live scan dialog and starts a scan behind it.
+//
+// ── Neden artık pencere ÖNCE açılıyor ───────────────────────────────────────
+//
+// Eski akış taramayı başlatıp SONUCU bekliyordu; pencere ancak tarama bitince
+// (ölçülen 4-12 sn) açılıyordu. O süre boyunca ekranda yalnızca arka plandaki
+// küçük radar vardı ve kullanıcı "bir şey olmuyor" diye tekrar tuşa basıyordu.
+//
+// Kullanıcının isteği: "kablosuz tara deyince üste bir menü gelecek ama
+// animasyon o tarama animasyonu orada olacak ve canlı listelenecek bulduğunda."
+//
+// Yeni akış: pencere ANINDA açılır (boş ve "aranıyor" hâlinde), daemon'da
+// tarama başlatılır (net.wifiScanStart — bloklamaz) ve pencere her 400 ms'de
+// kısmi sonucu yoklar. Bulunan her ağ satır satır düşer.
+//
+// wifiListWanted/takeWiFiPickerWant artık GEREKMİYOR: eskiden tarama biterken
+// kullanıcının açtığı başka bir pencerenin üzerine liste açılmasın diye niyet
+// kaydediliyordu. Pencere baştan açık olduğu için böyle bir yarış yok — açık
+// olan pencere zaten bu.
 func (a *App) openWiFiPicker() {
 	if a.offline() {
 		return
 	}
-	if a.scanning() {
-		return // zaten sürüyor; ikinci tarama kartı boşuna yorar
-	}
-	a.mu.Lock()
-	a.wifiNote = "taranıyor…"
-	a.wifiListWanted = true
-	a.dirty = true
-	a.mu.Unlock()
-	// Radar animasyonu: eş taramasıyla AYNI gösterge.
+
+	m := NewScanModal("Kablosuz Ağ Seç", "Kablosuz ağlar aranıyor…",
+		func(app *App, _ int, it ListItem) bool {
+			net, ok := it.Value.(ipc.WiFiNetwork)
+			if !ok {
+				return false
+			}
+			app.connectWiFi(net.SSID, net.Secured)
+			return true
+		}).
+		WithEmpty("Ağ bulunamadı. Kablolu bağlantı için e tuşu.").
+		WithRescan(func(app *App, sm *ScanModal) { app.startWiFiScan(sm) }).
+		WithCancel(func(app *App) {
+			app.setScanning(false)
+			app.setScanNote("")
+		})
+
+	a.OpenModal(m)
+	a.startWiFiScan(m)
+}
+
+// wifiPollInterval, canlı taramanın yoklama aralığı.
+//
+// 400 ms: gözün "anında" saydığı üst sınıra yakın, ama daemon'a saniyede iki
+// buçuk istekten fazlasını yollamıyor. Her istek yalnızca bir anlık görüntü
+// kopyalar (tarama işini YAPMAZ), yani maliyeti ihmal edilebilir.
+const wifiPollInterval = 400 * time.Millisecond
+
+// startWiFiScan kicks off a daemon-side scan and feeds m until it finishes.
+func (a *App) startWiFiScan(m *ScanModal) { a.startWiFiScanFor(m, "") }
+
+// startWiFiScanFor is startWiFiScan with a "currently selected" SSID marked.
+func (a *App) startWiFiScanFor(m *ScanModal, current string) {
+	m.SetScanning(true)
 	a.setScanning(true)
 	a.setScanNote("Kablosuz ağlar aranıyor…")
 	a.Emit(fbui.EventBusy, "Kablosuz ağlar taranıyor…")
+	a.Invalidate()
 
 	go func() {
-		nets, err := a.cl.WiFiScan()
-		a.setScanning(false)
-		a.setScanNote("")
-		a.mu.Lock()
-		a.wifiNote = ""
-		a.mu.Unlock()
+		defer func() {
+			a.setScanning(false)
+			a.setScanNote("")
+			a.Invalidate()
+		}()
+
+		st, err := a.cl.WiFiScanStart()
 		if err != nil {
+			m.SetError("Tarama başlatılamadı: " + err.Error())
 			a.Fail("tarama yapılamadı", err)
 			return
 		}
-		items := make([]ListItem, 0, len(nets))
-		for _, n := range nets {
-			badge, kind := "açık", fbui.EventInfo
-			if n.Secured {
-				badge, kind = "korumalı", fbui.EventWarn
+		gen := st.Gen
+		m.Replace(wifiItems(st.Networks, current))
+
+		for {
+			if m.Closed() {
+				return // kullanıcı pencereyi kapattı; yoklamayı sürdürme
 			}
-			items = append(items, ListItem{
-				Label:     n.SSID,
-				Detail:    fmt.Sprintf("%%%d", n.Signal),
-				Badge:     badge,
-				BadgeKind: kind,
-				Value:     n,
-			})
+			time.Sleep(wifiPollInterval)
+
+			st, err = a.cl.WiFiScanStatus()
+			if err != nil {
+				m.SetError("Tarama durumu alınamadı: " + err.Error())
+				return
+			}
+			// Başka bir tarama oturumu başladıysa (ör. kurulum sihirbazı)
+			// bizim penceremiz onun sonuçlarını göstermemeli.
+			if st.Gen != gen {
+				m.SetScanning(false)
+				return
+			}
+			m.Replace(wifiItems(st.Networks, current))
+			a.Invalidate()
+
+			if !st.Scanning {
+				m.SetScanning(false)
+				if st.Error != "" {
+					m.SetError(st.Error)
+					a.Emit(fbui.EventWarn, "Tarama: "+st.Error)
+					return
+				}
+				a.Emit(fbui.EventOK,
+					fmt.Sprintf("%d ağ bulundu", len(st.Networks)))
+				return
+			}
 		}
-		// ── Yakalanan gerçek hata ───────────────────────────────────
-		// Tarama saniyeler sürüyor ve kullanıcı o sırada başka bir şey
-		// açabiliyor (tema listesi, parola kutusu, onay penceresi). Burası
-		// eskiden KOŞULSUZ OpenModal çağırıyordu: kullanıcının açtığı
-		// pencere, ağ listesi tarafından habersizce yok ediliyordu.
-		//
-		// Artık taramayı BAŞLATAN niyet kaydediliyor; o sırada başka bir
-		// pencere açıldıysa liste sessizce atlanır (kullanıcı "w" ile
-		// yeniden açabilir).
-		if !a.takeWiFiPickerWant() {
-			a.Emit(fbui.EventInfo, fmt.Sprintf("%d ağ bulundu (w ile listele)",
-				len(nets)))
-			return
-		}
-		a.OpenModal(NewListModal("Kablosuz Ağ Seç",
-			fmt.Sprintf("%d ağ bulundu.", len(nets)), items,
-			func(app *App, _ int, it ListItem) bool {
-				net := it.Value.(ipc.WiFiNetwork)
-				app.connectWiFi(net.SSID, net.Secured)
-				return true
-			}).WithEmpty("Ağ bulunamadı. Kablolu bağlantı için e tuşu."))
-		a.Emit(fbui.EventOK, fmt.Sprintf("%d ağ bulundu", len(nets)))
 	}()
+}
+
+// wifiItems converts scan results to dialog rows. current (may be empty) is
+// the SSID marked as "şu an bağlı".
+func wifiItems(nets []ipc.WiFiNetwork, current string) []ListItem {
+	items := make([]ListItem, 0, len(nets))
+	for _, n := range nets {
+		badge, kind := "açık", fbui.EventInfo
+		if n.Secured {
+			badge, kind = "korumalı", fbui.EventWarn
+		}
+		items = append(items, ListItem{
+			Label:     n.SSID,
+			Detail:    fmt.Sprintf("%%%d", n.Signal),
+			Badge:     badge,
+			BadgeKind: kind,
+			Current:   current != "" && n.SSID == current,
+			Value:     n,
+		})
+	}
+	return items
 }
 
 // connectWiFi applies a network. Secured networks need a password first.
@@ -645,28 +850,26 @@ func (a *App) doWiFiApply(ssid, pass string) {
 	if a.offline() {
 		return
 	}
-	a.Emit(fbui.EventBusy, ssid+" ağına bağlanılıyor…")
-	go func() {
+	// Arka plan işi (bkz. jobs.go): bağlanma 10-30 sn sürebilir; kullanıcı
+	// beklerken başka ekrana geçebilmeli ve sonucu yine görmeli.
+	a.runJob("wifi", ssid+" ağına bağlanılıyor", func() (string, error) {
 		if err := a.cl.WiFiApply(ssid, pass); err != nil {
-			a.Fail(ssid+" bağlantısı başarısız", err)
-			return
+			return ssid + " bağlantısı başarısız", err
 		}
-		a.Emit(fbui.EventOK, ssid+" ağına bağlanıldı")
-	}()
+		return ssid + " ağına bağlanıldı", nil
+	}, nil)
 }
 
 func (a *App) connectWired() {
 	if a.offline() {
 		return
 	}
-	a.Emit(fbui.EventBusy, "Kablolu bağlantı kuruluyor…")
-	go func() {
+	a.runJob("kablolu", "Kablolu bağlantı kuruluyor", func() (string, error) {
 		if err := a.cl.WiredUp(); err != nil {
-			a.Fail("kablolu bağlantı başarısız", err)
-			return
+			return "kablolu bağlantı başarısız", err
 		}
-		a.Emit(fbui.EventOK, "Kablolu bağlantı kuruldu")
-	}()
+		return "Kablolu bağlantı kuruldu", nil
+	}, nil)
 }
 
 // ── USB ─────────────────────────────────────────────────────────────────────
@@ -700,15 +903,13 @@ func (a *App) installUSBJar(idx int) {
 		jar.Name+" kurulacak sunucuyu seçin.", items,
 		func(app *App, _ int, it ListItem) bool {
 			id := it.Value.(string)
-			app.Emit(fbui.EventBusy, jar.Name+" kuruluyor…")
-			go func() {
+			app.runJob("usbjar-"+id+"-"+jar.Name, jar.Name+" kuruluyor", func() (string, error) {
 				msg, err := app.cl.InstallUSBMods(id, []model.USBJar{jar})
 				if err != nil {
-					app.Fail(jar.Name+" kurulamadı", err)
-					return
+					return jar.Name + " kurulamadı", err
 				}
-				app.Emit(fbui.EventOK, msg)
-			}()
+				return msg, nil
+			}, nil)
 			return true
 		}))
 }
@@ -730,7 +931,92 @@ func (a *App) pairPeer(idx int) {
 	if idx < 0 || idx >= len(peers) {
 		return
 	}
-	p := peers[idx]
+	a.confirmPairPeer(peers[idx])
+}
+
+// confirmPairPeer asks before pairing (or unpairing) one device.
+//
+// pairPeer'dan AYRILDI: canlı tarama penceresi cihazı DOĞRUDAN veriyor
+// (a.peers dizinine göre değil). İki yol tek onay penceresini paylaşıyor;
+// ayrı yazmak, birinde düzeltilen bir hatanın ötekinde kalması demekti.
+func (a *App) confirmPairPeer(p model.Peer) {
+	if !p.Paired {
+		a.startCodePairing(p)
+		return
+	}
+	a.legacyPairConfirm(p)
+}
+
+// startCodePairing pairs WITHOUT typing a key: iki ekranda aynı 6 haneli
+// kod çıkar, düğümde "Kabul et", burada onay (bkz. cluster/pairoffer.go).
+//
+// Kullanıcı: "eşleştirme anahtarını elle girme gerekmesin, oto tarasın
+// doğrulasın". Karşı taraf bunu bilmiyorsa (eski düğüm, başka bir MCOS)
+// eski onay yoluna düşülür.
+func (a *App) startCodePairing(p model.Peer) {
+	if a.offline() {
+		return
+	}
+	a.Emit(fbui.EventBusy, p.Name+" ile eşleştirme başlatılıyor…")
+	go func() {
+		code, ok, err := a.cl.ClusterPairOffer(p.ID)
+		if err != nil {
+			a.Fail(p.Name+" ile eşleştirme başlatılamadı", err)
+			return
+		}
+		a.mu.Lock()
+		a.clearBusyLocked()
+		a.mu.Unlock()
+		if !ok {
+			a.legacyPairConfirm(p)
+			return
+		}
+		a.OpenModal(NewConfirmModal("Eşleştirme kodu: "+code,
+			[]string{
+				p.Name + " (" + p.IP + ") bilgisayarındaki MCOS uygulamasında",
+				"AYNI kod görünüyor: " + code,
+				"Orada \"Kabul et\"e basın; kodlar aynıysa burada onaylayın.",
+				"Kodlar farklıysa İPTAL edin: araya başka biri girmiş olabilir.",
+			},
+			"Kodlar aynı, onayla", false,
+			func(app *App) {
+				app.runJob("esle-"+p.ID, p.Name+" eşleştiriliyor (kabul bekleniyor)",
+					func() (string, error) { return app.waitCodePairing(p) }, app.loadSection)
+			}))
+	}()
+}
+
+// waitCodePairing sends the sealed key until the node accepts (en çok 2 dk).
+func (a *App) waitCodePairing(p model.Peer) (string, error) {
+	son := nowFunc().Add(2 * time.Minute)
+	for {
+		st, msg, err := a.cl.ClusterPairConfirm(p.ID)
+		if err != nil {
+			return p.Name + " eşleştirilemedi", err
+		}
+		switch st {
+		case "tamam":
+			return p.Name + " eşleşti — anahtar otomatik aktarıldı", nil
+		case "bekliyor":
+			if nowFunc().After(son) {
+				_ = a.cl.ClusterPairCancel(p.ID)
+				return p.Name + " eşleştirilemedi",
+					fmt.Errorf("uygulamada 2 dakika içinde \"Kabul et\"e basılmadı")
+			}
+			time.Sleep(time.Second)
+		case "reddedildi":
+			return p.Name + " eşleştirilemedi", fmt.Errorf("%s", "karşı tarafta reddedildi")
+		default:
+			if msg == "" {
+				msg = "teklifin süresi doldu — yeniden deneyin"
+			}
+			return p.Name + " eşleştirilemedi", fmt.Errorf("%s", msg)
+		}
+	}
+}
+
+// legacyPairConfirm is the old key-based pair/unpair confirmation.
+func (a *App) legacyPairConfirm(p model.Peer) {
 	verb := "Eşleştir"
 	if p.Paired {
 		verb = "Eşleşmeyi kaldır"
@@ -822,8 +1108,16 @@ func (a *App) serverAction(what string) {
 	if a.offline() {
 		return
 	}
-	s := a.selectedServer()
-	if s == nil {
+	a.serverActionOn(a.selectedServer(), what)
+}
+
+// serverActionOn issues start/stop/restart for a given server.
+//
+// Listeden AYRI, çünkü sunucu detayı sunucuyu imleçle değil KİMLİKLE tutar:
+// detay açıkken liste sırası değişirse (bir sunucu silindi) imleçteki satır
+// artık başka bir sunucudur ve "yeniden başlat" yanlış sunucuyu vururdu.
+func (a *App) serverActionOn(s *model.Server, what string) {
+	if a.offline() || s == nil {
 		return
 	}
 	// ARKA PLANDA ÇALIŞTIRILIR.
@@ -857,21 +1151,4 @@ func (a *App) serverAction(what string) {
 			}
 		}()
 	}
-}
-
-// takeWiFiPickerWant reports whether the Wi-Fi list should still be shown.
-//
-// TEK SEFERLİK: niyet okunduğunda sıfırlanır, böylece geciken ikinci bir
-// tarama yanıtı pencereyi yeniden açmaz.
-//
-// Kullanıcı tarama sürerken başka bir pencere açtıysa niyet iptal edilir:
-// altındaki pencereyi habersizce değiştirmek, kullanıcının az önce yaptığı
-// seçimi kaybettirir.
-func (a *App) takeWiFiPickerWant() bool {
-	a.mu.Lock()
-	want := a.wifiListWanted
-	a.wifiListWanted = false
-	other := a.modal != nil
-	a.mu.Unlock()
-	return want && !other
 }

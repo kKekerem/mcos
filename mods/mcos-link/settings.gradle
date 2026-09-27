@@ -7,3 +7,19 @@ pluginManagement {
 }
 
 rootProject.name = 'mcos-link'
+
+// ── Her jar bir alt proje ──────────────────────────────────────────────────
+//
+// targets/<etiket>/target.properties bir jar'ı tanımlar: hangi Minecraft'a
+// karşı derleneceğini, hangi bağdaştırıcıyı kullanacağını ve HANGİ
+// sürümlerde DOĞRULANDIĞINI. Yeni bir sürüm grubu eklemek için yeni bir
+// klasör açmak yeter; bu dosyaya dokunulmaz.
+//
+// Neden tek projede sürüm döngüsü değil? Loom her projeye TEK bir Minecraft
+// bağlar; aynı projede iki sürüme karşı derlemek mümkün değil.
+file('targets').listFiles().findAll { new File(it, 'target.properties').isFile() }
+        .sort { it.name }
+        .each { dir ->
+            include "fabric-${dir.name}"
+            project(":fabric-${dir.name}").projectDir = dir
+        }

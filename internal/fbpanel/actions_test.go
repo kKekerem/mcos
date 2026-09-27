@@ -24,6 +24,7 @@ var knownActions = []string{
 	"peers-scan", "peers-manual", "peers-key", "peers-shared-world",
 	"playit-claim", "playit-claim-info", "playit-start",
 	"settings-theme", "settings-pointer", "settings-password",
+	"scan-rescan",
 	"sleep", "reboot", "poweroff",
 }
 

@@ -5,7 +5,7 @@ description: "MCOS uzaktan kontrol — sunucunuzu telefondan yönetin."
 # "flutter pub publish" kazayla çalışabilir.
 publish_to: "none"
 
-version: 1.0.1+1
+version: 1.0.2+2
 
 environment:
   # 3.6 / Flutter 3.27: Color.withValues() bu surumle geldi ve kod onu
@@ -20,7 +20,7 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # ── Neden bu üç paket, daha fazlası değil ────────────────────────────────
+  # ── Neden bu paketler, daha fazlası değil ────────────────────────────────
   # Her bağımlılık, ileride kırılabilecek bir yüzeydir. HTTPS için hiçbir
   # paket kullanmıyoruz: dart:io'nun HttpClient'ı sertifika sabitlemeyi
   # (pinning) zaten destekliyor ve bize tam denetim veriyor.
@@ -45,6 +45,14 @@ dependencies:
   # SHA-256: sertifika parmak izini hesaplamak icin. dart:io sertifikanin
   # DER baytlarini verir ama ozetini almaz.
   crypto: ^3.0.5
+
+  # QR ile eşleşme: MCOS panelindeki "QR ile bağlan" kodunu okumak için.
+  # Kullanıcı "uygulamada QR kod yeri yok" dedi; elle 32 haneli jeton
+  # yazmak hem zor hem de hataya açık (panel jetonu boşluklu gruplar hâlinde
+  # gösteriyor). mobile_scanner Android'de CameraX + ML Kit kullanıyor;
+  # ML Kit modeli APK'ya GÖMÜLÜ gelir, yani Google Play Hizmetleri olmayan
+  # telefonlarda da çalışır.
+  mobile_scanner: ^7.4.2
 
   cupertino_icons: ^1.0.8
 

@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/binary"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"mcos/internal/java"
 	mlog "mcos/internal/log"
@@ -33,7 +39,13 @@ func newTestHost(t *testing.T) (*nodeHost, *[]string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lg := mlog.New(os.NewFile(0, os.DevNull), mlog.LevelError, 8)
+	// io.Discard, os.NewFile(0, …) DEĞİL: o, 0 numaralı tanıtıcıyı (stdin)
+	// saran bir *os.File'dır ve çöp toplayıcı onu kapatınca fd 0 serbest
+	// kalır; sonra açılan bir jar fd 0'ı alır ve BİR SONRAKİ sarmalayıcının
+	// sonlandırıcısı onu da kapatır. Ölçüldü: TestCopyLinkJars tam koşuda
+	// "write …/mcos-link-fabric-1.20.5-1.21.10.jar: bad file descriptor"
+	// ile düştü, tek başına geçti.
+	lg := mlog.New(io.Discard, mlog.LevelError, 8)
 	sup := supervisor.New(lg)
 	jm := java.NewManager(st, lg)
 	sm := server.NewManager(st, jm, sup, lg)
@@ -46,6 +58,11 @@ func newTestHost(t *testing.T) (*nodeHost, *[]string) {
 		log:         lg,
 		budgetRAMMB: 4096,
 		budgetCPU:   75,
+	}
+	// Testler ağa çıkmasın: Fabric API indirmesi yalnızca KAYIT tutar.
+	h.fabricAPI = func(_ *model.Server, modsDir string) (string, error) {
+		p := filepath.Join(modsDir, "fabric-api-test.jar")
+		return p, os.WriteFile(p, []byte("PK"), 0o644)
 	}
 	h.installFn = func(srv *model.Server) {
 		mu.Lock()
@@ -258,6 +275,13 @@ func TestBudgetRAMStaysSane(t *testing.T) {
 
 // Anahtar bir sırdır: dosya başka kullanıcılar tarafından okunamamalı.
 func TestSettingsAreWrittenPrivately(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows'ta Unix izin bitleri yoktur (Go yalnızca salt-okunur
+		// bitini yönetir; sınama 666 okur). Gizlilik orada ACL ile sağlanır:
+		// %LOCALAPPDATA% varsayılan olarak yalnızca kullanıcıya açıktır.
+		// Windows'ta ölçüldü: bu sınama orada anlamsız biçimde düşüyordu.
+		t.Skip("Windows'ta dosya izni ACL ile; bkz. açıklama")
+	}
 	dir := t.TempDir()
 	want := nodeSettings{Key: "0123456789abcdef", Name: "salon-pc", RAMMB: 2048}
 	if err := saveSettings(dir, want); err != nil {
@@ -303,9 +327,16 @@ func TestVanillaCannotTakeTheMod(t *testing.T) {
 	if _, _, ok := linkArtifact(model.Software("vanilla")); ok {
 		t.Error("vanilla için bir yükleme yeri bildirildi — böyle bir yer yok")
 	}
-	for _, sw := range []string{"fabric", "quilt", "paper", "purpur"} {
+	for _, sw := range []string{"fabric", "paper", "purpur"} {
 		if _, _, ok := linkArtifact(model.Software(sw)); !ok {
 			t.Errorf("%s desteklenmiyor sayıldı", sw)
+		}
+	}
+	// Forge/NeoForge Fabric modunu TANIMAZ, Quilt ayrı bir API ister: bunlara
+	// jar kopyalamak "kurulu" görünüp hiç çalışmayan bir ortak dünya demekti.
+	for _, sw := range []string{"forge", "neoforge", "quilt"} {
+		if _, _, ok := linkArtifact(model.Software(sw)); ok {
+			t.Errorf("%s için Fabric modu kurulacak sayıldı — yükleyici onu tanımaz", sw)
 		}
 	}
 }
@@ -315,17 +346,10 @@ func TestVanillaCannotTakeTheMod(t *testing.T) {
 // Mod, yazılıma göre DOĞRU klasöre kurulmalı: Fabric mods/, Paper plugins/.
 func TestLinkModGoesToTheRightFolder(t *testing.T) {
 	h, _ := newTestHost(t)
-
-	tmp := t.TempDir()
-	modJar := filepath.Join(tmp, linkModName)
-	pluginJar := filepath.Join(tmp, linkPluginName)
-	for _, p := range []string{modJar, pluginJar} {
-		if err := os.WriteFile(p, []byte("PK\x03\x04 sahte jar"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Setenv("MCOS_NODE_MOD", modJar)
-	t.Setenv("MCOS_NODE_PLUGIN", pluginJar)
+	// Jar'lar programın klasöründe (mods/link, indeksli) — paketin düzeni.
+	fakeProgramDir(t,
+		"fabric\t1.21.1\tmcos-link-fabric-1.20.5-1.21.10.jar\tfabric-api-0.116.17+1.21.1.jar",
+		"paper\t1.21.1\tmcos-link-paper.jar\t-")
 
 	cases := []struct {
 		software string
@@ -349,5 +373,98 @@ func TestLinkModGoesToTheRightFolder(t *testing.T) {
 			t.Errorf("%s: %s dosyası %s içinde değil — yükleyici onu bulamaz",
 				c.software, c.wantFile, c.wantDir)
 		}
+	}
+}
+
+// writeTestLevel writes a minimal gzip'd level.dat with Data.WorldGenSettings.seed.
+func writeTestLevel(t *testing.T, worldDir string, seed int64) {
+	t.Helper()
+	var b bytes.Buffer
+	name := func(s string) { binary.Write(&b, binary.BigEndian, uint16(len(s))); b.WriteString(s) }
+	b.WriteByte(10)
+	name("")
+	b.WriteByte(10)
+	name("Data")
+	b.WriteByte(10)
+	name("WorldGenSettings")
+	b.WriteByte(4)
+	name("seed")
+	binary.Write(&b, binary.BigEndian, seed)
+	b.WriteByte(0)
+	b.WriteByte(0)
+	b.WriteByte(0)
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	w.Write(b.Bytes())
+	w.Close()
+	os.MkdirAll(worldDir, 0o755)
+	if err := os.WriteFile(filepath.Join(worldDir, "level.dat"), gz.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitInstalls(t *testing.T, got *[]string, n int) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if len(*got) >= n {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("%d kurulum bekleniyordu, %d oldu", n, len(*got))
+}
+
+// Kurucu AYNI adla ama BAŞKA tohumla yeni bir ortak dünya gönderdiğinde,
+// düğümdeki eski dünya kenara alınmalı: yoksa Minecraft level.dat'taki eski
+// tohumla üretmeye devam eder ve iki yarı farklı arazi olur.
+func TestSeedChangeRetiresOldWorld(t *testing.T) {
+	h, installed := newTestHost(t)
+	if _, _, err := h.ApplyLinkSpec(baseSpec()); err != nil {
+		t.Fatal(err)
+	}
+	waitInstalls(t, installed, 1)
+	list, _ := h.st.ListServers()
+	dir := h.dataDir(list[0])
+	writeTestLevel(t, filepath.Join(dir, "world"), 12345)
+
+	// KARŞI-SINAMA: aynı tohum → dünya yerinde kalır.
+	if _, _, err := h.ApplyLinkSpec(baseSpec()); err != nil {
+		t.Fatal(err)
+	}
+	waitInstalls(t, installed, 2)
+	if _, err := os.Stat(filepath.Join(dir, "world", "level.dat")); err != nil {
+		t.Fatal("aynı tohumda dünya yerinden oynatıldı")
+	}
+
+	spec := baseSpec()
+	spec.Seed = "999"
+	if _, _, err := h.ApplyLinkSpec(spec); err != nil {
+		t.Fatal(err)
+	}
+	waitInstalls(t, installed, 3)
+	if _, err := os.Stat(filepath.Join(dir, "world")); !os.IsNotExist(err) {
+		t.Fatal("tohum değişti ama eski dünya yerinde — yanlış arazi üretilecek")
+	}
+	old, _ := filepath.Glob(filepath.Join(dir, "world-eski-*", "level.dat"))
+	if len(old) != 1 {
+		t.Fatalf("eski dünya kenara alınmadı (silindi mi?): %v", old)
+	}
+}
+
+// Kurucunun mod/eklenti listesi kurulum adımına ulaşmalı.
+func TestLinkFilesReachInstall(t *testing.T) {
+	h, installed := newTestHost(t)
+	spec := baseSpec()
+	spec.Files = []model.LinkFile{{Dir: "mods", Name: "lithium.jar", Size: 3,
+		SHA256: "0000000000000000000000000000000000000000000000000000000000000000"}}
+	if _, _, err := h.ApplyLinkSpec(spec); err != nil {
+		t.Fatal(err)
+	}
+	waitInstalls(t, installed, 1)
+	list, _ := h.st.ListServers()
+	files, ok := h.takeFiles(list[0].ID)
+	if !ok || len(files) != 1 || files[0].Name != "lithium.jar" {
+		t.Fatalf("kurulum adımına giden liste = %+v (%v)", files, ok)
 	}
 }

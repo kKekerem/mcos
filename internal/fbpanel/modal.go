@@ -55,8 +55,17 @@ func NewListModal(title, intro string, items []ListItem,
 	onPick func(a *App, idx int, it ListItem) bool) *ListModal {
 	m := &ListModal{title: title, intro: intro, items: items, onPick: onPick,
 		empty: "Seçenek yok."}
-	// İmleci "şu an uygulanan" satıra koy: kullanıcı listeyi açtığında
-	// nerede olduğunu görsün, en baştan aramasın.
+	// İmleç, seçilebilir İLK satırda başlar.
+	//
+	// ── Yakalanan gerçek hata ───────────────────────────────────────────
+	// Bilgi satırlarıyla açılan pencerelerde (uzaktan kontrol, ekran
+	// paylaşımı, SSH) imleç 0. satırdaydı — yani "Adres: …" gibi
+	// SEÇİLEMEYEN bir metnin üstünde. Kullanıcı vurgulu satırı seçilebilir
+	// sanıp Enter'a basıyor, hiçbir şey olmuyordu; eylemlere inmek için
+	// 14 kez aşağı tuşu gerekiyordu.
+	m.cursor = firstSelectable(items)
+	// "Şu an uygulanan" bir satır varsa imleç oraya gider: kullanıcı listeyi
+	// açtığında nerede olduğunu görsün, en baştan aramasın.
 	for i, it := range items {
 		if it.Current {
 			m.cursor = i
@@ -64,6 +73,38 @@ func NewListModal(title, intro string, items []ListItem,
 		}
 	}
 	return m
+}
+
+// firstSelectable returns the first row the user can actually pick.
+func firstSelectable(items []ListItem) int {
+	for i, it := range items {
+		if !it.Disabled {
+			return i
+		}
+	}
+	return 0
+}
+
+// nextSelectable walks the list in one direction, skipping info rows.
+//
+// Bilgi satırları imleçle GEZİLMEZ. Aksi halde on dört satırlık bir
+// açıklamanın altındaki üç eyleme ulaşmak on yedi tuş vuruşu eder ve
+// aradaki her durakta vurgulu satır hiçbir şey yapmaz.
+//
+// Hepsi bilgi satırıysa imleç yerinde kalır (sonsuz döngü yok).
+func nextSelectable(items []ListItem, from, step int) int {
+	n := len(items)
+	if n == 0 {
+		return 0
+	}
+	i := from
+	for k := 0; k < n; k++ {
+		i = (i + step + n) % n
+		if !items[i].Disabled {
+			return i
+		}
+	}
+	return from
 }
 
 // WithEmpty sets the text shown when the list has no rows.
@@ -198,7 +239,14 @@ func (m *ListModal) Draw(a *App, r image.Rectangle) {
 		cx := u.Row(row, i == m.cursor)
 		ty := y + (u.M.RowH-u.F.CellH)/2
 
-		u.Radio(cx, ty, it.Current)
+		// Bilgi satırında seçim dairesi ÇİZİLMEZ: seçilemeyen bir satırın
+		// önündeki boş daire "burada bir seçenek var" diye yalan söyler ve
+		// uzun açıklamalarda sol kenarda anlamsız bir daire sütunu kurar
+		// (ölçüldü: ekran paylaşımı penceresinde 14 satırın 14'ünde).
+		// Hizalama korunuyor, yalnızca işaret düşüyor.
+		if !it.Disabled {
+			u.Radio(cx, ty, it.Current)
+		}
 		cx += u.F.CellW + u.M.Gap
 
 		col := u.Pal.Text
@@ -248,13 +296,9 @@ func (m *ListModal) Key(a *App, key string) bool {
 		}
 		return true
 	case "up", "k":
-		if n > 0 {
-			m.cursor = (m.cursor - 1 + n) % n
-		}
+		m.cursor = nextSelectable(m.items, m.cursor, -1)
 	case "down", "j":
-		if n > 0 {
-			m.cursor = (m.cursor + 1) % n
-		}
+		m.cursor = nextSelectable(m.items, m.cursor, +1)
 	case "enter", "right", "l":
 		if n == 0 {
 			return true
@@ -339,12 +383,37 @@ func (m *ConfirmModal) Draw(a *App, r image.Rectangle) {
 	if m.danger {
 		style = fbui.ButtonDanger
 	}
+	// ── Yakalanan gerçek hata ───────────────────────────────────────────
+	//
+	// Tuş ipuçları SABİTTİ: onay düğmesinde her zaman "Enter", vazgeçte her
+	// zaman "Esc" yazıyordu. Oysa Enter ODAKTAKİ düğmeyi çalıştırır ve yıkıcı
+	// bir soruda odak bilerek VAZGEÇ'te başlar.
+	//
+	// Sonuç QEMU'da ölçüldü: "Kapat  Enter" yazan düğme ekrandayken Enter'a
+	// basıldı ve sistem KAPANMADI — pencere sessizce iptal edildi. Düğme,
+	// yapmadığı şeyi vaat ediyordu.
+	//
+	// İpucu artık odağı izler: Enter daima odaktaki düğmenin üstünde yazar,
+	// öteki düğme ise KENDİSİNE NASIL GEÇİLECEĞİNİ (Tab) söyler. Esc her
+	// durumda kapatır ve zaten alt bilgi çubuğunda yazılıdır.
+	yesKey, noKey := confirmKeyHints(m.focused)
 	by := r.Max.Y - u.M.ButtonH
 	btns := u.ButtonRow(r.Min.X, by, []fbui.Btn{
-		{Label: m.yes, Key: "Enter", Style: style},
-		{Label: "Vazgeç", Key: "Esc", Style: fbui.ButtonSecondary},
+		{Label: m.yes, Key: yesKey, Style: style},
+		{Label: "Vazgeç", Key: noKey, Style: fbui.ButtonSecondary},
 	}, m.focused)
 	a.addModalButtons(btns)
+}
+
+// confirmKeyHints returns the key hint for each button, following focus.
+//
+// Ayrı bir fonksiyon, çünkü sınanması gereken tam olarak BU kural: Enter,
+// ODAKTAKİ düğmeyi çalıştırır — ipucu da orada yazmalı.
+func confirmKeyHints(focused int) (yes, no string) {
+	if focused == 0 {
+		return "Enter", "Esc"
+	}
+	return "Tab", "Enter"
 }
 
 // Key implements Modal.

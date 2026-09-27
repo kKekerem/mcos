@@ -10,6 +10,10 @@ type JavaRuntime struct {
 	Path        string    `json:"path"`    // absolute path to JAVA_HOME
 	JavaBin     string    `json:"javaBin"` // absolute path to java executable
 	InstalledAt time.Time `json:"installedAt"`
+	// Builtin, çalışma zamanının İMAJLA geldiğini söyler (rootfs'teki
+	// /usr/lib/jvm/temurin-<major>-jre). Böyle bir Java indirilmez,
+	// kaldırılamaz ve index.json'a yazılmaz; arayüz onu "gömülü" gösterir.
+	Builtin bool `json:"builtin,omitempty"`
 }
 
 // JavaIndex is the persisted registry of installed runtimes.

@@ -7,6 +7,7 @@ import (
 
 	"mcos/internal/fbui"
 	"mcos/internal/ipc"
+	"mcos/internal/mcver"
 	"mcos/internal/model"
 )
 
@@ -35,6 +36,7 @@ import (
 // Onlarla paylaşılan alanlar şunlardır ve HEPSİ a.mu altında okunup yazılır:
 //
 //	versions, verIdx, verLoaded, verNote, verWant, verGen, verFetching
+//	verShown, verFallback, verSubst
 //	softwareIdx, manualVer   (arka plan yalnızca OKUR; yazan kilidi alır)
 //	createDone, createErr    (arka planın sonuç bıraktığı kutu)
 //
@@ -109,6 +111,13 @@ var wizRAMChoices = []int{1024, 2048, 3072, 4096, 6144, 8192, 12288, 16384}
 var wizGamemodes = []string{"survival", "creative", "adventure", "spectator"}
 var wizDifficulties = []string{"peaceful", "easy", "normal", "hard"}
 
+// wizInstances, "Sunucu sayısı" seçenekleridir. Son seçenek OTOMATİK:
+// sayıyı oyuncu sınırından MCOS seçer (bkz. model.AutoInstanceCount).
+var wizInstances = []string{"1", "2", "3", "4", "Otomatik (oyuncu sınırına göre)"}
+
+// wizInstancesAuto, wizInstances içindeki "Otomatik" seçeneğinin sırası.
+const wizInstancesAuto = 4
+
 // wizTemplateItem is a quick-start preset.
 type wizTemplateItem struct {
 	label      string
@@ -144,6 +153,10 @@ var wizTemplates = []wizTemplateItem{
 
 // Wizard holds the create-server state.
 type Wizard struct {
+	// autoNextArmed: son açılan seçim penceresi "seçince ilerle" işaretli
+	// bir satırdan açıldı mı (bkz. setupRow.autoNext). a.mu korur.
+	autoNextArmed bool
+
 	step   wizStep
 	cursor int
 
@@ -172,6 +185,19 @@ type Wizard struct {
 	// verFetching, tek uçuş bayrağıdır: aynı anda yalnızca bir sürüm
 	// RPC'si açıkta olur.
 	verFetching bool
+	// verShown, liste atılmadan hemen önce EKRANDA duran sürümdür — açık
+	// bir seçim DEĞİL. Yalnızca yeni liste gelmezse gösterilir (bkz.
+	// version()); yeni liste gelince, açık seçim yoksa, o yazılımın en
+	// yenisi seçilir.
+	verShown string
+	// verFallback: son liste yazılımın kendi kaynağından değil yedekten
+	// geldi (ipc.ServerVersionsResult.Fallback). Listedeki bazı sürümler
+	// o yazılımda olmayabilir; sayfa bunu söyler.
+	verFallback bool
+	// verSubst, açık seçim yeni yazılımın listesinde YOKSA yerine seçilen
+	// sürümü anlatır ("folia için 26.3 yok; en yakın 26.2 seçildi").
+	// Boş = seçim olduğu gibi duruyor.
+	verSubst string
 
 	softwareIdx int
 
@@ -184,9 +210,11 @@ type Wizard struct {
 	difficultyIdx int
 	pvp           bool
 	maxPlayers    string
-	whitelist     bool
-	hardcore      bool
-	motd          string
+	// instancesIdx: wizInstances içinden seçim (0 = tek sunucu).
+	instancesIdx int
+	whitelist    bool
+	hardcore     bool
+	motd         string
 
 	ramIdx       int
 	cpuQuota     string
@@ -197,6 +225,8 @@ type Wizard struct {
 	autostart  bool
 	autoBackup bool
 	wan        bool
+	// perfPack: kurulumdan sonra performans paketi (varsayılan AÇIK).
+	perfPack bool
 
 	eula bool
 
@@ -227,6 +257,7 @@ func NewWizard(st *model.SystemStatus) *Wizard {
 		onlineMode:    true,
 		pvp:           true,
 		autoBackup:    true,
+		perfPack:      true,
 		gpuInfo:       "algılanmadı (sunucu başsız çalışır)",
 	}
 	if st != nil && len(st.GPUs) > 0 {
@@ -322,9 +353,11 @@ func (a *App) loadVersionsAsync() {
 	go func() {
 		for {
 			// Sürüm listesi SEÇİLEN YAZILIMA göre gelir: Paper'ın
-			// yayınladığı sürümler Fabric'inkilerle aynı değildir.
+			// yayınladığı sürümler Fabric'inkilerle aynı değildir
+			// (2026-09-27: Paper'da düz 26.1 yok, Folia'nın en yenisi
+			// 26.2). Daemon listeyi o yazılımın kendi kaynağından alır.
 			res, err := a.cl.ServerVersions(sw)
-			nextSw, nextGen, again := a.applyVersions(w, gen, res.Versions, err)
+			nextSw, nextGen, again := a.applyVersions(w, gen, sw, res, err)
 			if !again {
 				return
 			}
@@ -348,10 +381,23 @@ func (a *App) loadVersionsAsync() {
 // gönderim "Sürüm: Bir sürüm seçin veya elle yazın" diyerek engelleniyordu —
 // kullanıcının iki sayfa önce seçtiği sürüm için.
 //
-// Artık ekranda duran sürüm yeni listede ARANIR; yalnızca gerçekten yoksa
-// en yeniye düşülür.
-func (a *App) applyVersions(w *Wizard, gen uint64, list []string,
-	err error) (model.Software, uint64, bool) {
+// Artık AÇIK seçim yeni listede ARANIR.
+//
+// ── Yazılıma göre liste ile gelen iki durum ─────────────────────────────────
+// Liste eskiden her yazılım için aynı Mojang listesiydi; aranan sürüm hep
+// bulunuyordu. Artık değil:
+//
+//   - Açık seçim yeni yazılımda yoksa (26.3 seçildi, Folia'nın en yenisi
+//     26.2) sessizce "en yeni"ye düşmek, kullanıcının seçtiğinden bambaşka
+//     bir sürüm kurmak olurdu. En YAKIN sürüm seçilir (bkz. yakinSurum) ve
+//     verSubst bunu söyler. Açık seçim silinmez: Paper'a dönülünce 26.3
+//     geri gelir.
+//   - Açık seçim yoksa ekrandaki değer "tercih" sayılmaz. Eskiden
+//     clearVersionsLocked onu açık seçime çeviriyordu; Paper'ın varsayılanı
+//     26.3 iken Folia'ya geçip dönen kullanıcı, hiç seçmediği 26.2'de
+//     kalıyordu. Yeni yazılımın en yenisi seçilir.
+func (a *App) applyVersions(w *Wizard, gen uint64, sw model.Software,
+	res ipc.ServerVersionsResult, err error) (model.Software, uint64, bool) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -371,28 +417,62 @@ func (a *App) applyVersions(w *Wizard, gen uint64, list []string,
 	w.verFetching = false
 	a.dirty = true
 
+	list := res.Versions
 	if err != nil || len(list) == 0 {
 		w.verNote = "sürüm listesi alınamadı — elle yazabilirsiniz"
 		return "", 0, false
 	}
 
-	// Ekranda duran sürümü koru. verWant kullanıcının açık seçimidir;
-	// hiç seçim yapılmadıysa o an gösterilen değer korunur.
-	keep := w.verWant
-	if keep == "" {
-		keep = w.version()
-	}
 	w.versions = list
 	w.verLoaded = true
 	w.verNote = ""
-	w.verIdx = 0 // eşleşme yoksa en yeni
-	for i, v := range list {
-		if v == keep {
-			w.verIdx = i
-			break
+	w.verFallback = res.Fallback
+	w.verSubst = ""
+	w.verIdx = 0 // açık seçim yoksa en yeni
+	if want := w.verWant; want != "" {
+		i, tam := yakinSurum(list, want)
+		w.verIdx = i
+		// Elle yazılan sürüm listeyi zaten geçersiz kılıyor (version()
+		// onu tercih eder); o durumda "yerine şu seçildi" demek yanlış olur.
+		if !tam && strings.TrimSpace(w.manualVer) == "" {
+			w.verSubst = fmt.Sprintf("%s için %s yok; en yakın %s seçildi",
+				sw, want, list[i])
 		}
 	}
 	return "", 0, false
+}
+
+// yakinSurum finds want in list (newest first) or the closest substitute.
+//
+// Sıra: (1) aynı sürüm (mcver'e göre: "1.21" == "1.21.0"); (2) AYNI
+// ÇİZGİDE want'tan yeni en yakın düzeltme (Paper'da 26.1 yok -> 26.1.1):
+// düzeltmeler aynı içerik güncellemesidir (mcver.Line) ve istemciyle en
+// uyumlusu en yakınıdır; (3) want'tan eski en yakın sürüm (Folia'da 26.3
+// yok -> 26.2; aynı çizgide eski bir düzeltme varsa zaten en yakın eski
+// odur); (4) hiçbiri yoksa listenin en eskisi (want listedeki her şeyden
+// eski). Başka bir çizginin YENİ sürümüne atlanmaz: 26.3 isteyene 26.4
+// kurmak, istemcisinin açamayacağı bir dünya demektir.
+func yakinSurum(list []string, want string) (int, bool) {
+	cizgi := mcver.Line(want)
+	yeniAyni, eski := -1, -1
+	for i, v := range list {
+		c := mcver.Compare(v, want)
+		switch {
+		case c == 0:
+			return i, true
+		case c > 0 && mcver.Line(v) == cizgi:
+			yeniAyni = i // en yeni önce: son eşleşen want'a en yakın
+		case c < 0 && eski < 0:
+			eski = i // ilk eski, want'a en yakın eski
+		}
+	}
+	switch {
+	case yeniAyni >= 0:
+		return yeniAyni, false
+	case eski >= 0:
+		return eski, false
+	}
+	return len(list) - 1, false
 }
 
 // drainWizard adopts the background create reply ON THE RUN LOOP.
@@ -431,11 +511,32 @@ func (a *App) wizVersionRow(w *Wizard) (cur, manual, note string, loaded bool) {
 	return w.version(), w.manualVer, w.verNote, w.verLoaded
 }
 
+// wizVerView is the version state the page bodies draw, copied in ONE lock.
+type wizVerView struct {
+	note     string
+	loaded   bool
+	count    int
+	fallback bool
+	subst    string
+	software model.Software
+	version  string
+}
+
 // wizVersionView copies what drawWizardBody needs in ONE lock.
-func (a *App) wizVersionView(w *Wizard) (note string, loaded bool, count int) {
+func (a *App) wizVersionView(w *Wizard) wizVerView {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return w.verNote, w.verLoaded, len(w.versions)
+	// Elle yazılan sürüm listeyi geçersiz kılar (version() onu tercih
+	// eder): "yerine şu seçildi" notu o zaman yanlış olurdu.
+	subst := w.verSubst
+	if strings.TrimSpace(w.manualVer) != "" {
+		subst = ""
+	}
+	return wizVerView{
+		note: w.verNote, loaded: w.verLoaded, count: len(w.versions),
+		fallback: w.verFallback, subst: subst,
+		software: w.software(), version: w.version(),
+	}
 }
 
 // wizardVersionList copies the version list and the selected index under a.mu.
@@ -485,15 +586,21 @@ func (a *App) wizardValidateAll(w *Wizard) string {
 // Sürüm listesi yazılıma bağlıdır: Paper'ın yayınladığı sürümler
 // Fabric'inkilerle aynı değildir. Yenilemezsek kullanıcı, seçtiği yazılımda
 // var olmayan bir sürüm seçebilirdi. Ama listeyi atmadan ÖNCE ekranda duran
-// sürüm saklanır — yoksa kullanıcının seçimi altyapı değiştirince sessizce
-// kaybolurdu.
+// sürüm verShown'a saklanır — yeni liste gelmezse (internet yok) sayfa ve
+// gönderim boş kalmasın.
+//
+// verWant'a YAZILMAZ: o yalnızca kullanıcının açık seçimidir. Varsayılan
+// "en yeni"yi açık seçime çevirmek, yazılım değişince o yazılımın en
+// yenisi yerine öncekinin en yenisini aratıyordu (bkz. applyVersions).
 func (w *Wizard) clearVersionsLocked() {
 	if v := w.version(); v != "" {
-		w.verWant = v
+		w.verShown = v
 	}
 	w.versions = nil
 	w.verLoaded = false
 	w.verNote = ""
+	w.verFallback = false
+	w.verSubst = ""
 }
 
 // ── Satırlar ────────────────────────────────────────────────────────────────
@@ -520,11 +627,46 @@ func (w *Wizard) version() string {
 	// başarısız olursa (internet yok) liste nil kalıyor, burası "" dönüyor
 	// ve gönderim "Sürüm: Bir sürüm seçin veya elle yazın" diye
 	// engelleniyordu — kullanıcının iki sayfa önce seçtiği sürüm için.
-	// Seçim listeden bağımsız olarak korunur.
-	return w.verWant
+	// Seçim listeden bağımsız olarak korunur: önce açık seçim, yoksa liste
+	// atılmadan önce ekranda duran değer.
+	if w.verWant != "" {
+		return w.verWant
+	}
+	return w.verShown
+}
+
+// wizSkippable reports whether a create-server page may be skipped.
+//
+// Ölçüt OOBE ile aynı: sayfadaki HER alanın kullanılabilir bir varsayılanı
+// varsa sayfa atlanabilir.
+//
+//	Şablon   : seçim zaten varsayılanlı ama sayfanın TEK amacı o    -> atlanmaz
+//	Kimlik   : sunucu adı ZORUNLU (validateStep boş adı reddeder)   -> atlanmaz
+//	Sürüm    : bir sürüm seçilmiş olmalı                            -> atlanmaz
+//	Yazılım  : varsayılan vanilla; ama sayfanın tek kararı o        -> atlanmaz
+//	Ağ       : port 0 = otomatik, mesafeler varsayılanlı            -> ATLANIR
+//	Oyun     : hepsi Minecraft varsayılanı                          -> ATLANIR
+//	Kaynak   : boş = sınırsız                                       -> ATLANIR
+//	Konum    : varsayılan veri kökü                                 -> ATLANIR
+//	EULA     : kabul ZORUNLU                                        -> atlanmaz
+//	Özet     : sunucunun kurulduğu yer                              -> atlanmaz
+func wizSkippable(step wizStep) bool {
+	switch step {
+	case wizNetwork, wizGameplay, wizResources, wizLocation:
+		return true
+	}
+	return false
 }
 
 func (w *Wizard) rows(a *App) []setupRow {
+	rows := w.pageRows(a)
+	if wizSkippable(w.step) {
+		rows = append(rows, setupRow{kind: rowSkip, label: "Atla", key: "skip"})
+	}
+	return rows
+}
+
+func (w *Wizard) pageRows(a *App) []setupRow {
 	// Arka plan "oluştur" yanıtı BURADA devralınır: rows() hem her tuşta
 	// (wizardKey) hem her karede (drawWizard) hem de fare tıklamasında
 	// çağrılır, yani çalışma döngüsünün tek ortak geçidi budur.
@@ -534,8 +676,10 @@ func (w *Wizard) rows(a *App) []setupRow {
 	case wizTemplate:
 		t := wizTemplates[w.templateIdx]
 		return []setupRow{
+			// autoNext: bu sayfanın TEK kararı şablondur; seçim zaten
+			// "devam" demektir (bkz. setupRow.autoNext).
 			{kind: rowPick, key: "template", label: "Şablon", value: t.label,
-				hint: t.note},
+				hint: t.note, autoNext: true},
 			{kind: rowContinue, label: "Devam"},
 			{kind: rowBack, label: "Vazgeç"},
 		}
@@ -583,8 +727,9 @@ func (w *Wizard) rows(a *App) []setupRow {
 			kind = "mod (mods/)"
 		}
 		return []setupRow{
+			// Tek kararlı sayfa: yazılım seçilince kendiliğinden ilerler.
 			{kind: rowPick, key: "software", label: "Sunucu yazılımı",
-				value: string(sw), hint: "Destek: " + kind},
+				value: string(sw), hint: "Destek: " + kind, autoNext: true},
 			{kind: rowContinue, label: "Devam"},
 			{kind: rowBack, label: "Geri"},
 		}
@@ -612,6 +757,10 @@ func (w *Wizard) rows(a *App) []setupRow {
 			{kind: rowToggle, key: "pvp", label: "PvP", on: w.pvp},
 			{kind: rowText, key: "maxplayers", label: "En fazla oyuncu",
 				value: w.maxPlayers},
+			{kind: rowPick, key: "instances", label: "Sunucu sayısı",
+				value: wizInstances[w.instancesIdx],
+				hint: "Dünya bu makinede birden çok sunucuya bölünür; menüde tek " +
+					"sunucu görünür. Tek sunucu ~1000 oyuncuda tıkanır."},
 			{kind: rowToggle, key: "whitelist", label: "Beyaz liste",
 				on:   w.whitelist,
 				hint: "Yalnızca izin verilen oyuncular bağlanabilir."},
@@ -657,6 +806,9 @@ func (w *Wizard) rows(a *App) []setupRow {
 				on: w.autoBackup},
 			{kind: rowToggle, key: "wan", label: "Tünel (internete aç)", on: w.wan,
 				hint: "playit hesabı bağlı değilse sonradan Tünel ekranından bağlanır."},
+			{kind: rowToggle, key: "perfpack", label: "Performans paketi", on: w.perfPack,
+				hint: "İnternet varsa yazılım ve sürüme uygun, oynanışı değiştirmeyen " +
+					"optimizasyon modları/ayarları kurulur."},
 			{kind: rowContinue, label: "Devam"},
 			{kind: rowBack, label: "Geri"},
 		}
@@ -696,8 +848,16 @@ func (a *App) wizardKey(key string) Action {
 		if n > 0 {
 			w.cursor = (w.cursor - 1 + n) % n
 		}
-	case "down", "j", "tab":
+	case "down", "j":
 		if n > 0 {
+			w.cursor = (w.cursor + 1) % n
+		}
+	case "tab":
+		// Atlanabilir sayfada Tab sayfayı atlar; değilse imleci indirir
+		// (OOBE ile aynı kural).
+		if wizSkippable(w.step) {
+			a.wizardNext(w)
+		} else if n > 0 {
 			w.cursor = (w.cursor + 1) % n
 		}
 	case "esc":
@@ -815,6 +975,7 @@ func (a *App) wizardAdjust(w *Wizard, delta int) {
 			w.verIdx = wrap(w.verIdx+delta, n)
 			w.manualVer = "" // liste seçimi elle girişi geçersiz kılar
 			w.verWant = w.versions[w.verIdx]
+			w.verSubst = "" // yeni açık seçim: "yerine seçildi" notu bayat
 		}
 		a.mu.Unlock()
 	case "software":
@@ -827,6 +988,8 @@ func (a *App) wizardAdjust(w *Wizard, delta int) {
 		w.gamemodeIdx = wrap(w.gamemodeIdx+delta, len(wizGamemodes))
 	case "difficulty":
 		w.difficultyIdx = wrap(w.difficultyIdx+delta, len(wizDifficulties))
+	case "instances":
+		w.instancesIdx = wrap(w.instancesIdx+delta, len(wizInstances))
 	case "ram":
 		w.ramIdx = wrap(w.ramIdx+delta, len(wizRAMChoices))
 	default:
@@ -856,6 +1019,8 @@ func (w *Wizard) toggle(key string) {
 		w.autoBackup = !w.autoBackup
 	case "wan":
 		w.wan = !w.wan
+	case "perfpack":
+		w.perfPack = !w.perfPack
 	case "eula":
 		w.eula = !w.eula
 	}
@@ -898,10 +1063,9 @@ func (w *Wizard) applyTemplate() bool {
 	// gelecek liste geldiğinde eski bir sürüme geri dönülmez.
 	if swChanged {
 		// Liste ARTIK BAŞKA bir yazılıma ait; olduğu gibi bırakmak, Fabric
-		// seçiliyken Paper sürümü göstermek olurdu.
-		w.versions = nil
-		w.verLoaded = false
-		w.verNote = ""
+		// seçiliyken Paper sürümü göstermek olurdu. Yedek/yerine seçim
+		// notları da eski yazılımındı.
+		w.clearVersionsLocked()
 	}
 	w.verIdx = 0
 	w.verWant = ""
@@ -918,8 +1082,38 @@ func (a *App) wizardActivate(w *Wizard, r setupRow) {
 		w.toggle(r.key)
 	case rowPick:
 		a.wizardPick(w, r.key)
+		// autoNext: seçim penceresi KAPANDIKTAN sonra ilerlenmeli, yoksa
+		// kullanıcı seçtiği şeyi göremeden sayfa değişir. wizardPick
+		// pencereyi açar; ilerlemeyi pencerenin kendi geri çağrısı
+		// tetikler (bkz. wizardPickDone).
+		if r.autoNext {
+			a.armWizardAutoNext(w)
+		}
+	case rowSkip:
+		a.wizardNext(w)
 	case rowText:
 		a.wizardText(w, r.key)
+	}
+}
+
+// armWizardAutoNext marks that the next completed pick should advance a page.
+//
+// Bayrak, seçim penceresinin geri çağrısında okunur: seçim YAPILMADAN pencere
+// kapatılırsa (Esc) sayfa ilerlemez — kullanıcı vazgeçmiştir.
+func (a *App) armWizardAutoNext(w *Wizard) {
+	a.mu.Lock()
+	w.autoNextArmed = true
+	a.mu.Unlock()
+}
+
+// wizardPickDone advances the page if the pick that just completed was armed.
+func (a *App) wizardPickDone(w *Wizard) {
+	a.mu.Lock()
+	armed := w.autoNextArmed
+	w.autoNextArmed = false
+	a.mu.Unlock()
+	if armed {
+		a.wizardNext(w)
 	}
 }
 
@@ -943,6 +1137,7 @@ func (a *App) wizardPick(w *Wizard, key string) {
 				if refetch {
 					app.loadVersionsAsync()
 				}
+				app.wizardPickDone(w)
 				return true
 			}))
 
@@ -950,7 +1145,7 @@ func (a *App) wizardPick(w *Wizard, key string) {
 		list, cur := a.wizardVersionList(w)
 		if len(list) == 0 {
 			a.OpenModal(NewInfoModal("Sürüm listesi yok", []string{
-				"Mojang sürüm listesi alınamadı.",
+				string(w.software()) + " sürüm listesi alınamadı.",
 				"",
 				"İnternet yoksa sürümü ELLE yazabilirsiniz:",
 				"bir alt satırdaki 'Elle sürüm yaz' alanını kullanın.",
@@ -966,7 +1161,7 @@ func (a *App) wizardPick(w *Wizard, key string) {
 			items = append(items, it)
 		}
 		a.OpenModal(NewListModal("Minecraft sürümü",
-			fmt.Sprintf("%d sürüm listelendi.", len(list)), items,
+			wizVersionCount(len(list), w.software()), items,
 			func(app *App, _ int, it ListItem) bool {
 				// Seçim DİZİNLE değil METİNLE uygulanır: pencere açıkken
 				// arka plan isteği listeyi değiştirmiş olabilir ve aynı
@@ -974,6 +1169,7 @@ func (a *App) wizardPick(w *Wizard, key string) {
 				app.mu.Lock()
 				w.manualVer = "" // liste seçimi elle girişi geçersiz kılar
 				w.verWant = it.Label
+				w.verSubst = "" // yeni açık seçim: "yerine seçildi" notu bayat
 				for i, v := range w.versions {
 					if v == it.Label {
 						w.verIdx = i
@@ -1008,6 +1204,7 @@ func (a *App) wizardPick(w *Wizard, key string) {
 				app.mu.Unlock()
 				// Kilit DIŞINDA: loadVersionsAsync a.mu'yu kendisi alır.
 				app.loadVersionsAsync()
+				app.wizardPickDone(w)
 				return true
 			}))
 
@@ -1015,6 +1212,8 @@ func (a *App) wizardPick(w *Wizard, key string) {
 		a.pickFromList(w, "Oyun modu", wizGamemodes, &w.gamemodeIdx)
 	case "difficulty":
 		a.pickFromList(w, "Zorluk", wizDifficulties, &w.difficultyIdx)
+	case "instances":
+		a.pickFromList(w, "Sunucu sayısı", wizInstances, &w.instancesIdx)
 
 	case "ram":
 		items := make([]ListItem, 0, len(wizRAMChoices))
@@ -1083,7 +1282,8 @@ func (a *App) wizardText(w *Wizard, key string) {
 		"render":    {"Görüş mesafesi", "Chunk cinsinden.", "", &w.render, 2, numeric(2, 32, " chunk")},
 		"sim":       {"Simülasyon mesafesi", "Chunk cinsinden.", "", &w.sim, 2, numeric(2, 32, " chunk")},
 		"maxplayers": {"En fazla oyuncu", "Aynı anda bağlanabilecek kişi sayısı.", "",
-			&w.maxPlayers, 4, numeric(1, 1000, "")},
+			// 1000'den fazlası dünyayı bölmekle anlamlı (Sunucu sayısı).
+			&w.maxPlayers, 4, numeric(1, 9999, "")},
 		"motd": {"MOTD", "Sunucu listesinde görünen metin.", "", &w.motd, 60, nil},
 		"cpu": {"CPU payı", "Bir çekirdeğin yüzdesi. Boş = sınırsız.", "",
 			&w.cpuQuota, 3, numeric(1, 100, "")},
@@ -1127,8 +1327,14 @@ func (w *Wizard) params() ipc.ServerCreateParams {
 		}
 		return n
 	}
-	online, pvp := w.onlineMode, w.pvp
+	online, pvp, perf := w.onlineMode, w.pvp, w.perfPack
+	instances, auto := w.instancesIdx+1, w.instancesIdx == wizInstancesAuto
+	if auto {
+		instances = 0
+	}
 	return ipc.ServerCreateParams{
+		Instances:        &instances,
+		InstancesAuto:    &auto,
 		Name:             strings.TrimSpace(w.name),
 		Description:      strings.TrimSpace(w.desc),
 		Software:         w.software(),
@@ -1152,6 +1358,7 @@ func (w *Wizard) params() ipc.ServerCreateParams {
 		AutoBackup:       w.autoBackup,
 		WAN:              w.wan,
 		AllowOldVersions: w.via,
+		PerfPack:         &perf,
 	}
 }
 

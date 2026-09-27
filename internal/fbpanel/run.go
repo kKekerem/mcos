@@ -8,6 +8,7 @@ import (
 	"mcos/internal/fbinput"
 	"mcos/internal/fbui"
 	"mcos/internal/model"
+	"mcos/internal/sound"
 )
 
 // ErrLegacyPanel is returned when the user asks for the old Bubble Tea panel.
@@ -17,6 +18,30 @@ import (
 // yeniden açardı ve kullanıcı yeni arayüzde bir sorun olduğunda kilitli
 // kalırdı. mcos-launch bunu çıkış kodundan ayırt eder.
 var ErrLegacyPanel = errors.New("kullanıcı eski paneli istedi")
+
+// ErrPowerPending is returned after a reboot/shutdown request was accepted.
+//
+// ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
+//
+// Kapatma animasyonu ekranı siyaha indirdikten hemen sonra mcos-launch'ın
+// kurtarma menüsü o siyahın üstüne basılıyordu:
+//
+//	MCOS paneli kapandi.
+//	  [1] Paneli yeniden ac (varsayilan)
+//	  ...
+//	Secim [1] (15 sn):
+//
+// Kullanıcının kapanışta gördüğü son şey, özenle yapılmış animasyon değil bir
+// metin menüsüydü. Dahası menü 15 saniye sonra varsayılana düşüyor ve KAPANMAKTA
+// OLAN sistemde paneli YENİDEN AÇIYORDU.
+//
+// Sebep: panel, güç eylemi başarıyla iletildiğinde nil döndürüyordu ve
+// mcos-launch için bu "panel normal kapandı, menüyü göster" demekti. Panelin
+// "bilerek kapandım" diyebileceği bir yol yoktu.
+//
+// Artık var: bu değer 65 çıkış koduna dönüşür, mcos-launch onu görür, ekranı
+// siyah bırakır ve paneli YENİDEN AÇMAZ (bkz. mcos-launch/power_wait).
+var ErrPowerPending = errors.New("güç eylemi iletildi; sistem kapanıyor")
 
 // Display is what the run loop needs from the screen.
 //
@@ -95,8 +120,48 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 	if opt.Frame <= 0 {
 		opt.Frame = 16 * time.Millisecond
 	}
-	frame := time.NewTicker(opt.Frame)
+	// ── Kare tiki MONİTÖRÜN hızında ─────────────────────────────────────
+	//
+	// Kullanıcı: "ekran tazeleme hızı maks kaç destekliyorsa o kadar olmalı".
+	// Sabit 16 ms'lik tik 144 Hz'lik bir monitörde bile saniyede 60 kare
+	// demekti. Ekran kartına çiziliyorsa (DRM) tik, geçerli modun tazeleme
+	// aralığına ayarlanır; mod değişince yeniden ayarlanır. Boştayken tik
+	// yalnızca "kirli mi?" bakar, maliyeti yok denecek kadar azdır; asıl
+	// hız sınırını sayfa çevirmenin dikey boşluk beklemesi koyar.
+	live := a.liveDisplay()
+	period := opt.Frame
+	if live != nil {
+		if p := live.FramePeriod(); p > 0 {
+			period = p
+		}
+	}
+	frame := time.NewTicker(period)
 	defer frame.Stop()
+
+	// syncCanvas, ekranın boyutu değiştiyse (çalışırken mod değişimi ya da
+	// sürücü devralması) tuvali ve arayüzü yeni boyuta göre kurar. HER
+	// çizimden önce çağrılır; boyut aynıysa bedava.
+	syncCanvas := func() {
+		if live == nil {
+			return
+		}
+		// Periyot boyuttan BAĞIMSIZ denetlenir: aynı çözünürlükte yalnızca
+		// tazeleme değişebilir (60 -> 144 Hz) ya da framebuffer'dan aynı
+		// boyutta ekran kartı yoluna geçilebilir (monitörsüz açılış).
+		if p := live.FramePeriod(); p > 0 && p != period {
+			period = p
+			frame.Reset(p)
+		}
+		w, h := live.Size()
+		b := canvas.Bounds()
+		if w <= 0 || h <= 0 || (w == b.Dx() && h == b.Dy()) {
+			return
+		}
+		canvas = a.resizeCanvas(w, h)
+		if sa, ok := host.(ScreenAware); ok {
+			sa.SetScreen(w, h)
+		}
+	}
 
 	// İLK AÇILIŞ: yapılandırma tamamlanmadıysa sihirbaz açılır.
 	//
@@ -122,6 +187,7 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 	// Java ve küme bilgisini toplayan bloklayan bir IPC çağrısıdır; QEMU'da
 	// (donanım hızlandırması yok) ikisi birlikte ~1.7 saniye sürüyordu ve bu
 	// süre boyunca ekranda açılış ekranının donmuş son karesi duruyordu.
+	syncCanvas()
 	a.Draw()
 	if err := disp.Flip(canvas); err != nil {
 		return err
@@ -139,6 +205,19 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 	// ekranda olanın aynısı olduğu için bekleme görünmez.
 	a.armIntro()
 
+	// ── Açılış sesi ────────────────────────────────────────────────────────
+	//
+	// armIntro'nun İÇİNDE değil, yanında: armIntro bekleyen bir açılış
+	// geçişi yoksa hemen dönüyor (animasyonlar kapalıysa ya da açılış
+	// ekranının son karesi bulunamadıysa). Ses oraya bağlıyken QEMU'da
+	// yapılan uçtan uca ölçümde HİÇ ses kaydedilmedi: panel açıldı, geçiş
+	// oynamadı, ses de hiç çalmadı.
+	//
+	// Doğru bağ "panel açıldı" olayıdır; geçişin oynayıp oynamaması ayrı bir
+	// karardır (kullanıcı animasyonları kapatmış olabilir ama sesi açık
+	// tutmuş olabilir — ikisi ayrı ayarlar).
+	a.playSound(sound.Boot)
+
 	for {
 		select {
 		case k, ok := <-host.Keys():
@@ -151,6 +230,7 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 			if a.Wake() {
 				disp.Blank(false)
 				a.lockAfterWake()
+				syncCanvas()
 				a.Draw()
 				_ = disp.Flip(canvas)
 				continue
@@ -166,6 +246,7 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 				return ErrLegacyPanel
 			case ActSleep:
 				a.Sleep()
+				syncCanvas()
 				a.Draw()
 				_ = disp.Flip(canvas)
 				if disp.Blank(true) {
@@ -176,15 +257,11 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 				}
 				continue
 			case ActReboot:
-				a.Emit(fbui.EventBusy, "Yeniden başlatılıyor…")
-				a.Draw()
-				_ = disp.Flip(canvas)
-				return host.Power("reboot")
+				return a.powerAndExit(host,
+					func() error { return disp.Flip(canvas) }, ActReboot)
 			case ActPoweroff:
-				a.Emit(fbui.EventBusy, "Kapatılıyor…")
-				a.Draw()
-				_ = disp.Flip(canvas)
-				return host.Power("poweroff")
+				return a.powerAndExit(host,
+					func() error { return disp.Flip(canvas) }, ActPoweroff)
 			}
 
 		case ev, ok := <-host.Pointer():
@@ -196,29 +273,38 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 			if a.Wake() {
 				disp.Blank(false)
 				a.lockAfterWake()
+				syncCanvas()
 				a.Draw()
 				_ = disp.Flip(canvas)
 				continue
 			}
-			switch a.Pointer(ev) {
-			case ActQuit:
-				return nil
-			case ActSleep:
+			// Kuyrukta biriken olaylar tek seferde, birleştirilerek işlenir
+			// (bkz. coalescePointer): imleç geriden gelmesin.
+			uyu := false
+			for _, e := range coalescePointer(ev, host.Pointer()) {
+				switch a.Pointer(e) {
+				case ActQuit:
+					return nil
+				case ActSleep:
+					uyu = true
+				case ActReboot:
+					return a.powerAndExit(host,
+						func() error { return disp.Flip(canvas) }, ActReboot)
+				case ActPoweroff:
+					return a.powerAndExit(host,
+						func() error { return disp.Flip(canvas) }, ActPoweroff)
+				}
+				if uyu {
+					break
+				}
+			}
+			if uyu {
 				a.Sleep()
+				syncCanvas()
 				a.Draw()
 				_ = disp.Flip(canvas)
 				disp.Blank(true)
 				continue
-			case ActReboot:
-				a.Emit(fbui.EventBusy, "Yeniden başlatılıyor…")
-				a.Draw()
-				_ = disp.Flip(canvas)
-				return host.Power("reboot")
-			case ActPoweroff:
-				a.Emit(fbui.EventBusy, "Kapatılıyor…")
-				a.Draw()
-				_ = disp.Flip(canvas)
-				return host.Power("poweroff")
 			}
 
 		case <-host.Activity():
@@ -226,6 +312,7 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 			if a.Wake() {
 				disp.Blank(false)
 				a.lockAfterWake()
+				syncCanvas()
 				a.Draw()
 				_ = disp.Flip(canvas)
 			}
@@ -246,6 +333,7 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 			if !a.Dirty() {
 				continue
 			}
+			syncCanvas()
 			a.Draw()
 			if err := disp.Flip(canvas); err != nil {
 				return err
@@ -263,6 +351,13 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 			//
 			// Artık yoklama ayrı bir goroutine'de; döngü çizmeye devam eder.
 			a.refreshAsync()
+			// Ekran kartı hâlâ yerinde mi? Sürücü devralması (simpledrm ->
+			// i915/amdgpu) panel boştayken olursa kimse fark etmezdi; Check
+			// yeni kartı açar ve boyut değiştiyse bir sonraki çizim tuvali
+			// yeniden kurar.
+			if live != nil && live.Check() {
+				a.Invalidate()
+			}
 			if a.Asleep() {
 				// Uykudayken durum yine toplanır (olay geçmişi eksik
 				// kalmasın), ama ekrana hiçbir şey basılmaz.
@@ -277,6 +372,11 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 			if a.setupTick() {
 				busy = true
 			}
+			// Ekran modu onayının süresi: tuş gelmese de işlemeli (ekran
+			// karardıysa kullanıcı hiçbir şey göremiyor olabilir).
+			if a.displayTick() {
+				busy = true
+			}
 			if !busy {
 				continue
 			}
@@ -288,25 +388,42 @@ func (a *App) Run(canvas *image.RGBA, disp Display, host Host, opt Options) erro
 		// calisir.
 		switch a.TakePending() {
 		case ActReboot:
-			a.Emit(fbui.EventBusy, "Yeniden baslatiliyor...")
-			a.Draw()
-			_ = disp.Flip(canvas)
-			return host.Power("reboot")
+			return a.powerAndExit(host,
+				func() error { return disp.Flip(canvas) }, ActReboot)
 		case ActPoweroff:
-			a.Emit(fbui.EventBusy, "Kapatiliyor...")
-			a.Draw()
-			_ = disp.Flip(canvas)
-			return host.Power("poweroff")
+			return a.powerAndExit(host,
+				func() error { return disp.Flip(canvas) }, ActPoweroff)
 		}
 
 		if a.Asleep() || !a.Dirty() {
 			continue
 		}
+		syncCanvas()
 		a.Draw()
 		if err := disp.Flip(canvas); err != nil {
 			return err
 		}
 	}
+}
+
+// powerAndExit plays the outro, asks the host to power down, and says so.
+//
+// Üç ayrı yerden (tuş, fare, onay penceresi) çağrılıyor. Aynı altı satır üç
+// kez kopyalanmıştı ve kapanış animasyonu eklenirken bir kopya atlanmıştı:
+// fareyle kapatan kullanıcı animasyonu HİÇ görmüyordu. Tek yer, tek davranış.
+func (a *App) powerAndExit(host Host, flip func() error, act Action) error {
+	verb, cmd := "Kapatılıyor…", "poweroff"
+	if act == ActReboot {
+		verb, cmd = "Yeniden başlatılıyor…", "reboot"
+	}
+	a.Emit(fbui.EventBusy, verb)
+	a.PlayPowerOutro(flip, act)
+	if err := host.Power(cmd); err != nil {
+		// İstek iletilemedi: bu GERÇEK bir hata. Panel yeniden açılmalı ki
+		// kullanıcı kara ekranla kalmasın.
+		return err
+	}
+	return ErrPowerPending
 }
 
 // refreshAsync polls the daemon without blocking the caller.
@@ -390,7 +507,35 @@ func (a *App) refresh() {
 	if sv, err := a.cl.Servers(); err == nil {
 		a.SetServers(sv)
 	}
+	// ── Düzeltilen gerçek hata: yapılandırma BİR KEZ okunuyordu ─────────
+	//
+	// Buradaki koşul "yapılandırma yoksa al" idi. Panelin KENDİ yaptığı
+	// değişiklikler bellekte de güncellendiği için bu uzun süre fark
+	// edilmedi. Ama daemon tarafında olan her değişiklik paneli hiç
+	// bulmuyordu:
+	//
+	//   - Ekran paylaşımını (VNC) açmak,
+	//   - Uzaktan kontrolü/SSH'ı açmak,
+	//   - Telefon uygulamasından ya da mcosctl'den yapılan bir değişiklik.
+	//
+	// QEMU'da gözlendi: VNC açıldı ve GERÇEKTEN çalışıyordu (dışarıdan
+	// bağlanıldı), ama Ayarlar ekranı sonsuza kadar "kapalı" yazdı.
+	// Kullanıcı için bu, özelliğin bozuk olduğu anlamına gelir.
+	//
+	// Artık yapılandırma DÜZENLİ olarak tazeleniyor. Her turda değil:
+	// istemci bütün çağrıları tek kilitle sıraya diziyor ve saniyede bir
+	// fazladan çağrı, uzun süren bir işlem (indirme, tarama) sırasında
+	// sırayı uzatır. Beş turda bir (≈5 sn) hem yeterince taze hem de ucuz.
+	needCfg := false
 	if _, _, cfg := a.Snapshot(); cfg == nil {
+		needCfg = true
+	} else {
+		a.mu.Lock()
+		a.cfgTick++
+		needCfg = a.cfgTick%5 == 0
+		a.mu.Unlock()
+	}
+	if needCfg {
 		if c, err := a.cl.Config(); err == nil {
 			a.SetConfig(c)
 		}

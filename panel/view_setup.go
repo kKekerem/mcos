@@ -1130,7 +1130,7 @@ func doSetupSave(cl *Client, cfg *model.Config, ssid, pass string) tea.Cmd {
 		}
 		// Network was already applied in step 3 (proceedFromIdentity)
 		// Ensure changes to the USB stick persist permanently.
-		_, _ = cl.Persist("")
+		_, _, _ = cl.Persist("")
 
 		return setupDoneMsg{}
 	}

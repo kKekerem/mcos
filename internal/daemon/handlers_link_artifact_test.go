@@ -5,8 +5,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"mcos/internal/linkjar"
 	"mcos/internal/model"
 )
+
+// fabricAPIPresent: mods/ içinde fabric-api var mı (tanıma kuralı linkjar'da).
+func fabricAPIPresent(dir string) bool { return len(linkjar.FabricAPIsIn(dir)) > 0 }
 
 // ════════════════════════════════════════════════════════════════════════════
 // ORTAK DÜNYA ARTEFAKTI: hangi yazılıma NE kurulur
@@ -89,9 +93,14 @@ func TestFabricAPIPresentDetectsCachePrefixedName(t *testing.T) {
 
 // Boş bir jar SAYILMAMALI: yarım kalmış bir indirme, "var" diye geçilirse
 // sunucu yine açılmaz ve sebebi bu sefer hiç görünmez.
+//
+// Ad, SORULAN sürümü taşımalı ("+1.21.11"): sürüm eşleşmesi eklendikten sonra
+// "fabric-api-0.0.0.jar" / "0.0.0" sınaması boyut denetimi olmadan da
+// geçiyordu (sürüm adından okunamıyor, eşleşme hiç olmuyordu) — FabricAPIsIn
+// içindeki usable() kaldırılarak ölçüldü.
 func TestFindBundledFabricAPIIgnoresEmptyFiles(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "fabric-api-0.0.0.jar"),
+	if err := os.WriteFile(filepath.Join(dir, "fabric-api-0.141.6+1.21.11.jar"),
 		nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +109,7 @@ func TestFindBundledFabricAPIIgnoresEmptyFiles(t *testing.T) {
 	linkModSearchPaths = []string{dir}
 	t.Cleanup(func() { linkModSearchPaths = old })
 
-	if got := findBundledFabricAPI(); got != "" {
+	if got := findBundledFabricAPI("1.21.11"); got != "" {
 		t.Fatalf("boş dosya kabul edildi: %q", got)
 	}
 }
@@ -116,7 +125,12 @@ func TestFindBundledFabricAPIFindsRealFile(t *testing.T) {
 	linkModSearchPaths = []string{dir}
 	t.Cleanup(func() { linkModSearchPaths = old })
 
-	if got := findBundledFabricAPI(); got != p {
+	if got := findBundledFabricAPI("1.21.11"); got != p {
 		t.Fatalf("bulunan %q, %q bekleniyordu", got, p)
+	}
+	// Başka bir Minecraft sürümü için ASLA seçilmez: eskiden ilk bulunan
+	// fabric-api alınıyordu ve 26.3 sunucusuna 1.21.11'inki kopyalanırdı.
+	if got := findBundledFabricAPI("26.3"); got != "" {
+		t.Fatalf("26.3 için 1.21.11'in fabric-api'si seçildi: %q", got)
 	}
 }

@@ -1,0 +1,401 @@
+#!/bin/sh
+# mcos-update — kurulu MCOS'u USB'deki yeni bir ISO ile VERİ KAYBETMEDEN
+#               günceller. (Panel: Ayarlar > Sistemi güncelle; daemon:
+#               internal/daemon/handlers_update.go; SSH: "guncelle".)
+#
+# ══════════════════════════════════════════════════════════════════════════
+# TASARIM: neden yalnızca p1 yazılıyor
+# ══════════════════════════════════════════════════════════════════════════
+#
+#   p1  FAT32  MCOS-BOOT   bzImage + initrd.img + GRUB   ← BURASI yazılır
+#   p2  ext4   MCOS-ROOT   kök (initramfs'in KOPYASI)    ← açılışta /init yazar
+#   p3  ext4   MCOS-DATA   /data: sunucular, dünyalar    ← HİÇ dokunulmaz
+#
+# initramfs TAM kök dosya sistemidir ve her açılışta RAM'e açılır; p2 onun
+# diske yazılmış kopyasıdır. Bu yüzden yeni sistemi kurmak için yeni
+# bzImage/initrd.img'yi p1'e koymak YETER: bir sonraki açılışta /init
+# RAM'deki /etc/mcos-build-id ile p2'dekini karşılaştırır, farklıysa yeni
+# sistemi p2'ye kopyalar ve öyle geçer (rootfs-overlay/init).
+#
+# Çalışan kök (p2) burada DEĞİŞTİRİLMEZ: üzerinde çalışan bir sistemin
+# /lib'ini silmek onu anında düşürürdü. mcos-install da bu yüzden kurulu
+# sistemden kullanılamıyor.
+#
+# grub.cfg DEĞİŞMEZ: içinde bu diske özgü mcos.root=LABEL=... var; ISO'nun
+# grub.cfg'si canlı açılış içindir.
+#
+# ══════════════════════════════════════════════════════════════════════════
+# GÜVENLİK: yarım kalan güncelleme makineyi açılmaz bırakmamalı
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Her dosya önce X.new olarak yazılır ve diske boşaltılır (sync); ESKİ dosyaya
+# o ana dek dokunulmaz. Elektrik o sırada kesilirse eski sistem aynen açılır.
+# Değiştirme adımı iki yeniden adlandırmadır (X → X.old, X.new → X); ikisi de
+# yalnızca dizin kaydını değiştirir ve aynı sync ile diske iner.
+#
+# Kullanım:
+#   mcos-update --iso DOSYA.iso      güncellemeyi hazırla (yeniden başlatınca kurulur)
+#   mcos-update --denetle DOSYA.iso  yalnızca ISO'nun kimliğini/sürümünü yaz
+
+set -eu
+
+DURUM_DIZIN=/run/mcos
+STATUS_FILE=$DURUM_DIZIN/update.status
+KILIT=$DURUM_DIZIN/update.kilit
+
+NEDEN=""
+LOG_FILE=""
+SESSIZ=0
+ISO_MNT=""
+ISO_BIZIM=0
+BOOT_MNT=""
+BOOT_BIZIM=0
+BOOT_RO=0
+KILIT_BIZIM=0
+YENI_ID=""
+YENI_SURUM=""
+
+log() {
+    [ "$SESSIZ" = 1 ] || printf '>> mcos-update: %s\n' "$*"
+    if [ -n "$LOG_FILE" ]; then
+        printf '%s %s\n' "$(date +%H:%M:%S 2>/dev/null || true)" "$*" >>"$LOG_FILE" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# Panel/daemon bu dosyayı "yüzde|mesaj" olarak okur; bitince "TAMAM|mesaj",
+# hatada "HATA|mesaj" (mcos-install ile aynı biçim).
+status() {
+    log "$2"
+    if [ -n "$STATUS_FILE" ]; then
+        printf '%s|%s\n' "$1" "$2" >"$STATUS_FILE" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# calistir: komutun çıktısını günlüğe yazar, başarısızsa son satırlarını
+# NEDEN'e koyar. Yalnızca "exit status 1" görmek kullanıcıya hiçbir şey
+# söylemiyordu (mcos-install'da yaşandı).
+calistir() {
+    [ -n "$LOG_FILE" ] && printf '$ %s\n' "$*" >>"$LOG_FILE" 2>/dev/null
+    if _cikti="$("$@" 2>&1)"; then
+        [ -n "$_cikti" ] && [ -n "$LOG_FILE" ] && printf '%s\n' "$_cikti" >>"$LOG_FILE" 2>/dev/null
+        return 0
+    else
+        _rc=$?
+        [ -n "$LOG_FILE" ] && printf '%s\n(çıkış kodu %s)\n' "$_cikti" "$_rc" >>"$LOG_FILE" 2>/dev/null
+        NEDEN="$(printf '%s\n' "$_cikti" | grep -v '^[[:space:]]*$' | tail -n 2 | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+        [ -n "$NEDEN" ] || NEDEN="$1 çıkış kodu $_rc"
+        return "$_rc"
+    fi
+}
+
+bagli_mi() { grep -qs " $1 " /proc/mounts; }
+
+# temizle: bağlamaları söker, kilidi kaldırır. fail() ve EXIT tuzağı çağırır;
+# bu yüzden hiçbir adımı betiği (set -e) erken öldürmemeli.
+temizle() {
+    if [ "$ISO_BIZIM" = 1 ]; then
+        umount "$ISO_MNT" 2>/dev/null || true
+        rmdir "$ISO_MNT" 2>/dev/null || true
+        ISO_BIZIM=0
+    fi
+    if [ "$BOOT_BIZIM" = 1 ]; then
+        umount "$BOOT_MNT" 2>/dev/null || true
+        rmdir "$BOOT_MNT" 2>/dev/null || true
+        BOOT_BIZIM=0
+    elif [ "$BOOT_RO" = 1 ]; then
+        # Bölüm zaten salt okunur bağlıydı: bulduğumuz gibi bırak.
+        mount -o remount,ro "$BOOT_MNT" 2>/dev/null || true
+        BOOT_RO=0
+    fi
+    if [ "$KILIT_BIZIM" = 1 ]; then rm -rf "$KILIT" 2>/dev/null || true; fi
+    KILIT_BIZIM=0
+    return 0
+}
+
+# fail: Türkçe, yapılabilir bir mesajla biter. $1 ne oldu, $2 ne yapmalı.
+# Daemon HATA/NEDEN/ÇÖZÜM/GÜNLÜK satırlarını ayıklayıp panele iletir.
+fail() {
+    _m="$1"; _c="${2:-}"
+    log "HATA: $_m"
+    if [ -n "$STATUS_FILE" ]; then
+        printf 'HATA|%s\n' "$_m" >"$STATUS_FILE" 2>/dev/null || true
+    fi
+    temizle
+    {
+        printf 'HATA: %s\n' "$_m"
+        [ -n "$NEDEN" ] && printf 'NEDEN: %s\n' "$NEDEN"
+        [ -n "$_c" ] && printf 'ÇÖZÜM: %s\n' "$_c"
+        [ -n "$LOG_FILE" ] && printf 'GÜNLÜK: %s\n' "$LOG_FILE"
+    } >&2
+    if [ -n "$LOG_FILE" ]; then
+        {
+            [ -n "$NEDEN" ] && printf 'NEDEN: %s\n' "$NEDEN"
+            [ -n "$_c" ] && printf 'ÇÖZÜM: %s\n' "$_c"
+        } >>"$LOG_FILE" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+# İmajda stat yok (mcos-install'da ölçüldü): boyut ls'ten okunur.
+dosya_boyutu() {
+    # shellcheck disable=SC2046
+    set -- $(ls -lnL "$1" 2>/dev/null)
+    echo "${5:-0}"
+}
+
+# ana_disk: bölümün bağlı olduğu diskin adı (sysfs'ten). Metin karşılaştırması
+# kullanılmaz: nvme0n1 ile nvme0n10, sda ile sdaa ayrılamazdı.
+ana_disk() {
+    _n="$(basename "$1")"
+    [ -e "/sys/class/block/$_n" ] || { echo ""; return 0; }
+    if [ -e "/sys/class/block/$_n/partition" ]; then
+        basename "$(dirname "$(readlink -f "/sys/class/block/$_n")")"
+    else
+        echo "$_n"
+    fi
+}
+
+# kok_aygiti: çalışan kökün blok aygıtı; canlı sistemde (kök RAM'de) boş.
+#
+# /proc/mounts'taki ad YETMEZ: /init kökü /dev/disk/by-label/... yoluyla
+# bağlamış olabilir ve o yol switch_root'tan sonra yoktur. mountinfo'daki
+# major:minor ise her zaman doğrudur; rootfs/tmpfs'in major'ı 0'dır.
+kok_aygiti() {
+    _mm="$(awk '$5 == "/" { mm = $3 } END { print mm }' /proc/self/mountinfo 2>/dev/null || true)"
+    case "$_mm" in
+        ""|0:*) echo ""; return 0 ;;
+    esac
+    _ad="$(basename "$(readlink -f "/sys/dev/block/$_mm" 2>/dev/null)" 2>/dev/null || true)"
+    if [ -n "$_ad" ] && [ -b "/dev/$_ad" ]; then
+        echo "/dev/$_ad"
+        return 0
+    fi
+    echo ""
+}
+
+# bolum_no DISK N: diskin N numaralı bölümünün aygıt yolu (nvme0n1p1 de olur).
+bolum_no() {
+    for _p in /sys/class/block/"$1"/"$1"*; do
+        [ -f "$_p/partition" ] || continue
+        if [ "$(cat "$_p/partition" 2>/dev/null)" = "$2" ]; then
+            echo "/dev/$(basename "$_p")"
+            return 0
+        fi
+    done
+    echo ""
+}
+
+# iso_bagla DOSYA: ISO'yu salt okunur bağlar, MCOS olduğunu ve güncellemeyi
+# desteklediğini doğrular. Kimliği olmayan (eski) ISO REDDEDİLİR: onun
+# initrd'sinde de kimlik yoktur, /init p2'yi hiç eşitlemez ve yeni çekirdek
+# eski kökün modülleriyle açılmaya çalışırdı.
+iso_bagla() {
+    _iso="$1"
+    [ -f "$_iso" ] || fail "ISO dosyası bulunamadı: $_iso" \
+        "USB belleğin takılı olduğundan emin olup listeyi yeniden açın."
+    ISO_MNT="$(mktemp -d /tmp/mcos-iso.XXXXXX 2>/dev/null || true)"
+    if [ -z "$ISO_MNT" ]; then
+        ISO_MNT="/tmp/mcos-iso.$$"
+        mkdir -p "$ISO_MNT"
+    fi
+    if ! calistir mount -o loop,ro "$_iso" "$ISO_MNT"; then
+        rmdir "$ISO_MNT" 2>/dev/null || true
+        fail "ISO bağlanamadı: $(basename "$_iso")" \
+            "Dosya bozuk ya da yarım kopyalanmış olabilir; ISO'yu USB'ye yeniden kopyalayın."
+    fi
+    ISO_BIZIM=1
+    if [ ! -f "$ISO_MNT/boot/initrd.img" ] || [ ! -f "$ISO_MNT/boot/bzImage" ]; then
+        fail "Bu bir MCOS ISO'su değil (boot/bzImage ya da boot/initrd.img yok)" \
+            "USB'ye MCOS ISO dosyasını kopyalayın."
+    fi
+    if ! grep -qs 'MCOS' "$ISO_MNT/boot/grub/grub.cfg" && [ ! -d "$ISO_MNT/mcos" ]; then
+        fail "Bu bir MCOS ISO'su değil" "USB'ye MCOS ISO dosyasını kopyalayın."
+    fi
+    YENI_ID="$(head -n 1 "$ISO_MNT/mcos/build-id" 2>/dev/null | tr -d ' \r' || true)"
+    YENI_SURUM="$(head -n 1 "$ISO_MNT/mcos/version" 2>/dev/null | tr -d ' \r' || true)"
+    if [ -z "$YENI_ID" ]; then
+        fail "Bu ISO güncellemeyi desteklemiyor (derleme kimliği yok: /mcos/build-id)" \
+            "Güncelleme sistemi eklendikten sonra derlenmiş bir MCOS ISO'su kullanın ya da Ayarlar > Diske / USB'ye kur ile yeniden kurun."
+    fi
+    return 0
+}
+
+# seed_offline_from DIZIN: ISO'yla gelen sunucu dosyalarını (Fabric, JRE...)
+# /data/artifacts'a ekler. cp -n: kullanıcının mevcut dosyalarının ÜSTÜNE
+# yazılmaz (mcos-install'daki mantığın aynısı).
+seed_offline_from() {
+    _src="$1"
+    [ -d "$_src" ] || return 1
+    mkdir -p /data/artifacts 2>/dev/null || return 1
+    _n=0
+    for _f in "$_src"/*; do
+        [ -f "$_f" ] || continue
+        case "$_f" in */INDEX|*/offline-index.txt) continue ;; esac
+        [ -e "/data/artifacts/$(basename "$_f")" ] && continue
+        if cp -n "$_f" /data/artifacts/ 2>/dev/null; then
+            _n=$(( _n + 1 ))
+        fi
+    done
+    log "çevrimdışı paket: $_n yeni dosya /data/artifacts'a eklendi"
+    return 0
+}
+
+# ── Argümanlar ──────────────────────────────────────────────────────────────
+
+KIP="${1:-}"
+ISO="${2:-}"
+case "$KIP" in
+    --denetle|--iso) [ -n "$ISO" ] || KIP="" ;;
+esac
+case "$KIP" in
+    --denetle|--iso) ;;
+    *)
+        echo "kullanım: mcos-update --iso DOSYA.iso | --denetle DOSYA.iso" >&2
+        exit 2
+        ;;
+esac
+
+trap temizle EXIT
+trap 'fail "güncelleme kesildi" "Eski sistem yerinde duruyor; güncellemeyi yeniden başlatın."' INT TERM HUP
+
+# ── --denetle: yalnızca kimlik (panel listesi) ──────────────────────────────
+#
+# Durum dosyasına YAZMAZ ve kilit ALMAZ: liste çıkarılırken süren bir
+# güncellemenin ilerlemesi ezilmesin.
+if [ "$KIP" = --denetle ]; then
+    SESSIZ=1
+    STATUS_FILE=""
+    iso_bagla "$ISO"
+    printf 'KIMLIK=%s\nSURUM=%s\n' "$YENI_ID" "$YENI_SURUM"
+    exit 0
+fi
+
+# ── --iso: güncellemeyi hazırla ─────────────────────────────────────────────
+
+[ "$(id -u 2>/dev/null || echo 0)" = 0 ] || {
+    STATUS_FILE=""
+    fail "root yetkisi gerekli" "Panelden ya da root olarak çalıştırın."
+}
+mkdir -p "$DURUM_DIZIN"
+if ! mkdir "$KILIT" 2>/dev/null; then
+    STATUS_FILE=""   # süren güncellemenin durumunu ezme
+    fail "başka bir güncelleme zaten sürüyor" \
+        "Bitmesini bekleyin; takılı kaldıysa bilgisayarı yeniden başlatıp tekrar deneyin."
+fi
+KILIT_BIZIM=1
+
+if mountpoint -q /data 2>/dev/null && mkdir -p /data/log 2>/dev/null; then
+    LOG_FILE="/data/log/update-$(date +%Y%m%d-%H%M%S 2>/dev/null || echo son).log"
+else
+    LOG_FILE="$DURUM_DIZIN/update.log"
+fi
+# Alt kabukta: özel yerleşik komutun yönlendirme hatası betiği öldürürdü.
+( : >"$LOG_FILE" ) 2>/dev/null || LOG_FILE=""
+
+ESKI_ID="$(head -n 1 /etc/mcos-build-id 2>/dev/null || echo bilinmiyor)"
+log "kaynak: $ISO"
+
+# 1/4 ISO
+status 5 "1/4 ISO doğrulanıyor..."
+iso_bagla "$ISO"
+log "yeni derleme: $YENI_ID (sürüm ${YENI_SURUM:-?}); çalışan: $ESKI_ID"
+
+# 2/4 Disk
+status 15 "2/4 Kurulu sistem diski bulunuyor..."
+KOK="$(kok_aygiti)"
+if [ -z "$KOK" ]; then
+    fail "Canlı sistemde güncelleme yok: yeni ISO ile açın ya da Ayarlar'dan diske kurun" \
+        "Sistem şu anda RAM'den (USB/ISO) çalışıyor; güncellenecek kurulu bir disk yok."
+fi
+DISK="$(ana_disk "$KOK")"
+KOK_NO="$(cat "/sys/class/block/$(basename "$KOK")/partition" 2>/dev/null || echo 0)"
+# Beklenmeyen düzende (kök 2. bölüm değil) yanlış bölüme yazmak diski
+# açılmaz bırakabilirdi: dur.
+if [ -z "$DISK" ] || [ "$KOK_NO" != 2 ]; then
+    fail "beklenmeyen disk düzeni: kök $KOK (bölüm $KOK_NO)" \
+        "Bu kurulum güncellenemiyor; sunucularınızı yedekleyip Ayarlar > Diske / USB'ye kur ile yeniden kurun."
+fi
+BOOT_PART="$(bolum_no "$DISK" 1)"
+[ -n "$BOOT_PART" ] && [ -b "$BOOT_PART" ] || fail "açılış bölümü bulunamadı (/dev/$DISK, bölüm 1)" \
+    "Bu kurulum güncellenemiyor; Ayarlar > Diske / USB'ye kur ile yeniden kurun."
+
+_mp="$(awk -v d="$BOOT_PART" '$1 == d { print $2; exit }' /proc/mounts)"
+if [ -n "$_mp" ]; then
+    BOOT_MNT="$(printf '%b' "$_mp")"
+    if awk -v d="$BOOT_PART" '$1 == d { print $4; exit }' /proc/mounts | grep -q '^ro'; then
+        calistir mount -o remount,rw "$BOOT_MNT" || fail "açılış bölümü yazılabilir yapılamadı ($BOOT_PART)" \
+            "Bilgisayarı yeniden başlatıp tekrar deneyin."
+        BOOT_RO=1
+    fi
+else
+    BOOT_MNT="$DURUM_DIZIN/update-boot"
+    mkdir -p "$BOOT_MNT"
+    calistir mount -o rw "$BOOT_PART" "$BOOT_MNT" || fail "açılış bölümü bağlanamadı ($BOOT_PART)" \
+        "Disk bozuk olabilir; bilgisayarı yeniden başlatıp tekrar deneyin."
+    BOOT_BIZIM=1
+fi
+# Bağladığımızın gerçekten BU kurulumun açılış bölümü olduğunu doğrula:
+# grub.cfg'de kök etiketi (mcos.root=) olmalı.
+if [ ! -f "$BOOT_MNT/boot/initrd.img" ] || ! grep -qs 'mcos.root=' "$BOOT_MNT/boot/grub/grub.cfg"; then
+    fail "$BOOT_PART bir MCOS açılış bölümü değil" \
+        "Bu kurulum güncellenemiyor; Ayarlar > Diske / USB'ye kur ile yeniden kurun."
+fi
+log "açılış bölümü: $BOOT_PART ($BOOT_MNT), kök: $KOK"
+
+# 3/4 Açılış dosyaları
+status 25 "3/4 Yeni sistem açılış bölümüne yazılıyor..."
+B="$BOOT_MNT/boot"
+# Önceki güncellemeden kalan .old/.new dosyaları: artık gereksiz, yer açar.
+rm -f "$B/bzImage.old" "$B/initrd.img.old" "$B/bzImage.new" "$B/initrd.img.new" 2>/dev/null || true
+sync
+
+GEREK_KB=$(( ( $(dosya_boyutu "$ISO_MNT/boot/bzImage") + $(dosya_boyutu "$ISO_MNT/boot/initrd.img") ) / 1024 + 8192 ))
+BOS_KB="$(df -Pk "$BOOT_MNT" 2>/dev/null | awk 'NR == 2 { print $4 }')"
+case "$BOS_KB" in ''|*[!0-9]*) BOS_KB=0 ;; esac
+if [ "$BOS_KB" -lt "$GEREK_KB" ]; then
+    NEDEN="boş $(( BOS_KB / 1024 )) MiB, gereken $(( GEREK_KB / 1024 )) MiB"
+    fail "açılış bölümünde yer yok" \
+        "Yeni sistem bu diskin açılış bölümüne sığmıyor; sunucularınızı yedekleyip Ayarlar > Diske / USB'ye kur ile yeniden kurun."
+fi
+
+# Önce İKİ dosya da .new olarak yazılır ve diske iner; eski sistem o ana dek
+# aynen açılabilir durumda kalır.
+for f in bzImage initrd.img; do
+    calistir cp "$ISO_MNT/boot/$f" "$B/$f.new" || fail "$f açılış bölümüne yazılamadı" \
+        "Disk dolu ya da bozuk olabilir; eski sistem yerinde duruyor, yeniden deneyin."
+    if [ "$(dosya_boyutu "$ISO_MNT/boot/$f")" != "$(dosya_boyutu "$B/$f.new")" ]; then
+        fail "$f eksik yazıldı" "USB bellek okunurken hata olmuş olabilir; ISO'yu yeniden kopyalayıp tekrar deneyin."
+    fi
+done
+status 60 "3/4 Diske boşaltılıyor (sync)..."
+sync
+
+# Değiştirme: önce initrd (modüller onda), sonra çekirdek. Arada kesilme
+# penceresi yalnızca iki yeniden adlandırmadır.
+for f in initrd.img bzImage; do
+    [ -f "$B/$f" ] && { mv -f "$B/$f" "$B/$f.old" || fail "$f yedeklenemedi" "Yeniden deneyin."; }
+    if ! mv -f "$B/$f.new" "$B/$f"; then
+        [ -f "$B/$f.old" ] && mv -f "$B/$f.old" "$B/$f" 2>/dev/null
+        fail "$f yerine konamadı" "Eski sistem geri konuldu; yeniden deneyin."
+    fi
+done
+sync
+log "açılış dosyaları yenilendi (eskiler .old olarak duruyor)"
+
+# 4/4 Çevrimdışı paket
+status 85 "4/4 Çevrimdışı sunucu paketi /data'ya ekleniyor..."
+if mountpoint -q /data 2>/dev/null; then
+    seed_offline_from "$ISO_MNT/mcos/offline" || log "ISO'da çevrimdışı paket yok"
+else
+    log "UYARI: /data bağlı değil; çevrimdışı paket eklenmedi (güncellemeyi etkilemez)"
+fi
+sync
+
+temizle
+MSG="Güncelleme hazır — yeniden başlatınca kurulacak (${YENI_SURUM:-?} · $YENI_ID)"
+[ -n "$STATUS_FILE" ] && printf 'TAMAM|%s\n' "$MSG" >"$STATUS_FILE" 2>/dev/null
+log "$MSG"
+echo "$MSG"
+exit 0

@@ -40,14 +40,27 @@
 # /run/mcos-splash.pid dosyasina yaziyoruz — pkill'e gore hem daha kesin hem
 # de baska bir mcos-splash surecini (ornegin --restore) vurma riski yok.
 
+# ── ARTIK IKINCI SIRADA ─────────────────────────────────────────────────────
+#
+# Animasyonu ONCELIKLE initramfs'in /init'i baslatiyor (bkz. rootfs-overlay/init,
+# start_early_splash). Sebep: kullanicinin "acılırken linux logları gözükmesin
+# direkt ilk animasyon baslasın" istegi. /init, userspace'in ILK anidir; burasi
+# ise busybox init'in sysinit sirasidir ve ~8 saniye SONRADIR.
+#
+# Bu betik yine de duruyor ve GEREKLI:
+#   - /init animasyonu baslatamadiysa (cerceve arabellegi o an yoktu,
+#     mcos-splash yoktu, disk kokune gecildi) burada ikinci bir sans var;
+#   - "$SPLASH_STARTED" duruyorsa hicbir sey yapmaz, yani cift animasyon
+#     imkansizdir.
 PANEL_VT="2"
 PANEL_DEVICE="/dev/tty${PANEL_VT}"
 SPLASH="/usr/bin/mcos-splash"
-SPLASH_MSG="/run/mcos-splash.msg"
-SPLASH_FRAME="/run/mcos-splash.rgba"
-BOOT_READY="/run/mcos-boot.ready"
-SPLASH_STARTED="/run/mcos-splash.started"
-SPLASH_PIDFILE="/run/mcos-splash.pid"
+MCOS_RUN="/dev/.mcos"
+SPLASH_MSG="$MCOS_RUN/stage"
+SPLASH_FRAME="$MCOS_RUN/frame.rgba"
+BOOT_READY="$MCOS_RUN/ready"
+SPLASH_STARTED="$MCOS_RUN/splash.started"
+SPLASH_PIDFILE="$MCOS_RUN/splash.pid"
 
 # ZAMAN ASIMI: acilis ne kadar surerse sursun animasyon kendiliginden bitmeli,
 # yoksa panel hic acilmadiginda kullanici sonsuza kadar logoya bakar. 180 sn,
@@ -96,10 +109,10 @@ start() {
     [ -e "$SPLASH_STARTED" ] && return 0
     animations_enabled || return 0
 
-    mkdir -p /run/mcos 2>/dev/null || true
+    mkdir -p "$MCOS_RUN" /run/mcos 2>/dev/null || true
     : > "$SPLASH_STARTED" 2>/dev/null || true
     rm -f "$BOOT_READY" "$SPLASH_FRAME" 2>/dev/null || true
-    echo "Sistem baslatiliyor..." > "$SPLASH_MSG" 2>/dev/null || true
+    /usr/bin/mcos-stage init 2>/dev/null || true
 
     # Panel VT'sini ON PLANA al. Bu SART: cerceve arabellegi tektir, ama
     # etkin VT'nin konsolu her yeni satirda uzerine yeniden cizer. Gecmeden

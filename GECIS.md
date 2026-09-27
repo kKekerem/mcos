@@ -4,13 +4,316 @@
 > oturumdaki hafızanın tamamını aktarmaktır: ne yapıldı, neden yapıldı, ne
 > yarım kaldı, hangi kod ne işe yarıyor, araştırma çıktıları nerede.
 >
-> **Son güncelleme:** 2026-09-13 · **Sürüm:** 1.0.1 · **Depo:** `~/mcos` (WSL Ubuntu)
+> **Son güncelleme:** 2026-09-15 · **Sürüm:** 1.0.1 · **Depo:** `~/mcos` (WSL Ubuntu)
 >
-> **ÖNCE [BÖLÜM 0](#bölüm-0--sürüm-101de-yapılanlar-en-güncel)'I OKU** — en güncel durum oradadır. Aşağıdaki bölümler tarihsel bağlamdır ve bazı "yarım kaldı" notları artık geçersizdir.
+> **ÖNCE BÖLÜM -3'Ü OKU, sonra -2'Yİ, sonra -1 ve BÖLÜM 0'I** — en güncel durum oradadır. Aşağıdaki bölümler tarihsel bağlamdır ve bazı "yarım kaldı" notları artık geçersizdir.
 
 ---
 
-# BÖLÜM 0 — SÜRÜM 1.0.1'DE YAPILANLAR (EN GÜNCEL)
+# BÖLÜM -3 — 16 EYLÜL — EN GÜNCEL (ÖNCE BUNU OKU)
+
+## -3.1 Kullanıcının istekleri (ham)
+
+```
+"bir sh yaz onu acinca qemuda doannim hizlandirmali acilsin"
+"kasiyor arayuz onu da duzelt"
+"SES EFEKTI CALMIYOR BIP SESI CALIYOR BU OLMASIN SES EFEKTI CALSIN"
+"BIDE WIFIYE BAGLANIYOM HALA INTERNET YOK DIO OLMASIN BU"
+"BIDE BAZI PCLERDE TOUCHPAD CALISMIYOR"
+"acinca direkt logo gelmeli ... linux loglari geliyo o da olmasin"
+"ekrandaki aciklamalarda gercek olsun"
+"telefona baglanma qr ile olsun ayni internette bile bagli olmadan"
+"raspi 5 ... cloudflared ... quick tunnel ac"
+```
+
+## -3.2 ÖLÇÜLEN KAZANÇLAR (A/B, aynı makine)
+
+| Ne | Eski | Yeni | Kazanç |
+|---|---|---|---|
+| `App.Draw` tam kare (1920x1080) | 23,36 ms | **1,46 ms** | **16,0x** |
+| `App.Draw` pencereli (blur'lu) | 32,98 ms | **8,60 ms** | 3,8x |
+| `fbdev.Flip` (gerçek panel karesi) | 11,61 ms | **0,83 ms** | 13,9x |
+| `FillRoundRect` (içerik paneli) | 7,37 ms | 0,18 ms | 42x |
+| `StrokeRoundRect` (içerik paneli) | 7,36 ms | 0,10 ms | 77x |
+| Kutu bulanıklığı (960x540 r=3) | 9,58 ms | 4,07 ms | 2,35x |
+
+Normal bir karenin toplam maliyeti **~35 ms → ~2,3 ms**.
+
+## -3.3 BULUNAN VE DÜZELTİLEN GERÇEK HATALAR
+
+| # | Hata | Nasıl bulundu | Düzeltme |
+|---|---|---|---|
+| 1 | **Boş/bozuk `config.json` sistemi açılmaz yapıyordu.** `mcosd: init failed: store: decode /data/config.json: unexpected end of JSON input` → soket hiç oluşmuyor, panel açılamıyor. Kaybedilen şey yalnızca TERCİHLERDİ | kullanıcının ekran görüntüsü | Bozuk dosya `config.json.bozuk-<zaman>` olarak kenara alınıp varsayılanlarla devam ediliyor (`store/config.go`) |
+| 2 | **`Flip` kare başına 8,3 milyon AYRI tek-bayt store yapıyordu** (~143 milyon x86 komutu) | profil + benchmark | Kelime swizzle + SATIR bazlı hasar takibi (`fbdev/fastpath_linux.go`) |
+| 3 | **`FillRoundRect`/`StrokeRoundRect` 1,51 megapikselllik kutuyu iki kez rasterleştiriyordu**; profilde sürenin %92'si | CPU profili | Düz parçalar dolgu, yalnızca köşeler yol (`fbdraw/roundrect_fast.go`) |
+| 4 | **Kutu bulanıklığı piksel başına dört tamsayı BÖLMESİ + sütun bazlı dikey geçiş** | benchmark | Sihirli çarpan + satır bazlı geçiş; çıktı BAYT BAYT aynı |
+| 5 | **Pencere gölgesi altı tam boy katman çiziyordu**, altısı da opak panelin altında kalıyordu | profil | Yalnızca dışta kalan şerit (`FillRoundRectExcept`) |
+| 6 | **Touchpad: çözücü X ve Y'yi AYNI pakette bekliyordu.** Çekirdek değişmeyen ekseni GÖNDERMEZ → saf yatay/dikey hareket **0 olay**, karışık akışta paketlerin **%77,5'i düşüyordu** | ölçüm | Eksen bazlı izleme (`fbinput/activity_linux.go`) |
+| 7 | **Çekirdekte touchpad sürücüsü HİÇ YOKTU.** `CONFIG_INPUT_MOUSE=y` yalnızca menü başlığı; ne I2C-HID, ne PS/2, ne pinctrl/GPIO | kconfig | Üç katman da eklendi + VMware/VBox mutlak işaretçi |
+| 8 | **Wi-Fi: DHCP, İLİŞKİLENDİRMEDEN ÖNCE çalışıyordu.** `wpa_cli reconfigure` → hemen `udhcpc`. Kart daha ağa bağlanmadan DHCP başarısız oluyor, `apply` yine de `nil` dönüyordu | kod okuma | İlişkilendirme bekleniyor (20 sn), `rfkill unblock` + `ip link up` eklendi, gerçek hata döndürülüyor |
+| 9 | **VMware'in ses kartı sürücüsü derlenmiyordu** → `/dev/snd` hiç oluşmuyor → her zaman bipçi | kernel .config + QEMU testi | `SND_ENS1370` + `SND_ENS1371` |
+| 10 | **Arka uç bir kez bulunup sonsuza dek önbelleğe alınıyordu.** HDA kodek araştırması ERTELENMİŞ (60 kez denenir), panel ilk sesi hemen çalıyor → gerçek PC'lerde de oturum boyunca bipçide kilit | kod okuma | Bipçideyken 2 sn'de bir yeniden aranıyor |
+| 11 | **Bipçi her efekte sabit 880 Hz yazıyordu** (arayüz PCM taşıyordu, Effect değil): 7 efekt → 3 desen, 4'ü bit bit aynı | ölçüm | Arayüz `Effect` taşıyor; gerçek nota dizisi çalınıyor |
+| 12 | **Zarf her notayı genliğin %4,08'inde kesiyordu** = 15 tıkırtı kaynağı; tepeler −21…−14 dBFS | WAV analizi | Bitiş rampası (son örnek TAM 0) + normalizasyon (−2,9 dBFS) |
+| 13 | **`ATH11K` yıllardır SESSİZCE düşüyordu** (`CRYPTO_MICHAEL_MIC` eksik) — Qualcomm Wi-Fi 6 kartlı dizüstülerde MCOS'un HİÇ Wi-Fi'si yoktu | yeni test | Bağımlılık eklendi |
+| 14 | **`timeout=0` + `hidden` GRUB'un arka planı hiç çizmemesi demek** → 11,5 sn kara ekran | kare kare ölçüm | `timeout=1` + `countdown`: logo 0,5 sn'de geliyor |
+
+## -3.4 YENİ: kernel.config sembolleri GERÇEKTEN çözülüyor mu
+
+`scripts/test-kernel-config.sh` — kernel.config'e satır yazmak o seçeneğin
+AÇILDIĞI anlamına gelmez; bağımlılığı karşılanmayan sembol SESSİZCE düşer.
+
+Bu tam olarak başımıza geldi: `I2C_DESIGNWARE_CORE`/`PLATFORM` düştü
+(`depends on (ACPI && COMMON_CLK)`, COMMON_CLK kapalıydı). Test ilk
+çalıştırmada ayrıca ATH11K'yı yakaladı.
+
+## -3.5 GERİ ALINAN DENEME
+
+`StrokeCircle`'ı dört banda bölmek: `vector.Rasterizer` kendi alanı dışına
+taşan yolu yanlış sayıyor → halka bozuldu (7.500 yerine 2.634 piksel).
+GERİ ALINDI; karşı testi `fbdraw/stroke_circle_test.go` duruyor.
+
+Aynı fikir yuvarlak dikdörtgende ÇALIŞTI, çünkü orada her parça KENDİ
+kutusunda KAPALI bir yol. Ayrıca ölçüldü: halkayı dörde bölmek zaten yalnızca
+1,1x kazandırıyormuş.
+
+## -3.6 QEMU / KVM
+
+`start-qemu.sh` (kökte) → `scripts/qemu.sh` + `scripts/lib/kvm.sh`.
+`sg`/`newgrp` ÖLÜ YOL (gruba eklenmeden parola sorar). Tek sudo isteminde
+`setfacl` (anında) + `usermod` (kalıcı). `-cpu host` TCG altında ÖLÜMCÜL,
+bu yüzden ACCEL ve CPU birlikte atanıyor.
+
+## -3.7 Raspberry Pi köprüsü (192.168.1.115)
+
+`/home/kkekerem/kkekerem/` — cloudflared quick tunnel → yerel köprü → MCOS.
+Tünel KÖPRÜYE bakıyor, MCOS'a değil: MCOS'un IP'si değişse de genel adres
+korunuyor. İki engel çıktı ve ikisi de çözüldü: Pi-hole `api.trycloudflare.com`
+engelliyordu (servise özel DNS), ve `LC_ALL=tr_TR.UTF-8` altında GNU grep'te
+`[a-z]` aralığı bozuk (`LC_ALL=C`).
+
+---
+
+# BÖLÜM -2 — 15 EYLÜL (İKİNCİ OTURUM)
+
+## -2.1 Kullanıcının istekleri (ham)
+
+```
+"ssh ile bağlantı uzaktan kontrol ve soyle bisi ekle. realvnc ile bağlanma
+ bu da olsun."
+"tüm sistemleri iyileştir tasarım güzel olsun fade in fade out zoomlaeı
+ kullan her yerde."
+"acılırkne linux logları felan gözüküyo o da gözükmesin direkt acılırken ilk
+ animasyon baslasın ve acılıs ekranındaki her sey gercek olsun"
+```
+
+## -2.2 Yapılanlar
+
+| İş | Nerede |
+|---|---|
+| **VNC / RealVNC desteği** | `internal/vnc` (RFB 3.8 sunucusu, saf Go), `internal/vnc/uinput_linux.go` (girdi), `internal/fbdev/capture_linux.go` (ekran okuma), `daemon/handlers_vnc.go`, `fbpanel/screen_vnc.go`, çekirdekte `CONFIG_INPUT_UINPUT=y` |
+| **Sessiz açılış** | `display.sh` → `quiet loglevel=0`, çekirdekte `CONFIG_X86_VERBOSE_BOOTUP=n`, GRUB tek satır |
+| **Animasyon EN ERKEN başlıyor** | `rootfs-overlay/init` → `start_early_splash` (initramfs'in /init'i; eskiden S04splash bekliyordu, ~8 sn log görünüyordu) |
+| **Açılış ekranı GERÇEK** | `cmd/mcos-splash/stage.go` — yüzde artık biten adımlardan (`/usr/bin/mcos-stage`), alt satırda gerçek CPU/çekirdek/RAM (`/proc`) |
+| **Koordinasyon /dev/.mcos'a taşındı** | `/run` üstüne inittab tmpfs bağlıyor ve erken yazılanlar kayboluyordu |
+| **Pencere ölçekleme** | `fbpanel/modal_zoom.go` — pencereler %94'ten büyüyerek geliyor (EaseOutBack) |
+| **Kilit ekranı fade** | `lock.go` — kilitlenirken de soluklaşarak geliyor |
+| **Canlı eş taraması** | `cluster.scanStart/scanStatus` + `ScanProgress.Peers`; eş listesi de Wi-Fi ile AYNI pencereyi kullanıyor |
+| **Sessiz KAPANIŞ** | `fbpanel.ErrPowerPending` → çıkış kodu 65 → `mcos-launch/power_wait`; kapanış animasyonundan sonra ekran siyah kalır, kurtarma menüsü basılmaz |
+| **Onay düğmesi dürüst** | `confirmKeyHints()` — tuş ipucu odağı izler; "Enter" yalnızca Enter'ın gerçekten çalıştırdığı düğmede yazar |
+| **Liste pencerelerinde gezinme** | Bilgi satırları atlanır ve işaretlenmez; imleç ilk seçilebilir satırda başlar |
+| **Bekleme satırı temizleniyor** | `App.clearBusyLocked()` — pencere açılınca "…alınıyor" düşer (hem görüntü hem boşa yeniden çizim) |
+
+## -2.3 BULUNAN VE DÜZELTİLEN GERÇEK HATALAR
+
+| # | Hata | Nasıl bulundu | Düzeltme |
+|---|---|---|---|
+| 1 | **Geri çağrının açtığı pencere anında kapanıyordu.** `if m.Key(...) { CloseModal() }` — geri çağrı yeni pencere açtıysa KAPATILAN o oluyordu. Sonuç: Ayarlar → SSH → "Parola koy" hiçbir şey açmıyor, **SSH hiç kurulamıyordu**. Aynı hata eş eşleştirme onayında ve korumalı Wi-Fi parolasında da vardı | QEMU'da klavyeyle sürülerek | `App.closeModalIf(m)` — yalnızca pencere DEĞİŞMEDİYSE kapat (tuş ve fare yollarının ikisinde de) |
+| 2 | **Panel yapılandırmayı bir kez okuyordu** (`if cfg == nil`). Daemon tarafındaki hiçbir değişiklik ayarlar ekranına yansımıyordu: VNC açık ve çalışıyorken ekran "kapalı" yazıyordu | aynı QEMU oturumu | `refresh()` beş turda bir yapılandırmayı tazeliyor |
+| 3 | **Donanım satırı boş kalıyordu**: /init, splash'ı başlattıktan hemen sonra /proc'u söküyor; splash o pencerede okursa bir daha denemiyordu | QEMU karesi | Okuma başarılı olana kadar saniyede bir yeniden deneniyor |
+| 4 | `quiet` çekirdek AÇMA satırlarını susturmuyor | QEMU karesi (t=8 sn) | `CONFIG_X86_VERBOSE_BOOTUP=n` |
+
+## -2.3b SONRADAN BULUNAN İKİ CİDDİ HATA (SSH ile VM'in içinden)
+
+| # | Hata | Nasıl bulundu | Düzeltme |
+|---|---|---|---|
+| 5 | **mcosd İKİ KEZ çalışıyordu.** `ps`: pid 159 (ppid=1, S99mcos) ve pid 184 (ppid=mcos-launch). Korumada `pgrep mcosd` vardı ve **pgrep bu imajda YOK** — bulunamayan komut hata döndürüyor, `!` onu "çalışmıyor" diye okuyor. İki daemon aynı /data kökünde: aynı Minecraft sunucusunu iki kez başlatabilir (iki JVM aynı dünyaya yazar), yedekler ikiye katlanır, config yazımları yarışır | VM'e SSH ile girip `ps` | (a) `mcos-launch` artık `/proc` tarıyor (`proc_running`), (b) **mcosd kendi kilidini tutuyor** — veri kökü başına flock (`cmd/mcosd/singleton.go`). İkinci örnek açılmıyor ve kimin tuttuğunu söylüyor |
+| 6 | Aynı `pgrep` hatası animasyon beklemesinde de vardı: `pgrep mcos-splash` her zaman başarısız oluyor, yani panel, açılış animasyonu sürecinin kapanmasını **hiç beklemiyordu** (iki program aynı çerçeve arabelleğine yazabilirdi) | aynı denetim | `proc_running mcos-splash` |
+
+> `killall` imajda VAR (busybox); yalnızca `pgrep` yoktu.
+
+## -2.3c KAPANIŞI KARE KARE ÖLÇERKEN BULUNAN DÖRT HATA
+
+Kapatma animasyonu QEMU monitöründen 100 ms aralıkla 30 kare hâlinde çekildi
+(`scratchpad/outro/sheet2.png`). Animasyonun kendisi doğruydu; etrafındaki her
+şey değildi.
+
+| # | Hata | Nasıl bulundu | Düzeltme |
+|---|---|---|---|
+| 7 | **"Kapat  Enter" yazan düğme Enter'a basılınca KAPATMIYORDU.** Yıkıcı onaylarda odak bilerek "Vazgeç"te başlar ve Enter odaktaki düğmeyi çalıştırır — yani düğme yapmadığı şeyi vaat ediyordu | QEMU'da Enter'a basıldı, sistem kapanmadı | İpucu artık odağı izler: `confirmKeyHints()`. Odaktaki düğmede "Enter", ötekinde ona nasıl geçileceği ("Tab"). Odağın Vazgeç'te başlaması KORUNDU |
+| 8 | **Kapanış animasyonu bittiği anda `mcos-launch`'ın kurtarma menüsü siyah ekranın üstüne basılıyordu** ("MCOS paneli kapandi. [1] Paneli yeniden ac… Secim [1] (15 sn):"). Dahası menü 15 saniye sonra varsayılana düşüp paneli **kapanmakta olan sistemde yeniden açıyordu** | kapanış kareleri f24–f29 | Panel artık `ErrPowerPending` → çıkış kodu **65**; `mcos-launch` bunu görünce `power_wait`'e girer: ekran siyah kalır, menü yok, yeniden açma yok. Kapanma `POWER_GRACE`=60 sn içinde bitmezse konuşur ve menü geri gelir (takılan kapanışta kullanıcı kör kalmasın) |
+| 9 | **Durum çubuğundaki bekleme satırı hiç silinmiyordu**: pencere kapandıktan dakikalar sonra bile "ekran paylaşımı durumu alınıyor…" dönüyordu. Görünürden pahalısı: `needsFastRedraw` son olay `EventBusy` ise HER tikte yeniden çizim ister — unutulan tek satır, boştaki bir sunucuda paneli sonsuza kadar ~12 kare/sn çizdiriyordu | VNC penceresi açılıp kapatıldıktan sonraki kare | `OpenModal` artık son bekleme satırını düşürüyor (`clearBusyLocked`): pencerenin kendisi o isteğin cevabıdır |
+| 10 | **Bilgi satırları gezilebiliyordu.** Uzaktan kontrol / VNC / SSH pencerelerinde imleç 0. satırda, yani seçilemeyen bir metnin üstünde vurgulu başlıyordu; ilk eyleme inmek 14 tuş vuruşuydu ve her bilgi satırının önünde anlamsız bir seçim dairesi vardı | ekran görüntüsü karşılaştırması | İmleç ilk SEÇİLEBİLİR satırda başlar (`firstSelectable`), yukarı/aşağı bilgi satırlarını atlar (`nextSelectable`), bilgi satırlarına daire çizilmez |
+
+Ayrıca `-race` altında kırılan bir test düzeltildi: `TestModalZoomActuallyChangesPixels`
+saate güveniyordu (180 ms'lik geçiş, -race yavaşlığında ilk `Draw`'dan önce
+bitiyordu). Artık saat okunmuyor, **kuruluyor** — iddia zayıflamadı.
+
+**Yeni testler:** `power_exit_test.go` (Run döngüsünün güç dalı — daha önce hiç
+sınanmamıştı), `confirm_test.go`, `busy_test.go`, `listnav_test.go`,
+`test-boot-logic.sh` → "KAPANIS SESSIZ" bölümü.
+
+## -2.4 DOĞRULAMA (bu oturumda gerçekten yapıldı)
+
+QEMU'da (donanım hızlandırması YOK), gerçek ISO ile:
+
+- Açılış: ekranda **hiç çekirdek logu yok**, animasyon erken başlıyor, OOBE geliyor.
+- OOBE ve panel **klavyeyle sürüldü** (QEMU monitör `sendkey`): 10 sayfa geçildi,
+  ağ açıldı (10.0.2.15), Ayarlar → Ekran paylaşımı → açıldı.
+- **VNC gerçekten bağlandı**: WSL'den `tools/vncshot` ile TCP üzerinden
+  bağlanıldı, parola kabul edildi, 1280x800 ekran **doğru renklerle** geldi
+  (`vnc-canli.png`).
+- **Girdi de çalıştı**: VNC üzerinden gönderilen `down` tuşu panelde bölüm
+  değiştirdi (`vnc-tus.png`) → uinput yolu uçtan uca doğrulandı.
+- Ses: `/dev/snd` olmayan bir VM'de panel kendiliğinden **anakart bipçisine**
+  düştü ve Ayarlar bunu yazdı.
+
+### Uzaktan kontrol + SSH: uçtan uca
+
+VM'de uzaktan kontrol panelden açıldı, jeton ekrandan okundu ve WSL'den:
+
+```
+/health                -> {"service":"mcos", ... "fingerprint":"09:91:BB:..."}
+jetonsuz istek         -> 401
+jetonlu ping           -> {"pong":true}
+ssh.addKey (genel anahtar) -> keys:1
+ssh.enable             -> running:true
+ssh -i key -p 12222 root@127.0.0.1 -> "SSH ICINDEYIZ", uname, uptime
+```
+
+İçeride ayrıca doğrulandı: `/usr/bin/playitd` **var** (playit gerçekten gömülü),
+`/dev/.mcos/stage` = `95|Panel açılıyor…` (gerçek aşama bildirimi çalışıyor),
+`/dev/uinput` var, sanal girdi aygıtı `MCOS VNC` kayıtlı, dinlenen portlar
+22/2223/5900 ve **27892 yalnızca 127.0.0.1**.
+
+### Son turda ayrıca doğrulandı (gerçek ISO, QEMU)
+
+- **Tek mcosd**: SSH ile `ps` → yalnızca pid 157; `/data/mcosd.lock` içinde
+  "157". 5 numaralı hata kapandı.
+- **RealVNC yolu uçtan uca**: köprüden `vnc.enable` → WSL'den `vncshot` ile
+  bağlanıldı, doğru renkler, **Esc tuşu enjekte edilip pencere kapatıldı**
+  (`vnc-after.png`), Ayarlar ekranı "Uzaktan kontrol: açık / Ekran paylaşımı:
+  açık / SSH: açık" gösteriyor (yapılandırma tazeleme düzeltmesi de böylece
+  gerçek sistemde doğrulandı).
+- **Kapatma gerçekten kapatıyor**: onay → panel dışa zoom ile küçülüyor →
+  kapanış ekranı (küp + "Kapatılıyor") → küp dışa zoom ile gidiyor → siyah →
+  QEMU süreci sonlandı.
+
+## -2.5 YENİ ARAÇ: tools/vncshot
+
+`go run ./tools/vncshot <adres:port> <parola> <çıktı.png> [tuş]` — RFB el
+sıkışmasını yapar, bir kare alır ve PNG'ye yazar; isteğe bağlı bir tuş da
+gönderir. İmaja girmez. VNC'nin gerçekten çalıştığını kanıtlamanın yolu budur.
+
+---
+
+# BÖLÜM -1 — 15 EYLÜL OTURUMU
+
+> Aşağıdaki BÖLÜM 0 ve sonrası 13 Eylül'de yazıldı. Çelişki olursa BURASI
+> doğrudur.
+
+## -1.1 Kullanıcının istekleri (ham)
+
+```
+"qemu grafik hızlandırma kullanmıyor grub menüsünde bile kasıyor"
+"kablosuz tara deyince üste bir menü gelecek ama animasyon o tarama animasyonu
+ orda olacak ve canlı listelenecek bulduğunda"
+"butonlar cok yakın, mavi buton secilince cevresi beyaz beyaz secilince mavi olsun"
+"eğer zorunlı bir soru değilse atla butonu olsun sağda, tab ile atlayabilelim"
+"secenek secmek zorunluysa bir secenek secince devama basmak gerekmesin
+ birden fazlaysa secip basalım"
+"yeniden baslatma ve kapatma animasyonu olsun ... dışa zoom ile ... ekran siyah olsun"
+"bide hoparlörden efekt calsın gecis animasyonlarinda ama kapatılabilsin"
+"bide playiti de göm"
+"apk yı ver"
+"tüm hataları düzelt güvenlik acıklarını kapat"
+```
+
+## -1.2 Yapılanlar
+
+| İş | Nerede |
+|---|---|
+| **Canlı Wi-Fi taraması** | `netcfg.ScanLive` (aşamalı sonuç), `net.wifiScanStart/Status` RPC + oturum (`daemon/handlers_net.go`), `fbpanel/modal_scan.go` (yeni `ScanModal`), panel ve OOBE aynı pencereyi kullanıyor |
+| **Buton odağı + boşluk** | `fbui/widgets.go` (seçili = mavi dolgu + BEYAZ halka; Danger hariç), `fbui/theme.go` `M.ButtonGap` (24→36 px) |
+| **"Atla" düğmesi** | `rowSkip` satır türü, `setupSkippable`/`wizSkippable` tabloları, Tab bağlaması, `drawFlow` düğmeleri TEK satıra aldı ve Atla'yı sağa yasladı |
+| **Tek seçimde otomatik ilerleme** | `setupRow.autoNext` (yalnızca wizTemplate + wizSoftware), `armWizardAutoNext`/`wizardPickDone` |
+| **Kapanış animasyonu** | `fbpanel/power_anim.go` — iki aşamalı dışa zoom + siyah; `run.go`'daki üç güç dalına bağlandı |
+| **Ses efektleri** | `internal/sound` (saf Go sentez + aplay/pcspkr arka uçları), `model.UIConfig.Sounds`, Ayarlar penceresi (`soundModal`, "Sesi dene"), OOBE anahtarı |
+| **playit gömüldü** | `post-build.sh` playit'i KAYNAK dizinden `/usr/bin`'e kuruyor; `make os` artık paketi kendisi indiriyor |
+| **76 MB RAM kazancı** | Çevrimdışı paket artık rootfs'e (=initramfs=RAM) DEĞİL, `$BINARIES_DIR/mcos-offline` → ISO `/mcos/offline`'a gidiyor; `mcos-install` önyükleme ortamından tohumluyor |
+| **QEMU hızlandırma** | Makefile `QEMU_ACCEL_CHECK` — KVM yoksa sessizce yavaşlamıyor, çözümü yazıyor; `-cpu host -smp 4` + WSLg PulseAudio sesi |
+| **APK** | `dist/app/mcos-app-1.0.1.apk` (56,6 MB). AGP 8.5.0 → 9.1.0, Kotlin 1.9.24 → 2.4.0, `rootProject.buildDir` → `layout.buildDirectory` (Gradle 9'da kaldırılmıştı) |
+
+## -1.3 BULUNAN VE DÜZELTİLEN GERÇEK HATALAR
+
+| # | Hata | Nasıl bulundu | Düzeltme |
+|---|---|---|---|
+| 1 | **Ses HİÇ çıkmıyordu**: `CONFIG_SYSVIPC` kapalıydı, ALSA'nın `default` aygıtı (dmix) `semget()` ile ENOSYS alıyordu | QEMU'da uçtan uca ölçüm + `mcos-soundcheck` | Çekirdekte SYSVIPC açıldı **ve** ses arka ucu `default → plughw:0,0 → hw:0,0` sırasını deniyor |
+| 2 | **HDA Master kanalı açılışta KAPALI** geliyor | aynı ölçüm (`5. Master: [off]`) | İlk sesten önce `amixer sset Master 70% unmute` |
+| 3 | **playit imajda yoktu**: post-build onu rootfs'teki `offline/` kopyasından alıyordu, o kopya ise yalnızca elle `make offline-bundle` çalıştırılmışsa vardı | ISO içeriği denetlendi | Kaynak dizinden kuruluyor + `make os` paketi kendisi indiriyor |
+| 4 | **Çevrimdışı paket her açılışta 76 MB RAM yiyordu** — post-build'in kendi açıklaması "rootfs'e koymaz" diyordu ama kod koyuyordu | kod ile yorumun çelişkisi | Paket ISO'ya, rootfs'e yalnızca 20 KB'lık dizin listesi |
+| 5 | **Açılış sesi hiç çalmıyordu**: `armIntro`'ya bağlıydı, o da bekleyen geçiş yoksa hemen dönüyor | QEMU ses kaydı 0 bayt | Ses "panel açıldı" olayına bağlandı (`run.go`) |
+| 6 | **`store.writeJSON` dizini fsync'lemiyordu** — rename atomik ama kalıcı değil; elektrik kesintisinde config.json kaybolabilirdi | kod denetimi | Rename sonrası dizin fsync'i |
+| 7 | **Kapanış animasyonu testi `-race` altında kırılgandı** | `go test -race` | Ara-kare denetimi `raceEnabled` ile korundu (fbdraw'daki desenin aynısı) |
+| 8 | Flutter `widget_test.dart` var olmayan `MyApp`'i arıyordu → `flutter analyze` kırmızı | APK derlemesi | Test gerçek kök widget'a (`McosApp`) göre yeniden yazıldı |
+
+## -1.4 YENİ ARAÇ: mcos-soundcheck
+
+`/usr/bin/mcos-soundcheck` — ses yolunun altı katmanını tek tek raporlar
+(çekirdek sürücüsü, /dev/snd, aplay/amixer, alsa.conf, mixer durumu, gerçek
+çalma denemesi). `--play` ile deneme tonu çalar; `rdinit=/usr/bin/mcos-soundcheck`
+ile açılışta çalıştırılıp raporu `/dev/kmsg`'ye (seri konsola) basar.
+
+**Ses sorunlarının teşhisi bu araçla yapılmalı.** 1. ve 2. hatalar onunla bulundu.
+
+## -1.5 DOĞRULAMA (bu oturumda gerçekten çalıştırıldı)
+
+```
+make test-boot            -> 317 kontrol, 0 hata (eskiden 306)
+go test ./cmd/... ./internal/... ./panel/... ./tools/...   -> temiz
+go test -race (fbpanel, sound, daemon, netcfg, store)      -> temiz
+go vet, gofmt                                              -> temiz
+QEMU (donanım hızlandırması YOK, kullanıcının VM'iyle aynı koşul):
+  t=18 sn  çekirdek kaydı ekranda (siyah ekran yok)
+  t=26 sn  açılış animasyonu
+  t=42 sn  OOBE, yeni buton halkasıyla
+  ses kaydı 79 KB  (düzeltmeden önce 0 bayt)
+ISO: dist/mcos-x86_64.iso 225 MB (154 MB idi; +65 MB'ı ISO üzerinde, RAM'de DEĞİL)
+```
+
+## -1.6 KULLANICININ YAPMASI GEREKEN (QEMU hızlandırma)
+
+```
+sudo usermod -aG kvm $USER     # WSL içinde, BİR KEZ
+wsl --shutdown                 # Windows PowerShell'de
+```
+Sonra WSL yeniden açılır. `make qemu` KVM'i kendiliğinden kullanır.
+
+## -1.7 HÂLÂ YAPILMAYANLAR
+
+- Sınır ötesi blok senkronu (BÖLÜM 0.5'teki 1. madde) — değişmedi.
+- **Gerçek donanımda ses denenmedi.** QEMU'da (Intel HDA) doğrulandı; gerçek
+  bir dizüstünde kodek farklı olabilir → `mcos-soundcheck` bunun için var.
+- Gerçek donanımda hiçbir şey denenmedi (kullanıcı flaşlıyor).
+- macOS flaşlama yok.
+- Alt-ajan denetimi (16 ajanlık güvenlik taraması) **oturum kotasına takıldı**;
+  yalnızca 2 ajan tamamlandı. Kalan denetim elle yapıldı: remote köprüsü,
+  cluster yetkilendirmesi, Java handoff UUID doğrulaması ve store yazımı
+  okundu; 6 numaralı hata orada bulundu.
+
+---
+
+# BÖLÜM 0 — SÜRÜM 1.0.1'DE YAPILANLAR
 
 > **Bu bölüm en yeni oturumun çıktısıdır ve aşağıdaki tüm bölümlerden DAHA
 > GÜNCELDİR.** Çelişki olursa burası doğrudur. Aşağıdaki "YARIM KALANLAR"

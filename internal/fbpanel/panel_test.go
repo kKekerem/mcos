@@ -20,6 +20,9 @@ func newTestApp(t *testing.T) (*App, *image.RGBA) {
 	img := image.NewRGBA(image.Rect(0, 0, 1280, 800))
 	ui := fbui.NewUI(img, f, fbui.DefaultPalette)
 	a := New(ui, nil) // istemci YOK: çevrimdışı davranış da sınanmalı
+	// Testler ses çalmaz: ses yolu kendi testlerinde sınanıyor ve her panel
+	// testinin bir ses goroutine'i başlatması gereksiz.
+	a.SetHeadless(true)
 	FillDemo(a)
 	a.SetScreenSize(1280, 800)
 	return a, img

@@ -53,13 +53,13 @@ func CrossFade(dst, from *image.RGBA, r image.Rectangle, t float64) {
 	wNew := int(t*256 + 0.5)
 	wOld := 256 - wNew
 
-	for y := r.Min.Y; y < r.Max.Y; y++ {
-		o := dst.PixOffset(r.Min.X, y)
-		end := o + r.Dx()*4
-		for i := o; i < end; i++ {
-			dst.Pix[i] = uint8((int(dst.Pix[i])*wNew + int(from.Pix[i])*wOld) >> 8)
-		}
-	}
+	// Satır bantları çekirdeklere dağıtılır: her bant yalnızca kendi
+	// satırlarına yazar (bkz. forEachBand). Ölçüldü (BenchmarkOlcum, 1080p):
+	// tam ekran soluklaşma tek çekirdekte kare bütçesinin yarısını
+	// yiyordu. Sonuç bayt bayt AYNI (TestCrossFadeParalelAyni).
+	forEachBand(r.Dy(), 32, func(ya, yz int) {
+		blendRows(dst, from, r, wNew, wOld, ya, yz)
+	})
 }
 
 // copyRect copies one rectangle between identically-sized images.
@@ -89,8 +89,6 @@ func SlideBlend(dst, old *image.RGBA, r image.Rectangle, dx int, t float64) {
 		return
 	}
 
-	w := r.Dx()
-	row := make([]uint8, w*4)
 	wNew := int(t*256 + 0.5)
 	if wNew > 256 {
 		wNew = 256
@@ -105,7 +103,18 @@ func SlideBlend(dst, old *image.RGBA, r image.Rectangle, dx int, t float64) {
 	// hissi oluşur ve geçiş "tek blok kayması" gibi görünmez.
 	oldDX := -dx / 3
 
-	for y := r.Min.Y; y < r.Max.Y; y++ {
+	// Satırlar birbirinden bağımsız: bantlara bölünür, her bandın kendi
+	// satır tamponu olur (paylaşılsaydı bantlar birbirinin satırını ezerdi).
+	forEachBand(r.Dy(), 32, func(ya, yz int) {
+		slideRows(dst, old, r, dx, oldDX, wNew, wOld, r.Min.Y+ya, r.Min.Y+yz)
+	})
+}
+
+// slideRows is SlideBlend's inner loop over canvas rows [y0, y1).
+func slideRows(dst, old *image.RGBA, r image.Rectangle, dx, oldDX, wNew, wOld, y0, y1 int) {
+	w := r.Dx()
+	row := make([]uint8, w*4)
+	for y := y0; y < y1; y++ {
 		base := dst.PixOffset(r.Min.X, y)
 		for x := 0; x < w; x++ {
 			// Yeni kareyi dx kadar kaydırarak oku.

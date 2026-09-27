@@ -1,23 +1,29 @@
-import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/connection.dart';
-import '../services/rpc_client.dart';
+import '../services/errors.dart';
+import '../services/pair_uri.dart';
+import '../services/pairing.dart';
 import '../services/store.dart';
 import '../theme/palette.dart';
 import '../widgets/mcos_logo.dart';
+import 'qr_scan_screen.dart';
+import '../services/panel_text.dart';
 
 /// Yeni bir MCOS bağlantısı ekleme ekranı.
 ///
 /// ── Akış ────────────────────────────────────────────────────────────────────
-/// 1. Kullanıcı IP ve jetonu girer (ikisi de MCOS panelinde yazılıdır),
-/// 2. "Bağlan" önce /health çağırır: adres doğru mu, orada MCOS var mı,
-/// 3. sertifikanın parmak izi gösterilir ve KAYDEDİLİR (sabitleme),
-/// 4. sonra jetonla gerçek bir çağrı yapılır: jeton doğru mu,
-/// 5. her ikisi de geçerse bağlantı kaydedilir.
+/// İki yol var, ikisi de aynı doğrulamadan geçer (services/pairing.dart):
+///
+///  * QR ile (önerilen): panelde Ayarlar → Uzaktan kontrol → "QR ile bağlan". QR adres
+///    adaylarını, portu, jetonu VE sertifika parmak izini taşır; telefon
+///    jetonu göndermeden önce karşı tarafın kimliğini doğrular.
+///  * Elle: IP, port ve jeton panelden okunup yazılır. Adres alanına
+///    "IP:port", "https://…" ya da panelden kopyalanmış mcos:// kodu da
+///    yapıştırılabilir.
 ///
 /// Neden iki aşama: "adres yanlış" ile "jeton yanlış" bambaşka sorunlardır ve
 /// kullanıcı hangisi olduğunu bilmeli. Tek bir "bağlanamadı" mesajı, insanı
@@ -45,6 +51,10 @@ class _ConnectScreenState extends State<ConnectScreen> {
   String? _error;
   String? _info;
 
+  /// QR'dan gelen ek bilgiler: diğer adres adayları ve beklenen parmak izi.
+  /// Kullanıcı adres alanını elle değiştirirse geçersiz sayılır.
+  PairInfo? _pair;
+
   @override
   void initState() {
     super.initState();
@@ -64,7 +74,39 @@ class _ConnectScreenState extends State<ConnectScreen> {
     super.dispose();
   }
 
+  /// Tarayıcıyı açar; okunan kodla alanları doldurup hemen bağlanır.
+  Future<void> _scanQr() async {
+    final info = await Navigator.of(context).push<PairInfo>(
+      MaterialPageRoute(builder: (_) => const QrScanScreen()),
+    );
+    if (info == null || !mounted) return;
+    _applyPair(info);
+    await _connect();
+  }
+
+  void _applyPair(PairInfo info) {
+    setState(() {
+      _pair = info;
+      _host.text = info.hosts.first;
+      _port.text = info.port.toString();
+      _token.text = info.token;
+      _error = null;
+      _info = null;
+    });
+  }
+
   Future<void> _connect() async {
+    // Adres alanına mcos:// kodu yapıştırıldıysa QR okutulmuş gibi davran:
+    // kamerası çalışmayan kullanıcı kodu başka bir yoldan kopyalayabilir.
+    final pasted = _host.text.trim();
+    if (looksLikePairUri(pasted)) {
+      try {
+        _applyPair(parsePairUri(pasted));
+      } on PairFormatException catch (e) {
+        setState(() => _error = e.message);
+        return;
+      }
+    }
     if (!(_formKey.currentState?.validate() ?? false)) return;
 
     setState(() {
@@ -73,73 +115,52 @@ class _ConnectScreenState extends State<ConnectScreen> {
       _info = null;
     });
 
-    final draft = Connection(
-      id: widget.existing?.id ?? _newId(),
-      label: _label.text.trim(),
-      host: _host.text.trim(),
-      port: int.parse(_port.text.trim()),
-      token: _token.text.trim(),
-      // Düzenleme kipinde eski parmak izini KORUYORUZ: adres değişmediyse
-      // sertifika da değişmemeli ve değiştiyse kullanıcı uyarılmalı.
-      fingerprint: widget.existing?.fingerprint,
-    );
-
-    final client = RpcClient(draft);
     try {
-      // 1. Adres doğru mu?
-      final health = await client.health();
-      setState(() => _info = '${health.name} bulundu (MCOS ${health.version})');
+      final input = parseHostInput(_host.text);
+      // Adresle birlikte yazılmış port (192.168.1.20:2223) port alanından
+      // önce gelir: kullanıcı onu bilerek yazdı.
+      final port = input.port ?? int.parse(_port.text.trim());
 
-      // 2. Sertifika: ilk kez görüyorsak sabitle.
-      final seen = client.lastSeenFingerprint ?? health.fingerprint;
-      final pinned = draft.fingerprint;
-      if (pinned != null && pinned.isNotEmpty && pinned != seen) {
-        throw RpcException(
-          'Sunucunun kimliği DEĞİŞTİ.\n\nBeklenen:\n$pinned\n\nGelen:\n$seen\n\n'
-          'MCOS yeniden kurulduysa bu normaldir; bağlantıyı silip yeniden '
-          'ekleyin. Kurulmadıysa ağınızda araya giren biri olabilir.',
-        );
-      }
+      // QR bilgisi yalnızca adres hâlâ QR'daki adreslerden biriyse geçerli.
+      final pair = _pair;
+      final fromQr = pair != null &&
+          pair.hosts.contains(input.host) &&
+          pair.port == port;
+      final hosts = fromQr
+          ? [input.host, ...pair.hosts.where((h) => h != input.host)]
+          : [input.host];
 
-      // 3. Jeton doğru mu? En ucuz kimlikli çağrı.
-      final withPin = draft.copyWith(fingerprint: seen);
-      final verify = RpcClient(withPin);
-      String? theme;
-      try {
-        await verify.call('ping');
-        // Tema: telefon, panelle aynı vurgu rengini kullansın.
-        final cfg = await verify.callMap('config.get');
-        theme = cfg['theme'] as String?;
-      } finally {
-        verify.close();
-      }
-
-      final saved = withPin.copyWith(
-        theme: theme,
-        label: withPin.label.isEmpty ? health.name : withPin.label,
+      final saved = await Pairing.connect(
+        id: widget.existing?.id ?? _newId(),
+        label: _label.text,
+        hosts: hosts,
+        port: port,
+        token: _token.text,
+        expectedFingerprint: fromQr ? pair.fingerprint : null,
+        // Düzenleme kipinde eski parmak izini KORUYORUZ: sertifika
+        // değişmemeli, değiştiyse kullanıcı uyarılmalı.
+        pinnedFingerprint: widget.existing?.fingerprint,
+        sshPort: widget.existing?.sshPort ?? 22,
+        sshUser: widget.existing?.sshUser ?? 'root',
+        onProgress: (m) {
+          if (mounted) setState(() => _info = m);
+        },
       );
+
       await widget.store.upsert(saved);
       await widget.store.setActiveId(saved.id);
 
       if (!mounted) return;
       Navigator.of(context).pop(saved);
-    } on RpcException catch (e) {
-      setState(() => _error = e.message);
-    } on SocketException catch (e) {
-      // En sık hata bu: yanlış IP ya da MCOS kapalı. Teknik metni
-      // göstermek yerine ne yapılacağını söylüyoruz.
-      setState(() => _error =
-          'Bağlanılamadı: ${_host.text.trim()}:${_port.text.trim()}\n\n'
-          'MCOS açık mı ve telefon aynı ağda mı? Panelde '
-          '"Uzaktan Kontrol" açık olmalı.\n\n(${e.osError?.message ?? e.message})',);
-    } on HandshakeException {
-      setState(() => _error =
-          'Güvenli bağlantı kurulamadı. Bu portta MCOS yoksa ya da '
-          'sertifika değiştiyse böyle olur.',);
     } catch (e) {
-      setState(() => _error = 'Beklenmeyen hata: $e');
+      // friendlyError: hiçbir yol ham istisna metni göstermiyor.
+      if (mounted) {
+        setState(() {
+          _info = null;
+          _error = friendlyError(e, host: _host.text.trim());
+        });
+      }
     } finally {
-      client.close();
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -168,12 +189,31 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   const Center(child: McosLogo(size: 64)),
                   const SizedBox(height: 20),
                   const Text(
-                    'MCOS panelinde:  Sol menü → Uzaktan Kontrol',
+                    'MCOS panelinde:  $panelRemotePath',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: Palette.textDim),
                   ),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 20),
                 ],
+                // QR EN ÜSTTE: elle 32 haneli jeton yazmak istisna olmalı.
+                FilledButton.icon(
+                  onPressed: _busy ? null : _scanQr,
+                  icon: const Icon(Icons.qr_code_scanner),
+                  label: const Text('QR ile bağlan'),
+                ),
+                const SizedBox(height: 18),
+                const Row(
+                  children: [
+                    Expanded(child: Divider()),
+                    Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 10),
+                      child: Text('ya da elle girin',
+                          style: TextStyle(color: Palette.textDim, fontSize: 12),),
+                    ),
+                    Expanded(child: Divider()),
+                  ],
+                ),
+                const SizedBox(height: 14),
                 TextFormField(
                   controller: _host,
                   autocorrect: false,
@@ -185,10 +225,12 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     prefixIcon: Icon(Icons.dns_outlined),
                   ),
                   validator: (v) {
-                    final s = v?.trim() ?? '';
-                    if (s.isEmpty) return 'Adres gerekli';
-                    if (s.contains(' ')) return 'Adres boşluk içeremez';
-                    return null;
+                    try {
+                      parseHostInput(v ?? '');
+                      return null;
+                    } on PairFormatException catch (e) {
+                      return e.message;
+                    }
                   },
                 ),
                 const SizedBox(height: 14),
@@ -222,7 +264,9 @@ class _ConnectScreenState extends State<ConnectScreen> {
                     prefixIcon: Icon(Icons.key_outlined),
                   ),
                   validator: (v) {
-                    final s = v?.trim() ?? '';
+                    // Boşluklar sayılmaz: panel jetonu iki grup hâlinde,
+                    // aralarında boşlukla gösteriyor.
+                    final s = cleanToken(v ?? '');
                     if (s.isEmpty) return 'Jeton gerekli';
                     if (s.length < 8) return 'Jeton eksik görünüyor';
                     return null;
@@ -247,11 +291,15 @@ class _ConnectScreenState extends State<ConnectScreen> {
                           height: 18,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            color: Palette.textOn,
+                            color: Palette.text,
                           ),
                         )
                       : const Icon(Icons.link),
                   label: Text(_busy ? 'Bağlanılıyor…' : 'Bağlan'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: Palette.raised,
+                    foregroundColor: Palette.text,
+                  ),
                 ),
                 if (_info != null) ...[
                   const SizedBox(height: 16),

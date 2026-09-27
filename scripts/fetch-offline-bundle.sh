@@ -11,6 +11,10 @@
 # İndirilen dosyalar rootfs'e DEĞİL, ayrı bir dizine konur ve mcos-install
 # tarafından kalıcı bölüme (/data/artifacts) tohumlanır.
 #
+# Java BU PAKETTE DEĞİL: Java 21 rootfs'e gömülüdür ve ayrı, özeti doğrulanan
+# bir betikle indirilir (scripts/fetch-builtin-java.sh). Burada indirilen JRE
+# hiçbir kod tarafından okunmuyordu (bkz. offline-manifest.txt).
+#
 # SEBEP: initramfs tamamen RAM'e açılır. 150 MB'lık bir paketi oraya koymak,
 # her açılışta 150 MB RAM demektir — üstelik canlı ISO'da hiç gerekmeyebilir.
 # Kalıcı bölüme tohumlamak bu maliyeti tamamen ortadan kaldırır.

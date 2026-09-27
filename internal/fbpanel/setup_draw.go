@@ -3,6 +3,7 @@ package fbpanel
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 	"strconv"
 	"strings"
@@ -143,6 +144,18 @@ func (a *App) drawFlow(f pageFlow, b image.Rectangle) {
 	// basılı tutulan düğme arkadaki satırı yakalamaz.
 	modalOpen := a.ActiveModal() != nil
 	hintW := body.Dx() - u.M.PadX*3
+
+	// ── Düğme satırı tek sıra ──────────────────────────────────────────
+	//
+	// Devam/Geri eskiden ALT ALTA iki satırdı. "Atla" düğmesi eklenince
+	// üçüncü bir satır daha olacaktı; üstelik kullanıcı onu "sağda"
+	// istiyor. Üçü de AYNI y'de çiziliyor: Devam ve Geri soldan, Atla
+	// gövdenin sağ kenarına yaslı. Böylece sayfanın altı bir "eylem
+	// çubuğu" gibi okunuyor ve atlamak, ilerlemekten görsel olarak ayrı
+	// duruyor.
+	btnY := -1             // ilk düğmenin y'si; sonrakiler aynı satıra girer
+	btnX := 0              // sıradaki düğmenin x'i
+	btnRowStarted := false // düğme satırı başladı mı (y bir kez ilerler)
 	for i, r := range f.rows {
 		var hintLines []string
 		if r.hint != "" {
@@ -153,12 +166,16 @@ func (a *App) drawFlow(f pageFlow, b image.Rectangle) {
 			break
 		}
 		rect := image.Rect(body.Min.X, y, body.Max.X, y+rowH)
-		if !modalOpen {
-			a.addZone(rect, zoneRow, i)
-		}
 
 		selected := i == f.cursor
-		isButton := r.kind == rowContinue || r.kind == rowBack
+		isButton := r.kind == rowContinue || r.kind == rowBack || r.kind == rowSkip
+
+		// Tam genişlik tıklama bölgesi YALNIZCA düğme olmayan satırlar
+		// için: düğmeler kendi dikdörtgenlerini kaydediyor ve aynı satırı
+		// paylaştıkları için tam genişlik bölgesi üçünü de yutardı.
+		if !modalOpen && !isButton {
+			a.addZone(rect, zoneRow, i)
+		}
 
 		// Düğme satırlarında TAM GENİŞLİK vurgusu çizilmez: düğmenin
 		// kendisi zaten odağı gösteriyor ve arkasına uzanan bir şerit,
@@ -182,17 +199,34 @@ func (a *App) drawFlow(f pageFlow, b image.Rectangle) {
 		case rowToggle:
 			u.Check(cx, ty, r.on)
 			u.Text(cx+u.F.CellW+u.M.Gap, ty, r.label, col)
-		case rowContinue:
+		case rowContinue, rowBack, rowSkip:
 			// Devam satırı bir DÜĞME olarak çizilir: sihirbazın ana eylemi
 			// diğer satırlardan ayırt edilebilmeli.
-			btn := u.Button(cx, ty-u.M.PadY/4, r.label, "Enter",
-				fbui.ButtonPrimary, selected)
-			if !modalOpen {
-				a.addZone(btn, zoneRow, i)
+			if btnY < 0 {
+				btnY = ty - u.M.PadY/4
+				btnX = cx
 			}
-		case rowBack:
-			btn := u.Button(cx, ty-u.M.PadY/4, r.label, "Esc",
-				fbui.ButtonSecondary, selected)
+			style, keyCap := fbui.ButtonSecondary, "Esc"
+			switch r.kind {
+			case rowContinue:
+				style, keyCap = fbui.ButtonPrimary, "Enter"
+			case rowSkip:
+				style, keyCap = fbui.ButtonSecondary, "Tab"
+			}
+
+			bx := btnX
+			if r.kind == rowSkip {
+				// Sağ kenara yaslı: "atla" ilerlemenin karşı yönüdür ve
+				// kullanıcı onu orada arıyor.
+				bx = body.Max.X - u.M.PadX - u.ButtonWidth(r.label, keyCap)
+				if bx < btnX {
+					bx = btnX // dar ekranda üst üste binmesin
+				}
+			}
+			btn := u.Button(bx, btnY, r.label, keyCap, style, selected)
+			if r.kind != rowSkip {
+				btnX = btn.Max.X + u.M.ButtonGap
+			}
 			if !modalOpen {
 				a.addZone(btn, zoneRow, i)
 			}
@@ -212,7 +246,14 @@ func (a *App) drawFlow(f pageFlow, b image.Rectangle) {
 			u.Text(cx, hy, line, u.Pal.TextFaint)
 			hy += u.F.CellH
 		}
-		y = rect.Max.Y
+		// Düğmeler aynı satırı paylaşır: y YALNIZCA ilk düğmede ilerler,
+		// sonrakiler onun yanına girer.
+		if !isButton || !btnRowStarted {
+			y = rect.Max.Y
+		}
+		if isButton {
+			btnRowStarted = true
+		}
 	}
 
 	// ── Hata ────────────────────────────────────────────────────────────
@@ -230,10 +271,11 @@ func (a *App) drawFlow(f pageFlow, b image.Rectangle) {
 		}
 		cols, rows := m.Size()
 		in := u.Modal(cols*u.F.CellW, rows*u.F.CellH, m.Title())
-		m.Draw(a, in)
+		// Pencere kendi merkezinden büyüyerek gelir (bkz. modal_zoom.go).
+		a.drawModalZoomed(m, in)
 	}
 
-	_, caps := u.StatusBar(a.LastEvent(), f.keys, a.spinFrame())
+	_, caps := u.StatusBar(a.statusEvent(), f.keys, a.spinFrame())
 	for i := range f.keys {
 		if i < len(caps) {
 			a.addShortcutZone(caps[i], shortcutKeyFor(f.keys[i].Key))
@@ -301,6 +343,8 @@ func setupSubtitle(step setupStep) string {
 		return "Paneli bir parolayla kilitleyebilirsiniz. İsteğe bağlıdır."
 	case stepSummary:
 		return "Seçtikleriniz. Kaydetmeden önce son bir kez bakın."
+	case stepPersist:
+		return "İsteğe bağlı: ayarlar ve sunucular yeniden başlatınca korunsun mu?"
 	case stepInstall:
 		return "İsterseniz MCOS'u kalıcı olarak bir diske kurabilirsiniz."
 	}
@@ -402,9 +446,19 @@ func (a *App) drawSetupBody(v setupView, body image.Rectangle, y int) int {
 		}
 		u.Text(body.Min.X+u.F.CellW+u.M.Gap, y, "Java: "+state, u.Pal.Text)
 		y += u.F.CellH + u.M.PadY*2
-		y = a.hint(body, y,
-			"Java yoksa şimdi kurabilirsiniz; sonradan Yazılım ekranından da",
-			"kurulabilir. Çevrimdışı pakette Java 21 gömülü gelir.")
+		if v.javaBuiltin {
+			y = a.hint(body, y,
+				"Java 21 sistemle birlikte gömülü geldi: indirme ve internet gerekmez.",
+				// "1.20.5 ve sonrası" DEĞİL: 26.x Java 25 ister (Mojang
+				// manifesti). O sürüm ilk 26.x sunucusunda kendiliğinden
+				// kurulur (internal/java: önce çevrimdışı paket, yoksa indirme).
+				"Minecraft 1.20.5 – 1.21.11 doğrudan çalışır. 26.x'in istediği Java 25",
+				"ilk 26.x sunucusunda kendiliğinden kurulur; Java 8/17 Yazılım ekranından.")
+		} else {
+			y = a.hint(body, y,
+				"Java yoksa şimdi kurabilirsiniz; sonradan Yazılım ekranından da",
+				"kurulabilir. İndirme internet gerektirir.")
+		}
 		return y + u.M.PadY
 
 	case stepBudget:
@@ -429,6 +483,9 @@ func (a *App) drawSetupBody(v setupView, body image.Rectangle, y int) int {
 
 	case stepSummary:
 		return a.drawSummary(v, body, y)
+
+	case stepPersist:
+		return a.drawPersist(v, body, y)
 
 	case stepInstall:
 		return a.drawInstall(v, body, y)
@@ -458,6 +515,7 @@ func (a *App) drawSummary(v setupView, body image.Rectangle, y int) int {
 		{"playit tüneli", onOff(v.playitSetup), u.Pal.Text},
 		{"Fare / touchpad", onOff(v.mouse) + " / " + onOff(v.touchpad), u.Pal.Text},
 		{"Animasyonlar", onOff(v.animations), u.Pal.Text},
+		{"Ses efektleri", onOff(v.sounds), u.Pal.Text},
 		{"Panel parolası", v.password, u.Pal.Text},
 	}
 	y = a.kvList(body, y, 22, rows)
@@ -469,6 +527,69 @@ func (a *App) drawSummary(v setupView, body image.Rectangle, y int) int {
 		y += u.F.CellH + u.M.PadY
 	}
 	return y + u.M.PadY
+}
+
+// drawPersist renders the optional "make this USB persistent" page.
+//
+// Kullanıcı seçmeden ÖNCE iki seçeneğin sonucunu okumalı: kalıcı yapılmazsa
+// ayarlar ve sunucular yeniden başlatınca GİDER. Sonuç (başarı, canlı DVD'de
+// geçerli değil, gerçek hata) da sayfada kalır; alt çubuktaki olay birkaç
+// saniyede kaybolur.
+func (a *App) drawPersist(v setupView, body image.Rectangle, y int) int {
+	u := a.ui
+	baslik := func(ok bool, c color.RGBA, metin string) {
+		if ok {
+			u.StatusDot(body.Min.X, y, c)
+		} else {
+			u.WarnTriangle(body.Min.X, y, c)
+		}
+		u.Text(body.Min.X+u.F.CellW+u.M.Gap, y, metin, c)
+		y += u.F.CellH + u.M.PadY/2
+	}
+	ayrinti := func(c color.RGBA) {
+		if v.persistMsg != "" {
+			y = u.TextWrap(body.Min.X, y, body.Dx(), v.persistMsg, c)
+		}
+		y += u.M.PadY
+	}
+
+	switch v.persist {
+	case persistZatenVar:
+		baslik(true, u.Pal.OK, "BU SİSTEM ZATEN KALICI")
+		ayrinti(u.Pal.TextDim)
+		y = a.hint(body, y, "Ayarlar ve sunucular yeniden başlatınca korunur.")
+	case persistTamam:
+		baslik(true, u.Pal.OK, "USB KALICI YAPILDI")
+		ayrinti(u.Pal.TextDim)
+		y = a.hint(body, y, "Ayarlar ve sunucular artık yeniden başlatınca korunur.")
+	case persistGecersiz:
+		baslik(false, u.Pal.Warn, "BU ORTAMDA KALICILIK YAPILAMAZ")
+		ayrinti(u.Pal.Text)
+		y = a.hint(body, y,
+			"Ayarlar ve sunucular yeniden başlatınca GİDER.",
+			"Kalıcı kullanım için MCOS'u bir USB'ye yazın ya da diske kurun",
+			"(sonraki sayfa).")
+	case persistHata:
+		baslik(false, u.Pal.Error, "KALICILIK BAŞARISIZ")
+		ayrinti(u.Pal.Text)
+		y = a.hint(body, y, "USB'ye yazılmadı ya da yarım kalmadı; yeniden deneyebilirsiniz.")
+	case persistSuruyor:
+		u.Spinner(body.Min.X, y, a.Spin(), u.Pal.Accent)
+		u.Text(body.Min.X+u.F.CellW+u.M.Gap, y,
+			"Kalıcılık hazırlanıyor — Ventoy'da birkaç dakika sürebilir…", u.Pal.Accent)
+		y += u.F.CellH + u.M.PadY
+		y = a.hint(body, y,
+			"İş arka planda sürer; beklemeden devam edebilirsiniz.",
+			"Bitene kadar bilgisayarı kapatmayın ya da yeniden başlatmayın.")
+	default:
+		y = a.hint(body, y,
+			"MCOS RAM'de çalışır. \"Şimdilik geç\" derseniz ayarlar ve",
+			"sunucular yeniden başlatınca GİDER.",
+			"Kalıcı kayıt bu USB'ye bir veri bölümü ekler; var olan veriye dokunmaz.",
+			"MCOS'u bir diske kuracaksanız geçebilirsiniz (sonraki sayfa).",
+			"Sonradan da yapılabilir: Ayarlar > USB'yi kalıcı yap.")
+	}
+	return y + u.M.PadY*2
 }
 
 // drawInstall renders the optional disk-install page.
@@ -506,6 +627,23 @@ func (a *App) drawInstall(v setupView, body image.Rectangle, y int) int {
 
 	if v.disksLoading {
 		return u.ScanBanner(body, y, a.Spin(), "Diskler taranıyor…", "")
+	}
+
+	// Son kurulum başarısız olduysa GERÇEK sebebi sayfada tut (eskiden
+	// yalnızca "exit status 1" bildirimi görünüp kayboluyordu). Disk listesi
+	// altında kalır: kullanıcı sorunu giderip yeniden deneyebilir.
+	if len(v.installErr) > 0 {
+		u.WarnTriangle(body.Min.X, y, u.Pal.Error)
+		u.Text(body.Min.X+u.F.CellW+u.M.Gap, y, "KURULUM BAŞARISIZ", u.Pal.Error)
+		y += u.F.CellH + u.M.PadY/2
+		for i, l := range v.installErr {
+			c := u.Pal.Text
+			if i == 0 {
+				c = u.Pal.Error
+			}
+			y = u.TextWrap(body.Min.X, y, body.Dx(), l, c)
+		}
+		y += u.M.PadY
 	}
 
 	y = a.hint(body, y,

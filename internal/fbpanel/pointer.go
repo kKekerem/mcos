@@ -471,7 +471,7 @@ func (a *App) dispatchClick(z zone, dbl bool) Action {
 		rm.SetCursor(z.idx)
 		if dbl || prev == z.idx {
 			if rm.Key(a, "enter") {
-				a.CloseModal()
+				a.closeModalIf(rm)
 			}
 		}
 		return ActNone
@@ -489,7 +489,7 @@ func (a *App) dispatchClick(z zone, dbl bool) Action {
 			key = "confirm"
 		}
 		if m.Key(a, key) {
-			a.CloseModal()
+			a.closeModalIf(m)
 		}
 		return ActNone
 
@@ -507,4 +507,68 @@ func (a *App) dispatchClick(z zone, dbl bool) Action {
 		return a.runAction(z.key)
 	}
 	return ActNone
+}
+
+// coalescePointer drains the pointer events that are already queued and
+// merges consecutive pure motion into one event.
+//
+// ── Yakalanan gerçek hata: imleç "hareket ettiriyorum, sonra geliyor" ──────
+//
+// Fare saniyede 125-1000 olay üretir (touchpad ~100-140). Ana döngü her
+// select turunda YALNIZCA BİR olay işliyordu; arada bir kare çizimi (1080p'de
+// ~3 ms, 4K'da ~10-15 ms) ve sayfa çevirme beklemesi olunca kuyruk büyüyordu.
+// İmleç birkaç saniye geriden, kuyruk boşaldıkça "kendi kendine" geliyordu.
+// fbinput'taki yorum "panel bunları birleştirerek tüketir" diyordu ama
+// birleştirme hiç yazılmamıştı.
+//
+// Kurallar: ardışık salt-hareket olayları birleşir (göreli farklar TOPLANIR,
+// mutlak konumda SONUNCU kalır); düğme ve tekerlek olayları sırasını korur ve
+// ondan önce biriken hareket ayrı bir olay olarak önce işlenir — tıklama
+// imlecin DOĞRU yerine düşsün. Göreli ve mutlak hareket birbirine karışmaz.
+func coalescePointer(first fbinput.PointerEvent, ch <-chan fbinput.PointerEvent) []fbinput.PointerEvent {
+	const azami = 1024 // bir turda en fazla bu kadar olay boşaltılır
+	out := make([]fbinput.PointerEvent, 0, 4)
+	var bekleyen *fbinput.PointerEvent
+	flush := func() {
+		if bekleyen != nil {
+			out = append(out, *bekleyen)
+			bekleyen = nil
+		}
+	}
+	ekle := func(ev fbinput.PointerEvent) {
+		salt := ev.Button == fbinput.ButtonNone && !ev.Press && !ev.Release && ev.Wheel == 0
+		if !salt {
+			flush()
+			out = append(out, ev)
+			return
+		}
+		if bekleyen != nil && bekleyen.Kind == ev.Kind && bekleyen.HasAbs == ev.HasAbs {
+			if ev.HasAbs {
+				bekleyen.AbsX, bekleyen.AbsY = ev.AbsX, ev.AbsY
+			} else {
+				bekleyen.DX += ev.DX
+				bekleyen.DY += ev.DY
+			}
+			return
+		}
+		flush()
+		e := ev
+		bekleyen = &e
+	}
+	ekle(first)
+	for i := 0; i < azami; i++ {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				flush()
+				return out
+			}
+			ekle(ev)
+			continue
+		default:
+		}
+		break
+	}
+	flush()
+	return out
 }

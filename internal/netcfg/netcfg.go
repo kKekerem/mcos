@@ -16,6 +16,27 @@ type Network struct {
 // when no wireless interface/tooling exists it returns an empty list and nil.
 func Scan() ([]Network, error) { return scan() }
 
+// ScanLive is Scan with progress: onBatch is called with the accumulated
+// network set every time a new source produces results, and once more at the
+// end. The returned slice is the final set.
+//
+// ── Neden ayrı bir giriş noktası ────────────────────────────────────────────
+//
+// Scan() TEK PARÇA döner ve gerçekte saniyeler sürer: arabirim başına rfkill
+// açma (0,5 sn), düzenleyici alan (0,3 sn), arabirimi kaldırma (1 sn) ve
+// üç ayrı tarama aracının (iwlist / wpa_cli / iw) 3 denemeye kadar
+// sıralanması — wpa_cli dalında tek başına 2 sn uyku var. Ölçülen tipik süre
+// 4-12 saniye; iki kablosuz kartı olan bir makinede daha da uzun.
+//
+// Panel bu süre boyunca kullanıcıya hiçbir şey gösteremiyordu: pencere ancak
+// tarama BİTİNCE açılıyordu. Kullanıcının isteği tam olarak buydu —
+// "kablosuz tara deyince üste bir menü gelecek, animasyon orada olacak ve
+// canlı listelenecek bulduğunda."
+//
+// onBatch her çağrıldığında YENİ bir dilim alır (çağıran onu saklayabilir);
+// ortak bir arka bellek paylaşılmaz.
+func ScanLive(onBatch func([]Network)) ([]Network, error) { return scanLive(onBatch) }
+
 // Apply associates with ssid using pass (empty = open network), brings up the
 // interface with DHCP, and persists the credentials so the link is restored on
 // boot. No-op on non-Linux hosts.

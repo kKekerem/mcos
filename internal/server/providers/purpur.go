@@ -25,7 +25,16 @@ func (purpurProvider) Install(ctx context.Context, mcVersion, dir, javaBin strin
 	if err := getJSON(ctx, client, fmt.Sprintf("%s/%s", purpurAPI, mcVersion), &meta); err != nil {
 		return nil, fmt.Errorf("purpur: version %q: %w", mcVersion, err)
 	}
-	dlURL := fmt.Sprintf("%s/%s/latest/download", purpurAPI, mcVersion)
+	// Derleme numarası adrese YAZILIR, "latest" değil. İndirmeler çevrimdışı
+	// depoda URL'e göre saklanıyor (offline.go): ".../26.3/latest/download"
+	// bir kez indirildikten sonra aynı adres hep o İLK derlemeyi verirdi.
+	// 26.3 yayımlandığından beri 2634'ten 2641'e sekiz derleme çıktı
+	// (api.purpurmc.org, 2026-09-27); düzeltmeler hiç gelmezdi.
+	build := meta.Builds.Latest
+	if build == "" {
+		build = "latest"
+	}
+	dlURL := fmt.Sprintf("%s/%s/%s/download", purpurAPI, mcVersion, build)
 	if lg != nil {
 		lg.Infof("purpur: downloading %s (build %s)", mcVersion, meta.Builds.Latest)
 	}

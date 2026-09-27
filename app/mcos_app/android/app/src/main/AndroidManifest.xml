@@ -1,12 +1,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      İNTERNET izni: uygulamanın tek işi ağ üzerinden MCOS'a bağlanmak.
-      Başka hiçbir izin İSTENMİYOR — konum, kamera, depolama, kişiler yok.
-      Gereksiz izin istemek, kullanıcıyı izin sorularını okumadan onaylamaya
-      alıştırır.
+      İNTERNET izni: uygulamanın asıl işi ağ üzerinden MCOS'a bağlanmak.
+      Konum, depolama, kişiler İSTENMİYOR. Gereksiz izin istemek, kullanıcıyı
+      izin sorularını okumadan onaylamaya alıştırır.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+      KAMERA: YALNIZCA MCOS panelindeki eşleşme QR'ını okumak için
+      ("QR ile bağlan"). İzin ilk taramada sorulur; verilmezse elle giriş
+      çalışmaya devam eder. required="false": kamerası olmayan cihazlar
+      (bazı tabletler) uygulamayı yine kurabilsin.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
 
     <!--
       Ağ durumunu okumak: "Wi-Fi kapalı" ile "MCOS kapalı" farkını

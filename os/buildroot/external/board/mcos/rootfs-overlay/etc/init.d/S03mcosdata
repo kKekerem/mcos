@@ -23,6 +23,31 @@
 
 MCOS_DATA=/data
 
+# ayni_disk_verisi, kok dosya sistemi bir diskten baglanmissa (kurulu sistem,
+# switch_root sonrasi) AYNI diskteki MCOS-DATA bolumunu verir.
+#
+# Neden: eski bir MCOS USB'si ile yeni kurulan disk ayni anda takiliyken
+# ikisinde de MCOS-DATA etiketi var. mcos-findfs ilk buldugunu dondurur
+# (tarama sirasi sd* once, nvme* sonra) ve yeni diskten acilan sistem ESKI
+# USB'nin /data'sini baglayabiliyordu: kullanicinin sunuculari "kayboluyor",
+# yazilanlar yanlis diske gidiyordu. Kok hangi diskteyse veri de oradan.
+ayni_disk_verisi() {
+    kok="$(awk '$2 == "/" && $1 ~ /^\/dev\// { d = $1 } END { print d }' /proc/mounts)"
+    [ -n "$kok" ] || return 1
+    ad="$(basename "$kok")"
+    [ -e "/sys/class/block/$ad/partition" ] || return 1
+    disk="$(basename "$(dirname "$(readlink -f "/sys/class/block/$ad")")")"
+    for p in /sys/class/block/"$disk"/"$disk"*; do
+        [ -e "$p/partition" ] || continue
+        dev="/dev/$(basename "$p")"
+        [ "$(dd if="$dev" bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "53ef" ] || continue
+        [ "$(dd if="$dev" bs=1 skip=1144 count=16 2>/dev/null | tr -d '\000')" = "MCOS-DATA" ] || continue
+        echo "$dev"
+        return 0
+    done
+    return 1
+}
+
 # mount_persistent, MCOS-DATA etiketli bolumu /data'ya baglar.
 mount_persistent() {
     if grep -qs " $MCOS_DATA " /proc/mounts; then
@@ -30,20 +55,50 @@ mount_persistent() {
     fi
     mkdir -p "$MCOS_DATA"
 
+    # "mcos.nodata": kalici bolumu BILEREK baglama. mcos-install, hedef
+    # diskin MCOS-DATA'si /data olarak kullanilirken o diski sifirdan
+    # bolumleyemez (mcosd tutuyor); kullaniciya bu parametreyle acip yeniden
+    # denemesini soyler.
+    if grep -qw 'mcos.nodata' /proc/cmdline 2>/dev/null; then
+        printf "mcos.nodata: kalici bolum baglanmadi; /data RAM'de.\n"
+        return 0
+    fi
+
     # Kalici bolumu ETIKETLE bul. Eskiden burada
     #     [ -b /dev/disk/by-label/MCOS-DATA ]
     # vardi; imajda udev OLMADIGI icin o sembolik bag hic olusmuyor ve kosul
     # her zaman false donuyordu. Sonuc: /data hicbir zaman kalici bolumden
     # mount edilmiyor, kurulan Java ve olusturulan sunucular her reboot'ta
     # kayboluyordu. mcos-findfs dort ayri yontemi sirayla dener.
-    part="$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)"
+    part="$(ayni_disk_verisi 2>/dev/null || true)"
+    [ -n "$part" ] || part="$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)"
+    if [ -z "$part" ] && [ -x /usr/bin/mcos-vtoydata ]; then
+        # Ventoy'dan acildiysa kalicilik bir DOSYADADIR (Ventoy bolumunde
+        # /mcos/mcos-data.dat); loop ile baglanir. Bkz. mcos-vtoydata.
+        part="$(/usr/bin/mcos-vtoydata bagla 2>/dev/null || true)"
+        [ -n "$part" ] && printf "Ventoy kalicilik dosyasi bulundu: %s\n" "$part"
+    fi
     if [ -z "$part" ]; then
         printf "Kalici bolum (MCOS-DATA) bulunamadi; /data RAM'de kalacak.\n"
         return 0
     fi
 
-    if mount "$part" "$MCOS_DATA"; then
+    # noatime,lazytime,commit=30: dünya dosyaları her okunduğunda zaman
+    # damgası yazılmasın, günlük 5 değil 30 sn'de bir boşaltılsın. SD kart ve
+    # USB bellekte küçük dağınık yazmalar sunucunun okumalarını bekletiyordu
+    # ("10 saniyedir yanıt yok"). ext4 değilse seçenekler reddedilir; o zaman
+    # seçeneksiz bağlanır.
+    if mount -o noatime,lazytime,commit=30 "$part" "$MCOS_DATA" 2>/dev/null ||
+       mount "$part" "$MCOS_DATA"; then
         printf "Kalici depolama baglandi: %s -> %s\n" "$part" "$MCOS_DATA"
+        # 4 GB'lik imaj buyuk bir USB'ye yazildiysa veri bolumunu diskin
+        # sonuna kadar buyut (bkz. mcos-growdata). ARKA PLANDA: buyuk bir
+        # bolumde resize2fs saniyeler surer ve acilisi bekletmemeli; ext4
+        # cevrimici buyurken /data kullanilabilir kalir.
+        if [ -x /usr/bin/mcos-growdata ]; then
+            mkdir -p "$MCOS_DATA/log"
+            /usr/bin/mcos-growdata "$part" >>"$MCOS_DATA/log/growdata.log" 2>&1 &
+        fi
     else
         printf "UYARI: %s baglanamadi; /data RAM'de kalacak.\n" "$part"
     fi
@@ -70,6 +125,8 @@ case "$1" in
     start)
         mount_persistent
         ensure_config
+        # Acilis ekranina GERCEK ilerleme: kalici depolama cozuldu.
+        [ -x /usr/bin/mcos-stage ] && /usr/bin/mcos-stage storage 2>/dev/null
         ;;
     stop)
         # /data'yi cozmuyoruz: kapanis sirasinda daemon hala yaziyor olabilir.

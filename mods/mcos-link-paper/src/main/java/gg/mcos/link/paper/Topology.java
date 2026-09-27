@@ -79,9 +79,20 @@ public final class Topology {
         public final boolean self;
         public final boolean online;
         public final int players;
+        /**
+         * Aynı makinedeki bölünmüş dünya kopyası mı. Öyleyse oyuncu,
+         * bağlandığı adrese bu düğümün portuyla gönderilebilir (host LAN
+         * adresidir; internetten gelen oyuncu ona ulaşamaz).
+         */
+        public final boolean local;
+        /** Düğümün playit adresi ("ad" ya da "ad:port"); yoksa boş. */
+        public final String publicAddr;
 
         Node(String name, String host, int mcPort, int linkPort,
-             boolean self, boolean online, int players) {
+             boolean self, boolean online, int players,
+             boolean local, String publicAddr) {
+            this.local = local;
+            this.publicAddr = publicAddr;
             this.name = name;
             this.host = host;
             this.mcPort = mcPort;
@@ -199,6 +210,15 @@ public final class Topology {
 
         boolean enabled = o.has("enabled") && o.get("enabled").getAsBoolean();
         String self = getStr(o, "self", "");
+        // Aynı makinede bölünmüş dünya: koordinatör her kopyaya AYNI
+        // topolojiyi verir ve "self" makinenin (ana sunucunun) adıdır. MCOS,
+        // kardeş kopyanın sürecine kendi düğüm adını bu değişkenle verir;
+        // olmasaydı her kopya ana sunucunun dilimini kendisininki sanardı.
+        String envSelf = System.getenv("MCOS_LINK_SELF");
+        boolean selfOverride = envSelf != null && !envSelf.isBlank();
+        if (selfOverride) {
+            self = envSelf.trim();
+        }
         String note = getStr(o, "note", "");
         String token = getStr(o, "token", "");
         String difficulty = getStr(o, "difficulty", "normal");
@@ -210,14 +230,20 @@ public final class Topology {
             JsonArray arr = o.getAsJsonArray("nodes");
             for (int i = 0; i < arr.size(); i++) {
                 JsonObject n = arr.get(i).getAsJsonObject();
+                String name = getStr(n, "name", "");
+                boolean isSelf = selfOverride
+                        ? name.equals(self)
+                        : n.has("self") && n.get("self").getAsBoolean();
                 nodes.add(new Node(
-                        getStr(n, "name", ""),
+                        name,
                         getStr(n, "host", ""),
                         getInt(n, "mcPort", 25565),
                         getInt(n, "linkPort", 27893),
-                        n.has("self") && n.get("self").getAsBoolean(),
+                        isSelf,
                         n.has("online") && n.get("online").getAsBoolean(),
-                        getInt(n, "players", 0)));
+                        getInt(n, "players", 0),
+                        n.has("local") && n.get("local").getAsBoolean(),
+                        getStr(n, "publicAddr", "")));
             }
         }
 

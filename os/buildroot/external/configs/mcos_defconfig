@@ -77,7 +77,9 @@ BR2_PACKAGE_WIRELESS_REGDB=y
 BR2_PACKAGE_LINUX_FIRMWARE=y
 BR2_PACKAGE_LINUX_FIRMWARE_WHENCE=y
 BR2_PACKAGE_LINUX_FIRMWARE_BNX2=y
-BR2_PACKAGE_LINUX_FIRMWARE_CXGB4=y
+# BR2_PACKAGE_LINUX_FIRMWARE_CXGB4=y  <- KALDIRILDI: Buildroot 2024.02'de boyle
+#   bir secenek YOK (yalnizca _CXGB4_T4 / _CXGB4_T5), satir sessizce yok
+#   sayiliyordu. Chelsio surucusu cekirdekte de acik degil.
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_3160=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_3168=y
 BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_7260=y
@@ -106,6 +108,63 @@ BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT76X2E=y
 BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7921=y
 BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7922=y
 BR2_PACKAGE_LINUX_FIRMWARE_RALINK_RT2XX=y
+# ── Ekran karti firmware'i: KARA EKRANI onleyen iki paket ──────────────────
+#
+# Cekirdekte amdgpu ve radeon GOMULU (board/mcos/kernel.config, GPU bolumu).
+# Ikisi de ekrani firmware framebuffer'indan DEVRALDIKTAN SONRA microcode
+# yukluyor; firmware yoksa probe duser ve simpledrm'e donus YOK -> kara ekran.
+#   radeon : devralma radeon_drv.c:299, microcode r600/si/cik init'te.
+#   amdgpu : SI/CIK/VI (Polaris RX 4xx/5xx dahil) gfx6/7/8 microcode'u
+#            sw_init'te, devralmadan sonra. Vega ve sonrasi early_init'te
+#            ister (devralmadan once duser, zararsiz) ama calismak icin yine
+#            firmware sart.
+# Gomulu surucu firmware'i initramfs'teki /lib/firmware'den okuyabiliyor
+# (firmware_loader/main.c:512 wait_for_initramfs). QEMU'da olculdu: radeon
+# firmware'siz "Direct firmware load for radeon/R100_cp.bin failed with
+# error -2", firmware eklenince "Loading R100 Microcode" ve yukleme basarili.
+#
+# BOYUT (linux-firmware-20240115, Buildroot .mk kurallariyla sayildi):
+#   AMDGPU  76,5 MiB acik / 25,7 MiB gzip   (554 dosya)
+#   RADEON   6,8 MiB acik /  3,3 MiB gzip   (247 dosya)
+# Initramfs TAMAMEN RAM'de; bu iki paket acilista ~83 MiB RAM tutar.
+#
+# BILEREK EKLENMEYENLER:
+#   I915 (26,7 MiB): i915 firmware'siz de EKRANI surer. GuC/HuC yoksa
+#     i915_gem.c -EIO'yu "GPU wedged, KMS canli" diye ele aliyor; DMC yoksa
+#     yalnizca derin guc tasarrufu kapaniyor. Panel CPU ile dumb buffer'a
+#     cizdigi icin GPU motoruna ihtiyac yok.
+#   nvidia (62,9 MiB, zaten Buildroot'ta secenegi yok): nouveau firmware'i
+#     gereken alt birimleri -ENODEV ile atlayip goruntuyu surduruyor.
+BR2_PACKAGE_LINUX_FIRMWARE_AMDGPU=y
+BR2_PACKAGE_LINUX_FIRMWARE_RADEON=y
+# ── Surucusu acik ama firmware'i OLMAYAN aileler ───────────────────────────
+#
+# modules.builtin.modinfo'daki her "firmware=" satiri imajdakiyle
+# karsilastirildi. Asagidakilerin surucusu cekirdekte acikti, firmware'i
+# yoktu -> kart gorunur ama hic calismaz:
+#   QUALCOMM_6174 (3,6 MiB): ath10k QCA6174 - Killer 1535 / cok yaygin
+#                            dizustu Wi-Fi karti. En buyuk eksik buydu.
+#   MEDIATEK_MT7601U / MT7610E / MT7650: mt7601u, mt76x0e/u USB/PCI Wi-Fi.
+#   IWLWIFI_5000 / 6000G2A / 6000G2B: iwldvm acik, 2009-2012 Intel kartlari.
+#   ATHEROS_9170: carl9170 USB Wi-Fi.
+#   BROADCOM_TIGON3: tg3'un 5701/57766 yongalari (57766: Mac mini/iMac).
+#   RTL_815X: r8152 USB ethernet'in 8153/8156 yama dosyalari (istege bagli
+#             ama yoksa bazi 8156B'ler 2.5G yerine dusuk hizda kalir).
+# Toplam ~6 MiB acik / ~3 MiB gzip.
+BR2_PACKAGE_LINUX_FIRMWARE_QUALCOMM_6174=y
+BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7601U=y
+BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7610E=y
+BR2_PACKAGE_LINUX_FIRMWARE_MEDIATEK_MT7650=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_5000=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6000G2A=y
+BR2_PACKAGE_LINUX_FIRMWARE_IWLWIFI_6000G2B=y
+BR2_PACKAGE_LINUX_FIRMWARE_ATHEROS_9170=y
+BR2_PACKAGE_LINUX_FIRMWARE_BROADCOM_TIGON3=y
+BR2_PACKAGE_LINUX_FIRMWARE_RTL_815X=y
+# ATH11K (Qualcomm WCN6855/QCA6390, 2021+ dizustuler) firmware'i Buildroot
+# 2024.02'nin linux-firmware paketinde SECENEK OLARAK YOK. Surucu acik ama
+# firmware'siz calismaz; post-build ile ath11k/WCN6855 kopyalanmadikca o
+# kartlarda Wi-Fi yoktur (scripts/test-kernel-config.sh UYARI verir).
 BR2_PACKAGE_KBD=y
 BR2_PACKAGE_KBD_CONSOLEFONTS=y
 BR2_PACKAGE_KBD_KEYMAPS=y
@@ -131,3 +190,25 @@ BR2_PACKAGE_FREETYPE=y
 BR2_PACKAGE_DEJAVU=y
 BR2_PACKAGE_LIBERATION=y
 BR2_PACKAGE_FONT_AWESOME=y
+
+# ── Ses (aplay + amixer) ────────────────────────────────────────────────────
+#
+# NEDEN ALSA ARAÇLARI: panel ham PCM üretiyor ve onu çalacak bir şey lazım.
+# İki seçenek vardı:
+#
+#   a) /dev/snd/pcmC0D0p üzerinde SNDRV_PCM ioctl'lerini saf Go ile sürmek.
+#      Mümkün ama hw_params yapısı maske/aralık dizileriyle dolu bir ABI'dir;
+#      yanlış kurulduğunda ses çıkmaz VEYA süreç ioctl'de asılır. Bu makinede
+#      ses kartı olmadığı için doğrulanamazdı da.
+#   b) aplay'e ham PCM borulamak. alsa-lib artı iki küçük araç (~1,5 MB)
+#      ekliyor, buna karşılık yıllardır sınanmış bir yol.
+#
+# (b) seçildi: sessizce çalışmayan bir ses, olmayan sesten kötüdür.
+#
+# AMIXER NEDEN GEREKLİ: HDA kodeklerinin çoğu açılışta Master kanalı KAPALI
+# (muted) gelir. amixer olmadan her şey doğru kurulur, aplay hatasız döner ve
+# hoparlörden hiçbir şey duyulmaz — tam olarak teşhisi en zor arıza.
+BR2_PACKAGE_ALSA_LIB=y
+BR2_PACKAGE_ALSA_UTILS=y
+BR2_PACKAGE_ALSA_UTILS_APLAY=y
+BR2_PACKAGE_ALSA_UTILS_AMIXER=y

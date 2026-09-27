@@ -1,0 +1,40 @@
+# Sunucuya mcos-link ile BİRLİKTE kurulan Fabric API jar'ları.
+#
+# Biçim (SEKME ile ayrılmış): <minecraft><TAB><dosya adı><TAB><adres><TAB><sha512>
+#
+# Kaynak: Modrinth API, her sürüm için
+#   https://api.modrinth.com/v2/project/fabric-api/version?game_versions=["X"]&loaders=["fabric"]
+# yanıtındaki, o sürümü listeleyen en yeni "release" (beta değil). Dosya adı
+# Modrinth'teki özgün addır; sha512 de API'nin verdiği değerdir ve derleme
+# her indirmeyi ona karşı DOĞRULAR (bozuk ya da değiştirilmiş bir jar
+# dist/mods/link'e giremez).
+#
+# ── Neden sabitlenmiş (pin) liste, neden derleme anında "en yeni" değil? ────
+# Doğrulama bu jar'larla yapıldı: her satır, o Minecraft sürümünde gerçek bir
+# sunucuda mcos-link ile birlikte açıldı. "En yeni"yi her derlemede yeniden
+# sormak, dün doğrulanan dizini bugün hiç denenmemiş bir Fabric API ile
+# üretirdi. Yükseltmek için: API'yi yeniden sor, satırı değiştir, o sürümü
+# yeniden dene.
+#
+# Not: 26.1 ve 26.1.1 için Modrinth'in en yeni sürümü 0.155.3+26.1.2'dir;
+# Modrinth onu 26.1, 26.1.1 ve 26.1.2 için birlikte yayımlıyor (game_versions
+# üçünü de listeliyor) ve üçünde de doğrulandı.
+1.20.5	fabric-api-0.97.8+1.20.5.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/GCdY4I8I/fabric-api-0.97.8%2B1.20.5.jar	4b52fe9bd5bfd50df610f236b6d2fa08985ab5dee51261397c83413cf42cf4bde05190ba851f5100bae3c43a7e2da9e8d0e708477ad8e30d2f00eb1e2af59cb3
+1.20.6	fabric-api-0.100.8+1.20.6.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/ocg4hG3t/fabric-api-0.100.8%2B1.20.6.jar	414f19f903a093c39006e1919a81bea43c3b6728b88e358dc2611ab44b8087e25abc504c66926f245342fa2a245c07462ed62897f15d6c84006b7acf6214ca46
+1.21	fabric-api-0.102.0+1.21.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/oGwyXeEI/fabric-api-0.102.0%2B1.21.jar	11732c4e36c3909360a24aa42a44da89048706cf10aaafa0404d7153cbc7395ff68a130f7b497828d6932740e004416b692650c3fbcc1f32babd7cb6eb9791d8
+1.21.1	fabric-api-0.116.17+1.21.1.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/Mys3P7lK/fabric-api-0.116.17%2B1.21.1.jar	98c478217da19181f0e4df3ea6c2da6bdbda271c7544a4aea048513a49b444f1ff5b71dc0df6303017c48e8ff69b7bb6af6179bdf0d0e09ab3c1ee08411857a8
+1.21.2	fabric-api-0.106.1+1.21.2.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/UEjZZNue/fabric-api-0.106.1%2B1.21.2.jar	3c9f04933a71aac76bee6a71d3b48325b65896cb2935ed2c6476d0290d4810648b00e0cea856de0b08ab0086f442eb252c7e816381a0198f7a4b54a5472270bf
+1.21.3	fabric-api-0.114.1+1.21.3.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/wLq4rGsB/fabric-api-0.114.1%2B1.21.3.jar	962e64e8418b074ce68809cd38835e99fea3da8dc1b2979a69f10fee047cd3404b2157a8106fa650795d17e0eebfa41a0d21af7ea5a4b9ee3992c57bc3c5d113
+1.21.4	fabric-api-0.119.4+1.21.4.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/p96k10UR/fabric-api-0.119.4%2B1.21.4.jar	16b679f6a42549ca3b6bc147de710b2c8ba2d5e4661ed88df22782c05a4a5f6c1163d7b13867687ed91acde0fdfe5a5037d05662431c946865b58396284e7ee7
+1.21.5	fabric-api-0.128.2+1.21.5.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/kKEGlsne/fabric-api-0.128.2%2B1.21.5.jar	0e42b72d1a63a45c1b64cdabafd15f4d236bbda5521964d687afa1f833d4022f96c7ffab5dd4471aba0190be588f092d156bf14a50b794895fb3286ec899bcf7
+1.21.6	fabric-api-0.128.2+1.21.6.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/F5TVHWcE/fabric-api-0.128.2%2B1.21.6.jar	b6d0ec0aec40069cb1fa2159c126d027d7f95e3f6260a3e88ebe9c47f3cb716d1170af8e2e4ff3d4108ce5eeaea70002a889547578374d4d6dfa45755e99431e
+1.21.7	fabric-api-0.129.0+1.21.7.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/JntuF9Ul/fabric-api-0.129.0%2B1.21.7.jar	43bf6af145a6b450503a6d7e7ec9a34912bd1494969b5d8861067f0f846cf710805415fb0fbc93c9ae9f5164d45c7649342f84b4f34552b2abdd892fd3b9838e
+1.21.8	fabric-api-0.136.1+1.21.8.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/g58ofrov/fabric-api-0.136.1%2B1.21.8.jar	eb1a6b5fc9912c68409493f10f43c3b61adda1d789ede9c83b16d0a95a2eb96bd630472866e163960479eb1b4d1196d09ade5aadc9da62624e800640c706c4a9
+1.21.9	fabric-api-0.134.1+1.21.9.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/vczmWJBj/fabric-api-0.134.1%2B1.21.9.jar	e9e23dfc1bbe27891be06bfb07f1ff0121a0e5e46bbf73910999b119d7eb15ee15be7f5feb926873c38e7a505a7a2cd6f343db672ec5d0e371b26ffe3591dd84
+1.21.10	fabric-api-0.138.4+1.21.10.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/tV4Gc0Zo/fabric-api-0.138.4%2B1.21.10.jar	5e64c53391dfd1c059777d671c52be17a4e27a29d9bd7340ea9e3f55ce7a770b38db0a15e0966e981ee8c1b9372fb89543a278521624689268acebb85bd5c6e9
+1.21.11	fabric-api-0.141.6+1.21.11.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/6qAuTtLR/fabric-api-0.141.6%2B1.21.11.jar	852d3682c4f353fd0ca86546af8578513e8bcf628377fa9d49c556bc59c5024c69ab56c92fc6dfba11fed19e4316a3f5636e7e07fd3d96f7043b531aef59b637
+26.1	fabric-api-0.155.3+26.1.2.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/3dM0X6ou/fabric-api-0.155.3%2B26.1.2.jar	fa0308b42e9cd0dc3ff946f246d199d74547e0c946d7e3c9780a2537155307baf25129f69bd1349273babf879ffb4608b7e4af0740938f9c0f7b371b1c67d6ca
+26.1.1	fabric-api-0.155.3+26.1.2.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/3dM0X6ou/fabric-api-0.155.3%2B26.1.2.jar	fa0308b42e9cd0dc3ff946f246d199d74547e0c946d7e3c9780a2537155307baf25129f69bd1349273babf879ffb4608b7e4af0740938f9c0f7b371b1c67d6ca
+26.1.2	fabric-api-0.155.3+26.1.2.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/3dM0X6ou/fabric-api-0.155.3%2B26.1.2.jar	fa0308b42e9cd0dc3ff946f246d199d74547e0c946d7e3c9780a2537155307baf25129f69bd1349273babf879ffb4608b7e4af0740938f9c0f7b371b1c67d6ca
+26.2	fabric-api-0.161.0+26.2.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/ewUK83HI/fabric-api-0.161.0%2B26.2.jar	2502fa5ade78e9a120b3747bc1a9a2167d6671743bea45bf115d3174c94121aeda87c549446d1a604a9c11fb828de17a551e3514ce42f3e93069dd14bdaee55b
+26.3	fabric-api-0.161.0+26.3.jar	https://cdn.modrinth.com/data/P7dR8mSH/versions/bNnaTiuM/fabric-api-0.161.0%2B26.3.jar	ed6b2586d6fde11fde8472f5a527c51e99b67026e46f94d4bfd85e7e28ce5ee299173ee16ad576ceb51f39f98d30a811086a6deb1a86a524859cc16e12da109d

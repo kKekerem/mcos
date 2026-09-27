@@ -1,75 +1,231 @@
+// MCOS Link — çok sürümlü Fabric derlemesi
+//
+// ── Düzen ──────────────────────────────────────────────────────────────────
+//   common/          sürümden bağımsız her şey (tel protokolü, topoloji,
+//                    aktarım, komut ağacı); hiçbir Minecraft sınıfı içe
+//                    aktarmaz
+//   fabric-yarn/     Minecraft'a dokunan ince katman, Yarn adlarıyla
+//                    (1.20.5–1.21.11); src/perm-level ve src/perm-check tek
+//                    gerçek API kırılmasının iki yüzü
+//   fabric-mojang/   aynı katman, 26.x'in resmî adlarıyla
+//   targets/<etiket> her jar için bir alt proje (bkz. settings.gradle)
+//
+// Çıktı: ../../dist/mods/link/ altında her hedef için
+// mcos-link-fabric-<etiket>.jar, her Minecraft sürümü için Fabric API jar'ı
+// ve MCOS'un Go tarafının okuduğu index-fabric.tsv.
+
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+
 plugins {
-    // Fabric Loom: Minecraft'ı indirir, eşlemeleri uygular, mod jar'ını üretir.
-    id 'fabric-loom' version '1.11-SNAPSHOT'
-    id 'maven-publish'
+    id 'base'
+    // ── Loom sürümü: neden 1.17.21, neden 1.18 değil? ──────────────────────
+    // 1.18.x'in Gradle modül üst verisi "org.gradle.plugin.api-version 9.7.0"
+    // istiyor; bu makinedeki Gradle 9.6.1 onu "No matching variant" ile
+    // reddetti (ölçüldü). Fabric'in 26.3 duyurusu da Loom 1.17 + Gradle 9.6.0
+    // öneriyor. 1.17.21, 1.17 hattının son sürümü (maven-metadata.xml).
+    //
+    // İki eklenti AYNI yapıdan gelir: "-remap" Yarn/intermediary'li eski
+    // sürümler için, düz "fabric-loom" 26.x'in eşlemesiz düzeni için.
+    id 'net.fabricmc.fabric-loom-remap' version '1.17.21' apply false
+    id 'net.fabricmc.fabric-loom' version '1.17.21' apply false
 }
 
-version = project.mod_version
-group = project.maven_group
-
-base {
-    archivesName = project.archives_base_name
+/** targets/<etiket>/target.properties'i okur. */
+def readTarget(File dir) {
+    def t = new Properties()
+    new File(dir, 'target.properties').withReader('UTF-8') { t.load(it) }
+    t.setProperty('tag', dir.name)
+    return t
 }
 
-repositories {
-    // Fabric API buradan gelir.
-    maven { url = 'https://maven.fabricmc.net/' }
-    mavenCentral()
-}
+def targetOf = [:]   // alt proje → target.properties
 
-dependencies {
-    minecraft "com.mojang:minecraft:${project.minecraft_version}"
-    mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+subprojects { p ->
+    def t = readTarget(p.projectDir)
+    targetOf[p] = t
+    def yarn = t.adapter == 'yarn'
 
-    // Fabric API'nin TAMAMI değil, yalnızca gereken modülleri isteseydik
-    // daha küçük olurdu; ama MCOS sunucularında Fabric API zaten kuruludur
-    // (ViaFabric onu istiyor), bu yüzden tamamına bağlanmak ek bir indirme
-    // yükü getirmiyor.
-    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
-}
+    apply plugin: yarn ? 'net.fabricmc.fabric-loom-remap' : 'net.fabricmc.fabric-loom'
 
-processResources {
-    inputs.property "version", project.version
+    group = rootProject.maven_group
+    version = "${rootProject.mod_version}+${t.tag}"
+    base.archivesName = 'mcos-link-fabric'
 
-    filesMatching("fabric.mod.json") {
-        // Sürüm numarası TEK YERDE (gradle.properties) dursun: fabric.mod.json
-        // içine elle yazılan bir sürüm, er ya da geç gradle.properties'ten
-        // ayrılır ve kullanıcı hangi sürümü çalıştırdığını bilemez.
-        expand "version": project.version
+    repositories {
+        maven { url = 'https://maven.fabricmc.net/' }
+        mavenCentral()
     }
-}
 
-tasks.withType(JavaCompile).configureEach {
-    // Minecraft 1.20.5+ Java 21 ister.
-    it.options.release = 21
-    it.options.encoding = "UTF-8"
-}
+    sourceSets.main.java.srcDirs = [
+            rootProject.file('common/src/main/java'),
+            rootProject.file("fabric-${t.adapter}/src/main/java"),
+    ] + (t.perms ? [rootProject.file("fabric-yarn/src/${t.perms}/java")] : [])
+    sourceSets.main.resources.srcDirs = [rootProject.file('common/src/main/resources')]
 
-java {
-    withSourcesJar()
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
-}
+    dependencies {
+        minecraft "com.mojang:minecraft:${t.minecraft_version}"
+        if (yarn) {
+            mappings "net.fabricmc:yarn:${t.yarn_mappings}:v2"
+            modImplementation "net.fabricmc:fabric-loader:${rootProject.loader_version}"
+            modImplementation "net.fabricmc.fabric-api:fabric-api:${t.fabric_version}"
+        } else {
+            // 26.x karartılmamış: eşleme satırı yok, "mod*" yapılandırmaları
+            // yerine düz implementation (Fabric'in 26.1 geçiş notu).
+            implementation "net.fabricmc:fabric-loader:${rootProject.loader_version}"
+            implementation "net.fabricmc.fabric-api:fabric-api:${t.fabric_version}"
+        }
+    }
 
-jar {
-    from("LICENSE") {
-        rename { "${it}_${project.base.archivesName.get()}" }
+    // fabric.mod.json'daki depends.minecraft: YALNIZCA doğrulanan sürümler,
+    // JSON dizisi olarak (Fabric Loader dizide "herhangi biri" diye okur;
+    // işlecsiz bir sürüm TAM eşitliktir, yani "26.1" 26.1.1'i kapsamaz).
+    def mcList = t.supported.split(',').collect { it.trim() }.findAll { it }
+    def fmj = [
+            version           : p.version.toString(),
+            loader_min        : t.loader_min,
+            java              : t.java,
+            minecraft_versions: '[' + mcList.collect { '"' + it + '"' }.join(', ') + ']',
+    ]
+    p.processResources {
+        inputs.properties(fmj)
+        filesMatching('fabric.mod.json') { expand(fmj) }
+    }
+
+    p.tasks.withType(JavaCompile).configureEach {
+        // 1.20.5–1.21.11 Java 21, 26.x Java 25 ister.
+        options.release = t.java as int
+        options.encoding = 'UTF-8'
+    }
+
+    p.jar {
+        from(rootProject.file('LICENSE')) { rename { "${it}_mcos-link" } }
     }
 }
 
 // ── MCOS'a teslim ───────────────────────────────────────────────────────────
-//
-// Daemon, modu SABİT bir adla arar (mcos-link.jar); sürüm numarası içeren bir
-// dosya adı, her yükseltmede daemon'un arama yolunu güncellemeyi gerektirirdi.
-tasks.register('deployToMcos', Copy) {
-    dependsOn tasks.remapJar
-    from tasks.remapJar.archiveFile
-    into rootProject.file("../../dist/mods")
-    rename { "mcos-link.jar" }
+
+def linkDir = rootProject.file('../../dist/mods/link')
+def fapiCache = layout.buildDirectory.dir('fabric-api').get().asFile
+
+/** fabric-api.tsv: Minecraft sürümü → [dosya, adres, sha512]. */
+def readPins() {
+    def pins = [:]
+    rootProject.file('fabric-api.tsv').eachLine('UTF-8') { line ->
+        if (line.isBlank() || line.startsWith('#')) {
+            return
+        }
+        def f = line.split('\t')
+        if (f.length != 4) {
+            throw new GradleException("fabric-api.tsv: bozuk satır: ${line}")
+        }
+        pins[f[0]] = [file: f[1], url: f[2], sha512: f[3]]
+    }
+    return pins
+}
+
+def sha512Of(File f) {
+    def md = MessageDigest.getInstance('SHA-512')
+    f.withInputStream { s ->
+        byte[] buf = new byte[65536]
+        int n
+        while ((n = s.read(buf)) > 0) {
+            md.update(buf, 0, n)
+        }
+    }
+    return md.digest().encodeHex().toString()
+}
+
+tasks.register('fetchFabricApi') {
+    description = "fabric-api.tsv'deki Fabric API jar'larını indirir ve sha512'lerini doğrular"
+    inputs.file('fabric-api.tsv')
+    outputs.dir(fapiCache)
     doLast {
-        println "mcos-link.jar -> dist/mods/"
+        fapiCache.mkdirs()
+        readPins().values().toList().unique { it.file }.each { pin ->
+            def out = new File(fapiCache, pin.file)
+            if (out.isFile() && sha512Of(out) == pin.sha512) {
+                return // önbellekte ve sağlam
+            }
+            logger.lifecycle("indiriliyor: ${pin.file}")
+            def tmp = new File(fapiCache, pin.file + '.part')
+            def conn = URI.create(pin.url).toURL().openConnection()
+            // Modrinth, tanımlayıcı bir User-Agent olmadan gelen istekleri
+            // kısıtlayabileceğini belgeliyor.
+            conn.setRequestProperty('User-Agent', 'mcos-link-build (github.com/mcos/mcos)')
+            conn.inputStream.withStream { s -> Files.copy(s, tmp.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+            def got = sha512Of(tmp)
+            if (got != pin.sha512) {
+                tmp.delete()
+                throw new GradleException("${pin.file}: sha512 uyuşmuyor (beklenen ${pin.sha512}, gelen ${got})")
+            }
+            Files.move(tmp.toPath(), out.toPath(), StandardCopyOption.REPLACE_EXISTING)
+        }
     }
 }
 
-tasks.named('build') { finalizedBy 'deployToMcos' }
+tasks.register('deployLink') {
+    description = 'Jar\'ları, Fabric API\'yi ve index-fabric.tsv\'yi dist/mods/link\'e koyar'
+    dependsOn 'fetchFabricApi'
+    subprojects.each { p ->
+        dependsOn p.tasks.named(p.plugins.hasPlugin('net.fabricmc.fabric-loom-remap') ? 'remapJar' : 'jar')
+    }
+    outputs.dir(linkDir)
+    // HER ZAMAN çalışır. Girdi bildirilmediği için Gradle bu görevi "güncel"
+    // sayıyordu: 2026-09-27'de common/ değişti, hedef jar'lar yeniden
+    // derlendi ama dist/mods/link'te ESKİ jar'lar kaldı ("16 up-to-date").
+    // Yaklaşık 20 dosya kopyalamak ucuz; yanlış jar'ı imaja koymak değil.
+    outputs.upToDateWhen { false }
+    doLast {
+        def pins = readPins()
+        def rows = []       // [mc, jar, fabric-api]
+        def seen = [:]
+        subprojects.sort { it.name }.each { p ->
+            def t = targetOf[p]
+            def task = p.tasks.getByName(p.plugins.hasPlugin('net.fabricmc.fabric-loom-remap') ? 'remapJar' : 'jar')
+            def jarName = "mcos-link-fabric-${t.tag}.jar"
+            linkDir.mkdirs()
+            Files.copy(task.archiveFile.get().asFile.toPath(), new File(linkDir, jarName).toPath(),
+                    StandardCopyOption.REPLACE_EXISTING)
+            t.supported.split(',').collect { it.trim() }.findAll { it }.each { mc ->
+                if (seen[mc]) {
+                    throw new GradleException("${mc} iki hedefte birden: ${seen[mc]} ve ${t.tag}")
+                }
+                seen[mc] = t.tag
+                def pin = pins[mc]
+                if (pin == null) {
+                    throw new GradleException("fabric-api.tsv'de ${mc} yok")
+                }
+                Files.copy(new File(fapiCache, pin.file).toPath(), new File(linkDir, pin.file).toPath(),
+                        StandardCopyOption.REPLACE_EXISTING)
+                rows << [mc, jarName, pin.file]
+            }
+        }
+        def extra = pins.keySet() - seen.keySet()
+        if (extra) {
+            throw new GradleException("fabric-api.tsv'de hiçbir hedefin desteklemediği sürüm: ${extra}")
+        }
+
+        def sb = new StringBuilder()
+        sb << '# MCOS Link — Fabric jar dizini (mods/mcos-link derlemesi üretir; elle düzenlemeyin)\n'
+        sb << '#\n'
+        sb << '# Biçim (SEKME ile ayrılmış):\n'
+        sb << '#   fabric<TAB><minecraft sürümü><TAB><mod jar\'ı><TAB><Fabric API jar\'ı>\n'
+        sb << '#\n'
+        sb << '# Her satır TAM bir sürümdür ve o sürümde gerçek bir sunucuda doğrulandı.\n'
+        sb << '# Burada olmayan bir sürüme mod KURULMAMALI: Fabric\'te Minecraft\'ın iç\n'
+        sb << '# yapısı sürümden sürüme değişir ve yanlış jar sunucuyu düşürür (1.21.11 jar\'ı\n'
+        sb << '# 1.21.1\'de açılışta NoSuchFieldError ile düşüyordu). Jar\'ın fabric.mod.json\'ı\n'
+        sb << '# da yalnızca bu sürümleri kabul eder; Fabric Loader başkasını açıkça reddeder.\n'
+        sb << '#\n'
+        sb << '# "26.3+" gibi açık uçlu bir satır BİLEREK yok: Fabric modu Minecraft\'ın\n'
+        sb << '# iç sınıflarına bağlanır (Paper eklentisi gibi kararlı bir API\'ye değil),\n'
+        sb << '# bu yüzden denenmemiş bir sonraki sürümde çalışacağı varsayılamaz.\n'
+        rows.each { r -> sb << "fabric\t${r[0]}\t${r[1]}\t${r[2]}\n" }
+        new File(linkDir, 'index-fabric.tsv').setText(sb.toString(), 'UTF-8')
+        logger.lifecycle("dist/mods/link: ${subprojects.size()} mod jar'ı, ${rows.size()} sürüm")
+    }
+}
+
+tasks.named('build') { dependsOn 'deployLink' }

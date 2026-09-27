@@ -2,8 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../models/console.dart';
 import '../models/server.dart';
+import '../services/errors.dart';
 import '../theme/palette.dart';
+import '../widgets/backup_policy_tile.dart';
 import '../widgets/mcos_logo.dart';
 
 /// Tek bir sunucunun ayrıntısı: canlı konsol ve komut satırı.
@@ -71,34 +74,23 @@ class _ServerDetailScreenState extends State<ServerDetailScreen> {
         'id': widget.server.id,
         'cursor': _cursor,
       });
-      final entries = r['entries'];
-      final next = (r['cursor'] as num?)?.toInt() ?? _cursor;
-
-      if (entries is List && entries.isNotEmpty) {
-        final fresh = <String>[];
-        for (final e in entries) {
-          if (e is Map<String, dynamic>) {
-            final msg = e['message'] ?? e['text'] ?? e['line'];
-            if (msg is String) fresh.add(msg);
-          } else if (e is String) {
-            fresh.add(e);
+      final chunk = ConsoleChunk.fromJson(r, _cursor);
+      final next = chunk.cursor;
+      final fresh = chunk.lines;
+      if (fresh.isNotEmpty && mounted) {
+        setState(() {
+          _lines.addAll(fresh);
+          if (_lines.length > _maxLines) {
+            _lines.removeRange(0, _lines.length - _maxLines);
           }
-        }
-        if (fresh.isNotEmpty && mounted) {
-          setState(() {
-            _lines.addAll(fresh);
-            if (_lines.length > _maxLines) {
-              _lines.removeRange(0, _lines.length - _maxLines);
-            }
-            _error = null;
-          });
-          _scrollToEnd();
-        }
+          _error = null;
+        });
+        _scrollToEnd();
       }
       _cursor = next;
       if (mounted && _error != null) setState(() => _error = null);
     } catch (e) {
-      if (mounted) setState(() => _error = e.toString());
+      if (mounted) setState(() => _error = friendlyError(e));
     } finally {
       _busy = false;
     }
@@ -178,6 +170,8 @@ class _ServerDetailScreenState extends State<ServerDetailScreen> {
                 style: const TextStyle(color: Palette.textDim, fontSize: 12),
               ),
             ),
+            // Otomatik yedek planı ve sonraki yedek; dokununca değiştirilir.
+            BackupPolicyTile(serverId: s.id, query: widget.query),
             if (_error != null)
               Container(
                 width: double.infinity,

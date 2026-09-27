@@ -6,6 +6,7 @@ import (
 
 	"mcos/internal/fbui"
 	"mcos/internal/ipcclient"
+	"mcos/internal/remote"
 )
 
 // Bu dosya UZAKTAN KONTROL ve SSH pencerelerini çizer.
@@ -96,6 +97,8 @@ func (a *App) showRemoteModal(st ipcclient.RemoteStatus) {
 			"erişimi kesilir.",
 		)
 		actions = []ListItem{
+			// QR EN ÜSTTE: elle yazmak artık istisna, kolay yol değil.
+			{Label: "QR ile bağlan (telefonla okut)", Value: "qr"},
 			{Label: "Jetonu yenile", Value: "rotate"},
 			{Label: "Uzaktan kontrolü kapat", Value: "disable"},
 		}
@@ -107,6 +110,12 @@ func (a *App) showRemoteModal(st ipcclient.RemoteStatus) {
 			key, ok := it.Value.(string)
 			if !ok {
 				return false // bilgi satırı: pencere kapanmasın
+			}
+			if key == "qr" {
+				// QR yerel olarak üretiliyor: RPC GEREKMEZ, çünkü
+				// gereken her şey elimizdeki durum anlık görüntüsünde.
+				app.showPairQR(st)
+				return true
 			}
 			app.runRemoteAction(key)
 			return true
@@ -185,6 +194,28 @@ func (a *App) showSSHModal(st ipcclient.SSHStatus) {
 		return
 	}
 
+	a.OpenModal(NewListModal("SSH", "",
+		append(infoRows(sshModalLines(st)), sshActions(st)...),
+		func(app *App, _ int, it ListItem) bool {
+			key, ok := it.Value.(string)
+			if !ok {
+				return false
+			}
+			app.runSSHAction(key)
+			return true
+		}))
+}
+
+// sshNoteWidth is the widest note line that fits the SSH window.
+const sshNoteWidth = 46
+
+// sshModalLines builds the explanatory rows of the SSH window.
+//
+// Ayrı bir işlev, çünkü sınanabilir olmalı: bu pencere kullanıcının SSH'ın
+// NEDEN çalışmadığını öğrendiği TEK yer. Eskiden daemon'un "Note" alanı hiç
+// gösterilmiyordu; sunucu çöktüğünde kullanıcı yalnızca "açık ama
+// çalışmıyor" görüyordu, nedeni (ör. port dolu) mcosd günlüğünde kalıyordu.
+func sshModalLines(st ipcclient.SSHStatus) []string {
 	addr := "adres yok"
 	if len(st.Addresses) > 0 {
 		addr = st.Addresses[0]
@@ -215,39 +246,81 @@ func (a *App) showSSHModal(st ipcclient.SSHStatus) {
 		}
 	}
 
-	if st.PasswordSet {
-		lines = append(lines, "Parola: kurulu")
-	} else {
-		lines = append(lines, "Parola: YOK — parolasız giriş yapılamaz.")
+	switch {
+	case st.PasswordSet:
+		lines = append(lines, "Parola: kurulu (kullanıcı adı: root)")
+	case st.Keys > 0:
+		// Daemon, kalıcı bir parola yokken parola girişini KAPATIR (imajın
+		// varsayılan root parolasıyla girilmesin diye). Kullanıcı parolayla
+		// denerse "Permission denied" alır; nedenini burada görmeli.
+		lines = append(lines,
+			"Parola: yok — yalnızca açık anahtarla girilir.",
+			"(Parola girişi, parola koyunca açılır.)")
+	default:
+		lines = append(lines, "Parola: YOK — önce bir parola koyun.")
 	}
 	if st.Keys > 0 {
 		lines = append(lines, fmt.Sprintf("Açık anahtar: %d adet", st.Keys))
 	}
 
+	if note := strings.TrimSpace(st.Note); note != "" {
+		lines = append(lines, "")
+		for _, part := range strings.Split(note, "; ") {
+			lines = append(lines, sshWrap("! "+part, sshNoteWidth)...)
+		}
+	}
+	return lines
+}
+
+// sshActions lists the selectable actions of the SSH window.
+func sshActions(st ipcclient.SSHStatus) []ListItem {
 	actions := []ListItem{
 		{Label: "Parola koy / değiştir", Value: "password"},
 	}
-	if st.Enabled {
+	switch {
+	case st.Enabled:
 		actions = append(actions, ListItem{Label: "SSH'ı kapat", Value: "disable"})
-	} else {
+	case !st.PasswordSet && st.Keys == 0:
+		// Parolasız ve anahtarsız açmayı daemon reddeder ("önce bir parola
+		// koyun"). Kullanıcıyı hataya yürütüp geri göndermek yerine iki adımı
+		// tek eylemde birleştiriyoruz.
+		actions = append(actions, ListItem{Label: "Parola koy ve SSH'ı aç", Value: "password+enable"})
+	default:
 		actions = append(actions, ListItem{Label: "SSH'ı aç", Value: "enable"})
 	}
+	return actions
+}
 
-	a.OpenModal(NewListModal("SSH", "",
-		append(infoRows(lines), actions...),
-		func(app *App, _ int, it ListItem) bool {
-			key, ok := it.Value.(string)
-			if !ok {
-				return false
+// sshWrap breaks s into lines of at most n runes, at spaces when possible.
+func sshWrap(s string, n int) []string {
+	var out []string
+	r := []rune(s)
+	indent := ""
+	for len(r) > n-len([]rune(indent)) {
+		w := n - len([]rune(indent))
+		cut := w
+		for i := w; i > w/2; i-- {
+			if r[i] == ' ' {
+				cut = i
+				break
 			}
-			app.runSSHAction(key)
-			return true
-		}))
+		}
+		out = append(out, indent+strings.TrimRight(string(r[:cut]), " "))
+		r = []rune(strings.TrimLeft(string(r[cut:]), " "))
+		// Devam satırları içeriden başlar: hangi notun devamı olduğu
+		// okunabilsin.
+		indent = "  "
+	}
+	return append(out, indent+string(r))
 }
 
 func (a *App) runSSHAction(what string) {
-	if what == "password" {
-		a.openSSHPasswordPrompt()
+	switch what {
+	case "password":
+		a.openSSHPasswordPrompt(false)
+		return
+	case "password+enable":
+		a.openSSHPasswordPrompt(true)
 		return
 	}
 	a.Emit(fbui.EventBusy, "uygulanıyor…")
@@ -275,8 +348,9 @@ func (a *App) runSSHAction(what string) {
 	}()
 }
 
-// openSSHPasswordPrompt asks for the shell password.
-func (a *App) openSSHPasswordPrompt() {
+// openSSHPasswordPrompt asks for the shell password; enableAfter also turns
+// SSH on once the password is stored.
+func (a *App) openSSHPasswordPrompt(enableAfter bool) {
 	a.OpenModal(NewTextModal("SSH parolası", "Yeni parola",
 		func(app *App, pw string) {
 			app.Emit(fbui.EventBusy, "parola ayarlanıyor…")
@@ -285,10 +359,23 @@ func (a *App) openSSHPasswordPrompt() {
 			go func() {
 				st, err := app.cl.SSHSetPassword(pw)
 				if err != nil {
-					app.Fail("parola ayarlanamadı", err)
+					// Bağlam "SSH parolası": daemon'un iletisi zaten ne olduğunu
+					// söylüyor ("parola kaydedildi ama SSH yeniden
+					// başlatılamadı: ..." gibi); "ayarlanamadı" öneki bu
+					// durumda yanlış olurdu.
+					app.Fail("SSH parolası", err)
 					return
 				}
-				app.Emit(fbui.EventOK, "SSH parolası ayarlandı")
+				app.Emit(fbui.EventOK, "SSH parolası ayarlandı (kalıcı)")
+				if enableAfter && !st.Enabled {
+					st, err = app.cl.SSHEnable(0)
+					if err != nil {
+						app.Fail("SSH açılamadı", err)
+						return
+					}
+					app.Emit(fbui.EventOK, "SSH açıldı")
+					app.refreshAsync()
+				}
 				app.showSSHModal(st)
 			}()
 		}).
@@ -349,4 +436,111 @@ func shortText(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// showPairQR opens the QR pairing dialog.
+//
+// ── Neden adres BURADA seçiliyor ────────────────────────────────────────────
+//
+// QR'a hangi adresin gireceği, telefonun NEREDEN bağlanacağına bağlı:
+//
+//   - Aynı ağdaysa yerel adres en hızlısı ve en güvenilirisi.
+//   - Başka bir ağdaysa yalnızca tünel adresi işe yarar.
+//
+// Tünel adresi VARSA o seçiliyor, çünkü kullanıcının isteği açıkça "aynı
+// internette bile bağlı olmadan bağlanabilsin"di. Tünel yoksa yerel adrese
+// düşülüyor ve pencere bunu AÇIKÇA yazıyor — sessizce yerel adres verip
+// "neden dışarıdan bağlanamıyorum" sorusuna yol açmıyor.
+func (a *App) showPairQR(st ipcclient.RemoteStatus) {
+	hosts := pairHosts(st.Addresses)
+	if len(hosts) == 0 {
+		a.OpenModal(NewInfoModal("QR ile bağlan", []string{
+			"Bu makinenin ağ adresi yok.",
+			"",
+			"Önce Ağ bölümünden bir bağlantı kurun.",
+		}))
+		return
+	}
+
+	uri := remote.PairURIHosts(hosts, st.Port, st.Token, st.Fingerprint)
+	a.OpenModal(newQRModal("QR ile bağlan", uri, pairQRLines(st, hosts)))
+}
+
+// maxPairHosts bounds how many addresses go into the QR.
+//
+// Her adres QR'ı ~18 bayt büyütüyor; büyüyen QR daha küçük modül demek ve
+// 800x600'de sığmamaya başlıyor. Üç adres, gerçek makinelerde görülen
+// (kablo + Wi-Fi + bir sanal bağdaştırıcı) durumu karşılıyor.
+const maxPairHosts = 3
+
+// pairHosts orders the machine's addresses by how likely a phone reaches them.
+//
+// ── Neden sıralama gerekiyor ────────────────────────────────────────────────
+//
+// hostAddresses arayüz sırasıyla gelir. VirtualBox'ta NAT bağdaştırıcısı
+// (10.0.2.15) çoğunlukla İLK sıradadır ve telefon ona HİÇBİR ZAMAN ulaşamaz:
+// NAT'ın arkasındaki sanal makineye dışarıdan bağlantı gitmez. Eskiden QR
+// yalnızca ilk adresi taşıdığı için kullanıcı "QR'ı okuttum, bağlanmıyor"
+// yaşıyordu. Şimdi yerel ağ adresleri öne, NAT ve kendinden atanmış
+// (169.254) adresler sona gidiyor; telefon sırayla deniyor.
+func pairHosts(addrs []string) []string {
+	var iyi, zayif []string
+	for _, ad := range addrs {
+		ad = strings.TrimSpace(ad)
+		if ad == "" {
+			continue
+		}
+		if isNATOnlyAddr(ad) || strings.HasPrefix(ad, "169.254.") {
+			zayif = append(zayif, ad)
+		} else {
+			iyi = append(iyi, ad)
+		}
+	}
+	out := append(iyi, zayif...)
+	if len(out) > maxPairHosts {
+		out = out[:maxPairHosts]
+	}
+	return out
+}
+
+// isNATOnlyAddr reports the fixed guest address of VirtualBox/QEMU user NAT.
+//
+// 10.0.2.0/24 her iki öykünücünün de varsayılan NAT ağı; misafir her zaman
+// 10.0.2.15 alır. Bu ağdaki bir adres, telefonun erişemeyeceği bir adrestir.
+func isNATOnlyAddr(ad string) bool {
+	return strings.HasPrefix(ad, "10.0.2.")
+}
+
+// pairQRLines is the text shown beside the pairing QR.
+//
+// Değerler METİN olarak da yazılıyor: kamerası olmayan ya da QR okuyamayan
+// telefon aynı pencereden elle girebilmeli.
+func pairQRLines(st ipcclient.RemoteStatus, hosts []string) []string {
+	satir := []string{
+		"Telefonda MCOS uygulamasını açıp",
+		"\"QR ile bağlan\"a dokunun.",
+		"",
+		fmt.Sprintf("Adres: %s   Port: %d", hosts[0], st.Port),
+	}
+	if len(hosts) > 1 {
+		satir = append(satir, "Diğer adresler: "+strings.Join(hosts[1:], ", "))
+	}
+	if isNATOnlyAddr(hosts[0]) {
+		// Tek adres NAT ise QR okunur ama bağlantı ASLA kurulmaz; bunu
+		// şimdi söylemek, kullanıcının telefonda saatlerce aramasını önler.
+		satir = append(satir, "",
+			"UYARI: bu adres sanal makinenin NAT ağı —",
+			"telefon ulaşamaz. VirtualBox'ta ağ",
+			"bağdaştırıcısını \"Köprü\" (Bridged) yapın.")
+	} else {
+		satir = append(satir, "Dışarıdan bağlanmak için tünel gerekir.")
+	}
+	if st.Fingerprint == "" {
+		// Bu DURUST olmak zorunda: parmak izi olmadan telefon karşı tarafı
+		// doğrulayamaz ve jetonu körlemesine gönderir.
+		satir = append(satir, "",
+			"UYARI: sertifika parmak izi yok —",
+			"telefon karşı tarafı doğrulayamaz.")
+	}
+	return satir
 }

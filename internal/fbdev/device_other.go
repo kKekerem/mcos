@@ -29,3 +29,9 @@ func (*Device) Flip(*image.RGBA) error {
 	return fmt.Errorf("fbdev: framebuffer yalnızca Linux'ta desteklenir")
 }
 func (*Device) Close() error { return nil }
+
+// Snapshot yalnızca Linux'ta anlamlı: geliştirme makinesinde çerçeve
+// arabelleği yok.
+func (*Device) Snapshot([]byte) error {
+	return fmt.Errorf("fbdev: framebuffer yalnızca Linux'ta desteklenir")
+}

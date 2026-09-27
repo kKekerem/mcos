@@ -1,27 +1,32 @@
 # Paper eklenti tanimi.
 #
-# api-version 1.21.11: TAM surum pinlidir, yalnizca ana surum degil.
+# api-version 1.20.5: bu, eklentinin yuklenebildigi EN ESKI surumdur.
 #
 # Bukkit 1.20.5'ten itibaren api-version'da minor surumu de kabul eder ve
-# "belirtilenden DUSUK surumlu sunucular eklentiyi yuklemeyi REDDEDER".
-# Teknik alt sinir aslinda 1.20.5'tir (Player#transfer o surumle geldi), ama
-# bu eklenti icin dogru olan sinir teknik degil ISLETIMSELDIR: MCOS kumesinde
-# HER dugum AYNI Minecraft surumunu calistirmak zorundadir — ../mcos-link/
-# gradle.properties bunu "farkli surumler farkli dunya uretir ve aktarilan
-# oyuncu baglantiyi kaybeder" diye yaziyor.
+# "belirtilenden DUSUK surumlu sunucular eklentiyi yuklemeyi REDDEDER";
+# daha YENI sunucular ise yukler. 1.20.5 teknik alt sinirdir: aktarimin
+# dayandigi Player#transfer o surumle geldi.
 #
-# Dolayisiyla 1.20.5 ya da 1.21.0 bir dugume yuklenmek ISTENMEZ: orada
-# eklenti calisir ama oyuncu sinirdan gectiginde bambaska bir dunyaya duser.
-# Tam surumu pinlemek, surum uyusmazligini "acilista reddedilen eklenti"ye
-# cevirir; alternatifi, aktarimin ortasinda kaybolan bir oyuncudur.
+# Yakalanan gercek hata: burada eskiden '1.21.11' yaziyordu ve gerekcesi
+# "kumede her dugum ayni Minecraft surumunu calistirmak zorunda, surum
+# uyusmazligi acilista reddedilsin" idi. Sonuc: 1.21.11'den eski her Paper
+# sunucusu eklentiyi "Unsupported API version 1.21.11" diye reddetti
+# (1.21.1'de olculdu) ve MCOS ortak dunyayi acarken "mcos-link modu kurulu
+# degil" dedi.
 #
-# Deger, gradle.properties'teki paper_api_version=1.21.11-R0.1-SNAPSHOT ve
-# offline-manifest.txt'teki "HEDEF SURUM: Minecraft 1.21.11" ile ayni olmali;
-# ucu birlikte degisir.
+# O gerekce artik GECERSIZ: MCOS, ortak dunyayi acarken esin sunucusunu
+# LinkSpec ile AYNI yazilim ve AYNI surumle kuruyor. Surum esitligini
+# eklentinin acilista zorlamasina gerek kalmadi; eklentinin isi yalnizca o
+# surumde CALISMAK.
+#
+# Bu tek jar 1.20.5 .. 26.3 arasindaki Paper ve Purpur surumlerinde gercek
+# sunucuda denendi; liste ve sonuclar dist/mods/link/index-paper.tsv
+# icindedir. Derleme paper-api 1.20.6 ile yapilir (bkz. gradle.properties).
+
 name: MCOSLink
 version: '${version}'
 main: gg.mcos.link.paper.McosLinkPlugin
-api-version: '1.21.11'
+api-version: '1.20.5'
 authors: [MCOS]
 description: >
   Birden cok MCOS cihazinin ayni dunyayi calistirmasini saglar. Dunya X

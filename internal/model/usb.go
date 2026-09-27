@@ -32,3 +32,20 @@ func (j USBJar) Origin() string {
 // Key uniquely identifies a jar across devices. İsim+boyut yeterli değildi:
 // iki farklı USB'deki aynı isim/boyuttaki dosyalar birleşiyordu.
 func (j USBJar) Key() string { return j.Device + "|" + j.RelPath }
+
+// USBServerFolder is a folder on a USB drive that can be imported as a server
+// (USB'den sunucu aktarma).
+type USBServerFolder struct {
+	Device    string `json:"device"`    // kaynak bölüm, ör. "/dev/sdb1"
+	RelPath   string `json:"relPath"`   // bölüm kökünden göreli yol ("" = kök)
+	Name      string `json:"name"`      // klasör adı (sunucunun önerilen adı)
+	Software  string `json:"software"`  // tahmin: paper, fabric, forge... (boş: tanınmadı)
+	MCVersion string `json:"mcVersion"` // tahmin (boş: bulunamadı)
+	HasWorld  bool   `json:"hasWorld"`
+	Mods      int    `json:"mods"`
+	Plugins   int    `json:"plugins"`
+	SizeBytes int64  `json:"sizeBytes"`
+	// Recognized: klasör sunucu olarak tanındı. false ise kullanıcı elle
+	// seçebilsin diye listelenen sıradan bir üst düzey klasördür.
+	Recognized bool `json:"recognized"`
+}

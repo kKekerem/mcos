@@ -43,18 +43,35 @@ class SystemStatus {
   }
 
   static SystemStatus fromJson(Map<String, dynamic> j) {
-    final cpu = (j['cpu'] as Map<String, dynamic>?) ?? const {};
-    final mem = (j['memory'] as Map<String, dynamic>?) ?? const {};
-    final net = (j['net'] as Map<String, dynamic>?) ?? const {};
+    // `as Map?` yerine tür denetimi: alan beklenmedik bir türde gelirse
+    // (daemon sürümü farklıysa) ekran ham bir TypeError göstermesin.
+    Map<String, dynamic> obj(Object? v) =>
+        v is Map<String, dynamic> ? v : const <String, dynamic>{};
+    final cpu = obj(j['cpu']);
+    final mem = obj(j['memory']);
+    final net = obj(j['net']);
 
-    // Adresler farklı biçimlerde gelebilir; hepsini metne çeviriyoruz.
+    // ── Düzeltilen gerçek hata ─────────────────────────────────────────────
+    // Eski kod net.addresses listesini okuyordu; gerçek mcosd'nin
+    // system.status yanıtında öyle bir alan YOK (ölçüldü). Adres
+    // net.localIP'de ve her ağ kartının ipv4 alanında:
+    //   "net": {"nics": [{"name": "eth0", "ipv4": "172.24.3.241", "up": true,
+    //            …}], "localIP": "172.24.3.241", "internet": true}
+    // Pano bu yüzden adres kartını hiç göstermiyordu. Eski ad da okunuyor.
     final addrs = <String>[];
-    final rawAddrs = net['addresses'];
-    if (rawAddrs is List) {
-      for (final a in rawAddrs) {
-        if (a is String && a.isNotEmpty) addrs.add(a);
+    void add(Object? a) {
+      if (a is String && a.isNotEmpty && !addrs.contains(a)) addrs.add(a);
+    }
+
+    add(net['localIP']);
+    final nics = net['nics'];
+    if (nics is List) {
+      for (final n in nics) {
+        if (n is Map<String, dynamic>) add(n['ipv4']);
       }
     }
+    final rawAddrs = net['addresses'];
+    if (rawAddrs is List) rawAddrs.forEach(add);
 
     return SystemStatus(
       systemName: j['systemName'] as String? ?? 'MCOS',

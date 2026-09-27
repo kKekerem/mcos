@@ -26,6 +26,12 @@ func (m *Manager) Detect() ([]model.JavaRuntime, error) {
 			return
 		}
 		seen[javaHome] = true
+		// Gömülü JRE zaten Get/List'te görünüyor. Burada "host" olarak
+		// index.json'a yazılsaydı kalıcı bölümde imaja bağlı bir kayıt
+		// kalır, sonraki imaj güncellemesinde eski sürüm dizesini taşırdı.
+		if m.isBuiltinHome(javaHome) {
+			return
+		}
 		javaBin := filepath.Join(javaHome, "bin", javaExe())
 		if _, err := os.Stat(javaBin); err != nil {
 			return

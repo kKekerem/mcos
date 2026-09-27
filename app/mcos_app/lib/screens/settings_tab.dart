@@ -157,12 +157,16 @@ class _SettingsTabState extends State<SettingsTab> {
         _card([
           _row('Ad', c.label.isEmpty ? '—' : c.label),
           _row('Adres', '${c.host}:${c.port}'),
-          if (c.fingerprint != null)
+          if (c.fingerprint != null && c.fingerprint!.isNotEmpty)
             _row(
               'Sertifika',
               // İlk 23 karakter: kullanıcı panelle karşılaştırırken bu kadarı
-              // yeter, tamamı ekranı doldururdu.
-              '${c.fingerprint!.substring(0, 23)}…',
+              // yeter, tamamı ekranı doldururdu. Boş ya da kısa bir değerde
+              // substring RangeError atar ve ayarlar sekmesi kırmızı hata
+              // ekranına dönerdi; uzunluk bu yüzden denetleniyor.
+              c.fingerprint!.length > 23
+                  ? '${c.fingerprint!.substring(0, 23)}…'
+                  : c.fingerprint!,
               mono: true,
               onCopy: () => _copy(c.fingerprint!, 'Parmak izi kopyalandı'),
             ),

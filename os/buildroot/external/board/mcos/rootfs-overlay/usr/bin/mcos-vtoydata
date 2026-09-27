@@ -1,0 +1,189 @@
+#!/bin/sh
+# mcos-vtoydata — Ventoy USB'sinde DOSYA tabanli kalici veri (/data).
+#
+# Kullanim:
+#   mcos-vtoydata bul              Ventoy veri bolumunu yazar: "<aygit> <dosya-sistemi>"
+#   mcos-vtoydata bagla            kalicilik dosyasini loop'a baglar, loop aygitini yazar
+#   mcos-vtoydata olustur [MiB]    kalicilik dosyasini olusturur (varsayilan 4096 MiB)
+#
+# Cikis kodlari: 0 tamam, 1 gercek hata, 3 bu ortamda gecerli degil
+# (Ventoy degil / dosya yok) — ariza degil.
+#
+# ══════════════════════════════════════════════════════════════════════════
+# NEDEN VAR
+# ══════════════════════════════════════════════════════════════════════════
+#
+# MCOS'u Ventoy'dan acan kullanici icin kalicilik HIC yoktu: mcos-persist
+# Ventoy'un bolum duzenine dokunmayi (dogru olarak) reddediyor, Ventoy'un
+# kendi kalicilik eklentisi ise MCOS'ta calismiyor. Eklenti .dat dosyasini
+# device-mapper ile sunar ve bunu dagitimin initramfs'indeki udev kurallariyla
+# tetikler (hook/default/ventoy-hook.sh: ventoy_add_udev_rule); MCOS'ta udev
+# ve device-mapper yok. Kullanici her acilista sihirbazi bastan dolduruyor,
+# kurdugu sunucular kayboluyordu.
+#
+# Cozum Ventoy'dan BAGIMSIZ: Ventoy'un veri bolumunde (ISO'larin durdugu
+# exFAT/NTFS/FAT32 bolum) /mcos/mcos-data.dat adli bir dosya, icinde ext4
+# (etiket MCOS-DATA). Acilista bu dosya loop ile /data'ya baglanir. Ventoy'un
+# kendi dosyalarina ve bolumlerine dokunulmaz; dosya Windows'tan silinerek
+# kaldirilabilir.
+#
+# Ventoy duzeni (Ventoy2Disk): 1. bolum veri (exFAT varsayilan, NTFS/FAT32
+# secilebilir), 2. bolum 32 MiB FAT16 "VTOYEFI". Ventoy USB'si VTOYEFI
+# etiketinden taninir (FAT16 @43, FAT32 @71).
+
+set -u
+
+DOSYA_YOL="mcos/mcos-data.dat"
+
+# NEDEN .dat VE NEDEN .ventoyignore: Ventoy veri bolumundeki .img dosyalarini
+# ONYUKLENEBILIR IMAJ sayip menuye koyar. Ilk surumde dosya mcos-data.img idi;
+# QEMU'da Ventoy 1.1.17 menusunde "mcos-data.img" mcos.iso'dan ONCE (varsayilan
+# satir) cikti ve Enter "error: no such partition" ile acilisi bozdu. .dat
+# uzantisini Ventoy listelemez (kendi kalicilik dosyalari da .dat); klasordeki
+# .ventoyignore da Ventoy'a klasoru hic taramamasini soyler.
+MNT=/run/mcos/ventoy
+
+log() { echo "mcos-vtoydata: $*" >&2; }
+die() { log "HATA: $*"; exit 1; }
+yok() { log "$*"; exit 3; }
+
+imza() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null; }
+imza_hex() { imza "$@" | od -An -tx1 | tr -d ' \n'; }
+
+# fs_tur, bir bolumun dosya sistemini super bloktan okur (busybox blkid TYPE
+# basmiyor; bkz. mcos-persist).
+fs_tur() {
+    case "$(imza "$1" 3 8)" in
+        "EXFAT   ") echo exfat; return ;;
+        "NTFS    ") echo ntfs3; return ;;
+    esac
+    [ "$(imza "$1" 82 5)" = "FAT32" ] && { echo vfat; return; }
+    case "$(imza "$1" 54 5)" in FAT1*) echo vfat; return ;; esac
+    echo ""
+}
+
+vtoyefi_mi() {
+    case "$(imza "$1" 43 11)$(imza "$1" 71 11)" in *VTOYEFI*) return 0 ;; esac
+    return 1
+}
+
+# bul, Ventoy veri bolumunu bulur: VTOYEFI tasiyan diskin 1. bolumu.
+bul() {
+    for efi in /sys/class/block/*; do
+        [ -e "$efi/partition" ] || continue
+        ad="$(basename "$efi")"
+        vtoyefi_mi "/dev/$ad" || continue
+        disk="$(basename "$(dirname "$(readlink -f "$efi")")")"
+        for p in /sys/class/block/"$disk"/"$disk"*; do
+            [ -e "$p/partition" ] || continue
+            [ "$(cat "$p/partition")" = 1 ] || continue
+            veri="/dev/$(basename "$p")"
+            tur="$(fs_tur "$veri")"
+            [ -n "$tur" ] || continue
+            echo "$veri $tur"
+            return 0
+        done
+    done
+    return 1
+}
+
+# bagli_mi, bolum zaten bagliysa baglama noktasini yazar.
+bagli_mi() {
+    awk -v d="$1" '$1 == d { print $2; exit }' /proc/mounts
+}
+
+# ac, veri bolumunu yazilabilir baglar ve baglama noktasini yazar.
+ac() {
+    veri="$1"; tur="$2"
+    nokta="$(bagli_mi "$veri")"
+    if [ -n "$nokta" ]; then
+        echo "$nokta"
+        return 0
+    fi
+    mkdir -p "$MNT"
+    # utf8: Ventoy bolumundeki Turkce dosya adlari bozulmasin (vfat icin).
+    case "$tur" in
+        vfat) mount -t vfat -o rw,utf8=1 "$veri" "$MNT" 2>/dev/null ;;
+        *)    mount -t "$tur" -o rw "$veri" "$MNT" 2>/dev/null ;;
+    esac || return 1
+    echo "$MNT"
+}
+
+komut="${1:-}"
+case "$komut" in
+    bul)
+        bul || yok "Ventoy USB'si bulunamadi"
+        ;;
+
+    bagla)
+        set -- $(bul) || true
+        [ $# -eq 2 ] || yok "Ventoy USB'si yok"
+        nokta="$(ac "$1" "$2")" || die "$1 baglanamadi ($2)"
+        f="$nokta/$DOSYA_YOL"
+        if [ ! -f "$f" ]; then
+            # Kullanici kaliciligi hic acmamis: bolumu birakalim ki Windows'a
+            # takildiginda "duzgun cikarilmadi" uyarisi olmasin.
+            [ "$nokta" = "$MNT" ] && umount "$MNT" 2>/dev/null
+            yok "kalicilik dosyasi yok ($DOSYA_YOL)"
+        fi
+        # Zaten bagli bir loop var mi (S99mcos restart yolu)?
+        mevcut="$(losetup -a 2>/dev/null | grep "$f" | head -1 | cut -d: -f1)"
+        if [ -n "$mevcut" ] && [ -b "$mevcut" ]; then
+            echo "$mevcut"
+            exit 0
+        fi
+        loop="$(losetup -f 2>/dev/null)" || die "bos loop aygiti yok"
+        losetup "$loop" "$f" 2>/dev/null || die "$f loop'a baglanamadi"
+        if [ "$(imza_hex "$loop" 1080 2)" != "53ef" ] || \
+           [ "$(imza "$loop" 1144 16 | tr -d '\000')" != "MCOS-DATA" ]; then
+            losetup -d "$loop" 2>/dev/null
+            die "$f bir MCOS veri dosyasi degil (ext4/MCOS-DATA bekleniyordu) — dokunulmadi"
+        fi
+        echo "$loop"
+        ;;
+
+    olustur)
+        MIB="${2:-4096}"
+        set -- $(bul) || true
+        [ $# -eq 2 ] || yok "Ventoy USB'si yok"
+        veri="$1"; tur="$2"
+        nokta="$(ac "$veri" "$tur")" || die "$veri baglanamadi ($tur)"
+        f="$nokta/$DOSYA_YOL"
+        if [ -e "$f" ]; then
+            loop="$(losetup -f)" && losetup "$loop" "$f" 2>/dev/null && {
+                etiket="$(imza "$loop" 1144 16 | tr -d '\000')"
+                losetup -d "$loop"
+                [ "$etiket" = "MCOS-DATA" ] && { log "kalicilik dosyasi zaten var: $f"; exit 0; }
+            }
+            die "$f var ama MCOS veri dosyasi degil — ustune yazilmadi"
+        fi
+        # FAT32'de tek dosya en fazla 4 GiB - 1 bayt olabilir.
+        [ "$tur" = vfat ] && [ "$MIB" -gt 4095 ] && MIB=4095
+        bos_kb="$(df -k "$nokta" 2>/dev/null | awk 'NR==2 {print $4}')"
+        [ -n "$bos_kb" ] || die "bos alan okunamadi"
+        # Ventoy bolumu kullanicinin ISO'larini tasiyor: en az 1 GiB bos
+        # kalsin; kalmiyorsa dosya kuculur, 1 GiB'in altina inmez.
+        sigar=$(( bos_kb / 1024 - 1024 ))
+        [ "$MIB" -gt "$sigar" ] && MIB="$sigar"
+        [ "$MIB" -ge 1024 ] || die "Ventoy bolumunde yer yok ($((bos_kb / 1024)) MiB bos; en az 2 GiB gerekir)"
+        mkdir -p "$nokta/mcos" || die "$nokta/mcos olusturulamadi"
+        : > "$nokta/mcos/.ventoyignore" 2>/dev/null || true
+        log "olusturuluyor: $f ($MIB MiB, $tur) — USB'nin hizina gore birkac dakika surebilir"
+        # Dosya SIFIRLA doldurulur: exFAT ve FAT seyrek dosya bilmez, cekirdek
+        # zaten sifir yazar. Yarim kalirsa (USB cekildi) yarim dosya silinir.
+        if ! dd if=/dev/zero of="$f.yarim" bs=4M count=$(( MIB / 4 )) conv=fsync 2>/dev/null; then
+            rm -f "$f.yarim"
+            die "dosya yazilamadi (USB dolu ya da cikarildi)"
+        fi
+        mkfs.ext4 -q -F -L MCOS-DATA "$f.yarim" >/dev/null 2>&1 || { rm -f "$f.yarim"; die "ext4 olusturulamadi"; }
+        mv "$f.yarim" "$f" || die "dosya adlandirilamadi"
+        sync
+        log "tamam: $f"
+        ;;
+
+    *)
+        echo "Kullanim: mcos-vtoydata {bul|bagla|olustur [MiB]}" >&2
+        exit 2
+        ;;
+esac
+exit 0

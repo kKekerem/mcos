@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"mcos/internal/drm"
 	"strings"
 
 	"mcos/internal/fbui"
@@ -92,6 +93,11 @@ func (a *App) drawDashboard(r image.Rectangle) {
 // ── Sunucular ───────────────────────────────────────────────────────────────
 
 func (a *App) drawServers(r image.Rectangle) {
+	// Detay, listenin YERİNE çizilir (alt durum, ayrı bölüm değil).
+	if d := a.detailState(); d != nil {
+		a.drawServerDetail(r, d)
+		return
+	}
 	u := a.ui
 	in := a.contentPanel(r, "Sunucular")
 	_, servers, _ := a.Snapshot()
@@ -113,6 +119,10 @@ func (a *App) drawServers(r image.Rectangle) {
 			break
 		}
 		card := image.Rect(in.Min.X, y, in.Max.X, y+cardH)
+		// Kart tıklanabilir: ilk tık seçer, seçili karta tık detayı açar
+		// (pointer.go zoneRow kuralı). Eskiden kartlar hiç bölge
+		// kaydetmiyordu ve fareyle sunucu seçilemiyordu.
+		a.addZone(card, zoneRow, i)
 		u.P.FillRoundRect(rect(card), u.M.Radius, u.Pal.Raised)
 		if i == cur {
 			col := u.Pal.Accent
@@ -133,7 +143,12 @@ func (a *App) drawServers(r image.Rectangle) {
 		}
 
 		nx := u.Text(cx+u.F.CellW+u.M.Gap, cy, s.Name, u.Pal.Text)
-		u.Text(nx+u.M.Gap*2, cy, string(s.Software)+" "+s.MCVersion, u.Pal.TextDim)
+		meta := string(s.Software) + " " + s.MCVersion
+		if s.RunningInstances > 1 {
+			// Bölünmüş dünya tek satırda görünür; kaç sunucu olduğu burada.
+			meta += fmt.Sprintf(" · ×%d sunucu", s.RunningInstances)
+		}
+		u.Text(nx+u.M.Gap*2, cy, meta, u.Pal.TextDim)
 
 		bw := u.TextWidth(label) + u.F.CellW*2
 		u.Badge(card.Max.X-u.M.PadX-bw, cy-u.F.CellH/6, label, col)
@@ -233,16 +248,24 @@ func (a *App) drawUSB(r image.Rectangle) {
 
 // javaOffer lists the Java majors MCOS can install.
 //
-// Sıra eski panelle aynı (1=17, 2=21, 3=11, 4=8) ama artık sayı tuşu yerine
-// listeden seçiliyor — hangi sürümün neye yaradığı da yazılı.
+// Sıra eski panelle aynı (1=17, 2=21, 3=11, 4=8; 25 sona, 5 olarak eklendi)
+// ama artık sayı tuşu yerine listeden seçiliyor — hangi sürümün neye
+// yaradığı da yazılı.
+//
+// ── Yakalanan gerçek hata: 26.x için yanlış yönlendirme ─────────────────────
+// Java 21'in notu "Minecraft 1.20.5 ve sonrası" idi ve Java 25 listede
+// yoktu. Oysa Mojang manifesti 26.1–26.3 için javaVersion.majorVersion = 25
+// diyor (bkz. java.RequiredJavaMajor): bu yazıya güvenip 26.3 için Java 21
+// kuran kullanıcının sunucusu UnsupportedClassVersionError ile düşerdi.
 var javaOffer = []struct {
 	major int
 	note  string
 }{
 	{17, "Minecraft 1.17 – 1.20.4"},
-	{21, "Minecraft 1.20.5 ve sonrası"},
+	{21, "Minecraft 1.20.5 – 1.21.11"},
 	{11, "Eski sürümler / bazı modlar"},
 	{8, "Minecraft 1.16 ve öncesi"},
+	{25, "Minecraft 26.1 ve sonrası"},
 }
 
 func (a *App) drawSoftware(r image.Rectangle) {
@@ -271,7 +294,13 @@ func (a *App) drawSoftware(r image.Rectangle) {
 			x := u.Text(in.Min.X+u.F.CellW+u.M.Gap, y,
 				fmt.Sprintf("Java %d", rt.Major), u.Pal.Text)
 			u.Text(x+u.M.Gap*2, y, rt.Version, u.Pal.TextDim)
-			u.TextRight(in.Max.X-u.M.PadX, y, rt.Vendor, u.Pal.TextFaint)
+			// Gömülü olan AYRICA belirtilir: kullanıcı onun indirilmediğini,
+			// imajla geldiğini ve kaldırılamayacağını görsün.
+			vendor := rt.Vendor
+			if rt.Builtin {
+				vendor = "gömülü · " + rt.Vendor
+			}
+			u.TextRight(in.Max.X-u.M.PadX, y, vendor, u.Pal.TextFaint)
 			y += u.F.CellH + u.M.PadY/2
 		}
 	} else {
@@ -289,13 +318,16 @@ func (a *App) drawSoftware(r image.Rectangle) {
 	y += u.F.CellH + u.M.PadY
 
 	installed := map[int]bool{}
+	builtin := map[int]bool{}
 	for _, v := range st.JavaVersions {
 		installed[v] = true
 	}
 	for _, rt := range runtimes {
 		installed[rt.Major] = true
+		builtin[rt.Major] = rt.Builtin
 	}
 
+	suren := a.runningJobs()
 	for i, o := range javaOffer {
 		row := image.Rect(in.Min.X, y, in.Max.X, y+u.M.RowH)
 		cx, col := a.contentRow(row, i)
@@ -306,8 +338,14 @@ func (a *App) drawSoftware(r image.Rectangle) {
 		x := u.Text(cx, ty, fmt.Sprintf("Java %d", o.major), col)
 		u.Text(x+u.M.Gap*2, ty, o.note, u.Pal.TextFaint)
 
-		if installed[o.major] {
+		switch {
+		case builtin[o.major]:
+			u.TextRight(in.Max.X-u.M.PadX, ty, "gömülü", u.Pal.OK)
+		case installed[o.major]:
 			u.TextRight(in.Max.X-u.M.PadX, ty, "kurulu", u.Pal.OK)
+		case suren[fmt.Sprintf("java-%d", o.major)]:
+			// Ekrandan çıkıp dönen kullanıcı işin SÜRDÜĞÜNÜ görsün.
+			u.TextRight(in.Max.X-u.M.PadX, ty, "kuruluyor…", u.Pal.Accent)
 		}
 		y += u.M.RowH
 	}
@@ -354,25 +392,16 @@ func (a *App) drawPerformance(r image.Rectangle) {
 	u.Divider(in.Min.X, in.Max.X, y)
 	y += u.M.PadY * 2
 
-	on := cfg != nil && cfg.Turbo
-	row := image.Rect(in.Min.X, y, in.Max.X, y+u.M.RowH)
-	cx, _ := a.contentRow(row, 0)
-	ty := y + (u.M.RowH-u.F.CellH)/2
-	u.Check(cx, ty, on)
-	txt, col := "Turbo kapalı", u.Pal.TextDim
-	if on {
-		txt, col = "Turbo AÇIK", u.Pal.Warn
-	}
-	u.Text(cx+u.F.CellW+u.M.Gap, ty, txt, col)
-	y += u.M.RowH + u.M.PadY/2
-
-	a.hint(in, y,
-		"Turbo açıkken kaynak sınırları yok sayılır ve sunucular yüksek",
-		"öncelikle çalıştırılır. t tuşu veya Enter ile değiştirin.")
+	// Turbo: anahtar + GERÇEKTE ne yaptığı + çekirdek başına anlık frekans
+	// (bkz. screen_turbo.go). Bütçe listesine üç satır yer bırakılır.
+	budgetH := (u.F.CellH + u.M.PadY/2) * 3
+	y = a.drawTurboBlock(in, y, in.Max.Y-budgetH-u.M.PadY, st, cfg)
+	y += u.M.PadY
+	y = a.drawCoreMHz(in, y, in.Max.Y-budgetH-u.M.PadY, st)
 
 	// Kaynak bütçesi — ne uygulandığı görünür olsun.
-	if cfg != nil {
-		y += u.F.CellH*2 + u.M.PadY
+	if cfg != nil && y+budgetH <= in.Max.Y {
+		y += u.M.PadY
 		ram := "sınırsız"
 		if cfg.Budget.MaxServerRAMMB > 0 {
 			ram = fmt.Sprintf("%d MB", cfg.Budget.MaxServerRAMMB)
@@ -512,9 +541,9 @@ func (a *App) drawNetwork(r image.Rectangle) {
 		y += u.M.RowH
 	}
 
-	a.mu.Lock()
-	note := a.wifiNote
-	a.mu.Unlock()
+	// Tarama notu: canlı tarama penceresi kapatılsa bile arka planda
+	// sürüyorsa kullanıcı bunu buradan görür (ortak not, eş taramasıyla aynı).
+	note := a.scanNoteText()
 	if note != "" {
 		y += u.M.PadY
 		u.Text(in.Min.X, y, note, u.Pal.TextDim)
@@ -538,6 +567,15 @@ var displayModes = []string{
 }
 
 func (a *App) drawDisplay(r image.Rectangle) {
+	var canli *drm.Info
+	if ld := a.liveDisplay(); ld != nil {
+		info := ld.Info()
+		if info.Changeable {
+			a.drawDisplayLive(r, info)
+			return
+		}
+		canli = &info
+	}
 	u := a.ui
 	in := a.contentPanel(r, "Ekran")
 
@@ -608,13 +646,23 @@ func (a *App) drawDisplay(r image.Rectangle) {
 	u.Divider(in.Min.X, in.Max.X, y)
 	y += u.M.PadY * 2
 
-	// DÜRÜSTLÜK: çözünürlük çalışırken değiştirilemez ve sebebi yazılı.
+	// DÜRÜSTLÜK: bu yolda çözünürlük çalışırken değiştirilemez; sebebi yazılı.
+	// Ekran kartına çiziliyorsa (DRM) ama sürücü tek mod bildiriyorsa sebep
+	// sürücünün kendisidir ve adıyla gösterilir.
 	u.WarnTriangle(in.Min.X, y, u.Pal.Warn)
 	u.Text(in.Min.X+u.F.CellW+u.M.Gap, y,
 		"Çözünürlük değişikliği yeniden başlatma gerektirir.", u.Pal.Warn)
 	y += u.F.CellH + u.M.PadY
+	if canli != nil {
+		a.hint(in, y,
+			"Neden: "+canli.Reason+".",
+			fmt.Sprintf("Şu an: %d x %d · %s Hz (%s). Seçiminiz GRUB'a", canli.Current.Width,
+				canli.Current.Height, canli.Current.HzText(), canli.Driver),
+			"kaydedilir ve bir sonraki açılışta uygulanır.")
+		return
+	}
 	a.hint(in, y,
-		"Bu sistemde ekran kartı sürücüsü yok; framebuffer'ı firmware kurar.",
+		"Ekran kartı arayüzü (DRM) açılamadı; framebuffer'ı firmware kurar.",
 		"Bu yüzden mod ancak önyükleyicide (GRUB) değiştirilebilir. Seçiminiz",
 		"kaydedilir ve bir sonraki açılışta uygulanır.")
 }

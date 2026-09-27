@@ -320,6 +320,35 @@ func (c *Console) Restore() error {
 	return errors.Join(errs...)
 }
 
+// ClearText wipes the VT's text buffer WITHOUT leaving graphics mode.
+//
+// ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
+//
+// Kapanış animasyonu ekranı siyaha indirdikten sonra panel konsolu metin
+// kipine geri alıyor — ve çekirdeğin METİN ARABELLEĞİ yeniden çiziliyor. O
+// arabellekte hâlâ açılışta yazılmış satırlar duruyordu:
+//
+//	MCOS hazirlaniyor...
+//	Klavye ile kullanin: ok tuslari, Enter, Esc, Tab.
+//
+// Kapanış kareleri 100 ms aralıkla ölçüldüğünde bu iki satır, siyah ekranın
+// ortasında iki kare (≈0,2 sn) boyunca yanıp söndü. Kapanışın son izlenimi
+// buydu.
+//
+// Çözüm kipi değiştirmeden arabelleği silmek: konsol sürücüsü kaçış dizisini
+// KD_GRAPHICS kipinde de işler, yalnızca çizmez. Metin kipine dönüldüğünde
+// gösterilecek bir şey kalmaz.
+func (c *Console) ClearText() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tty == nil || c.restored {
+		return
+	}
+	// ESC[2J ekranı siler, ESC[H imleci başa alır, ESC[?25l imleci gizler —
+	// yanıp sönen bir imleç de "kapanıyor" hissini bozar.
+	_, _ = c.tty.WriteString("\033[2J\033[H\033[?25l")
+}
+
 // Read returns raw bytes from the terminal (UTF-8, no line buffering).
 func (c *Console) Read(p []byte) (int, error) {
 	if c.tty == nil {

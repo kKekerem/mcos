@@ -42,6 +42,37 @@ command -v python3 >/dev/null 2>&1 || {
     exit 0
 }
 
+# ── Portlar BOŞ mu? ───────────────────────────
+#
+# ── Yakalanan gerçek tuzak ────────────────────────
+# Bu portlar sabit. Makinede o portu dinleyen BAŞKA bir şey varsa (ör. bir
+# sanal makinenin port yönlendirmesi, çalışan gerçek bir MCOS) test kendi
+# daemon'unu başlatır, ondan jeton alır, ama HTTPS isteği ÖTEKİ sunucuya
+# gider ve "yetkisiz" döner.
+#
+# Bu tam olarak başımıza geldi: QEMU'da MCOS denenirken hostfwd 12223'ü
+# tutuyordu ve test, sebebi hiç belli olmayan bir 401 ile kırılıyordu —
+# kodda hiçbir şey bozuk değilken.
+#
+# Artık port doluysa test ATLANIR ve NEDENİNİ söyler.
+port_busy() {
+    python3 - "$1" <<'PYEOF' 2>/dev/null
+import socket, sys
+s = socket.socket()
+s.settimeout(0.5)
+sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)
+PYEOF
+}
+
+for p in "$IPC_PORT" "$REMOTE_PORT"; do
+    if port_busy "$p"; then
+        echo "  UYARI: $p portu ZATEN DOLU — uçtan uca sınama atlandı."
+        echo "         (o portu dinleyen başka bir şey var; ör. bir sanal"
+        echo "          makine port yönlendirmesi ya da çalışan bir mcosd)"
+        exit 0
+    fi
+done
+
 WORK="$(mktemp -d)"
 DAEMON=""
 

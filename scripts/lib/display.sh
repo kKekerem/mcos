@@ -48,25 +48,68 @@ MCOS_MODES='1920x1080 1680x1050 1600x900 1440x900 1366x768 1280x1024 1280x800 12
 #   root= YOK                 sistem initramfs'ten çalışır; root= verilirse
 #                             "VFS: Cannot open root device" paniği alınır
 #
-# ── loglevel NEDEN 4 DEGIL 6? ──────────────────────────────────────────────
-# Olculdu (QEMU, donanim hizlandirmasiz — kullanicinin VirtualBox'i da oyle):
+# ── loglevel NEDEN ARTIK 0 (quiet)? ────────────────────────────────────────
+#
+# Bu deger iki kez degisti ve ikisinin de sebebi ayni olcumdu.
+#
+# ONCE loglevel=4 vardi. Olculdu (QEMU, donanim hizlandirmasiz — kullanicinin
+# VirtualBox'i da oyle):
 #
 #   t=2..6 sn    GRUB menusu
 #   t=8..20 sn   TAMAMEN SIYAH EKRAN   <-- "enter'a basiyorum sonra siyah ekran"
 #   t=25 sn      acilis animasyonu
 #
-# loglevel=4 yalnizca KERN_ERR ve ustunu basar. Normal bir acilista o siddette
-# tek bir mesaj bile yoktur: cekirdek, cerceve arabellegi konsoluna gectigi an
-# (~0.9 sn) ekrani temizler ve o andan userspace'e kadar HICBIR SEY yazmaz.
-# Yani siyahlik bir ariza degil, TASARIM GEREGI sessizlikti — ama kullanici
-# bunu ayirt edemez ve makineyi bozuk sanip kapatir.
+# loglevel=4 normal bir acilista hicbir sey basmaz; siyahlik tasarim geregi
+# sessizlikti ama kullanici bunu makinenin donmasindan ayirt edemiyordu.
+# Cozum olarak loglevel=6 yapildi: ekranda cekirdek kaydi akiyordu, yani
+# "makine calisiyor" gorunuyordu.
 #
-# loglevel=6 (KERN_INFO) normal acilis kaydini gosterir. Cirkin degil: metin
-# yalnizca ~8 saniye gorunur, sonra S04splash panel VT'sine gecip animasyonu
-# acar ve o metin bir daha gorunmez. Onemli olan su: ekranda bir sey AKAR,
-# yani makine calisiyordur. Gozlemlenemeyen bir acilis, bu hata raporunun ta
-# kendisini uretti.
-MCOS_CMDLINE_BASE='console=tty0 consoleblank=0 loglevel=6 fbcon=nodefer vt.global_cursor_default=0'
+# SIMDI o bandaja gerek kalmadi. Kullanicinin yeni istegi:
+#
+#   "acılırken linux logları felan gözüküyo o da gözükmesin direkt acılırken
+#    ilk animasyon baslasın"
+#
+# Animasyon artik initramfs'in /init'inden, yani userspace'in ILK aninda
+# basliyor (rootfs-overlay/init: start_early_splash). Doldurulacak bir bosluk
+# yok: cekirdek cerceve arabellegini kurar kurmaz animasyon ekrani devraliyor.
+#
+# Bu yuzden "quiet loglevel=0": ekrana hicbir cekirdek mesaji dusmez.
+# KAYIT KAYBOLMAZ — mesajlar gunluk tamponuna yazilmaya devam eder ve
+# "dmesg" ile okunur. Kurtarma girdisinde (asagida) loglevel=7 durur; bir sey
+# ters giderse tum kayit yine ekranda.
+# ── Düzeltilen gerçek hata: PANİK MESAJI GÖRÜNMÜYORDU ──────────────────────
+#
+# Burada "loglevel=0" yazıyordu. O değer çekirdek konsoluna HİÇBİR ŞEY
+# bastırmaz — KERN_EMERG dahil. Yani makine panikleyince ekran SİYAH kalıyor,
+# yalnızca Caps Lock ışığı yanıp sönüyordu.
+#
+# Kullanıcının bildirdiği belirti tam olarak buydu:
+#   "panic satırı gözükmüyor, ekran siyah, caps lock yanıp sönüyor"
+#
+# Caps Lock'un yanıp sönmesi çekirdeğin panik işaretidir; mesajın kendisi
+# bastırıldığı için teşhis İMKÂNSIZ hâle geliyordu.
+#
+# loglevel=1: yalnızca KERN_EMERG basılır. Açılış yine SESSİZ (normal sürücü
+# mesajları level 3-7'dir ve görünmez), ama panik GÖRÜNÜR. Sessiz açılış
+# uğruna arıza teşhisini kaybetmek kabul edilemez.
+#
+# ── thinkpad_acpi.fan_control=1 NEDEN VAR? ──────────────────────────────────
+#
+# Kullanıcı gerçek PC'de "turboda fan da çalışmıyor" dedi. Dizüstülerde fan
+# EC'dedir; ThinkPad'de Linux'un tek yolu /proc/acpi/ibm/fan ve sürücü elle
+# kademe komutlarını bu parametre OLMADAN reddeder (thinkpad-acpi.rst, "Fan
+# control and monitoring"). Sürücü çekirdeğe gömülü (MODULES=n): modprobe
+# seçeneği yok, parametre yalnızca komut satırından verilir. ThinkPad olmayan
+# makinede sürücü hiç bağlanmaz, parametrenin etkisi olmaz. Turbo fanı
+# yalnızca YÜKSELTİR (7. kademe) ve kapanınca "auto"ya döndürür
+# (internal/turbo/fans.go); fanı durduran bir komut hiç gönderilmez.
+#
+# acpi_enforce_resources=lax BİLEREK YOK: masaüstü Super I/O fan sürücüsünü
+# (nct6775/it87) ACPI çakışmasına rağmen yükletirdi ama çekirdeğin TÜM ACPI
+# kaynak korumasını kaldırır (i801 SMBus dahil) ve BIOS'la aynı yongaya
+# eşzamanlı erişime izin verir. Masaüstü fanı zaten BIOS eğrisinde döner;
+# çakışma turbo tanısında çekirdek günlüğünden gösterilir.
+MCOS_CMDLINE_BASE='console=tty0 consoleblank=0 quiet loglevel=1 fbcon=nodefer vt.global_cursor_default=0 thinkpad_acpi.fan_control=1'
 
 # Kurtarma girdisinin komut satırı: grafik kipi hiç denenmez.
 MCOS_CMDLINE_RECOVERY='console=tty0 nomodeset vga=normal loglevel=7'

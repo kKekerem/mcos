@@ -33,7 +33,7 @@ android {
         // minSdk 23 (Android 6.0): flutter_secure_storage'ın
         // EncryptedSharedPreferences desteği 23'ten itibaren çalışıyor.
         // Daha eskisi, jetonu şifresiz saklamak demekti.
-        minSdk = 23
+        minSdkVersion = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
 
         versionCode = flutter.versionCode

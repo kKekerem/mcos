@@ -36,10 +36,10 @@ echo "1) GRUB (mcos-install su an bunu kullaniyor)"
 GRUB_OK=1
 have "grub-install ikilisi"    usr/sbin/grub-install sbin/grub-install usr/bin/grub-install || GRUB_OK=0
 have "grub-mkimage ikilisi"    usr/bin/grub-mkimage bin/grub-mkimage || GRUB_OK=0
-have "i386-pc platform dizini" usr/lib/grub/i386-pc boot/grub/i386-pc || GRUB_OK=0
-have "i386-pc/boot.img"        usr/lib/grub/i386-pc/boot.img boot/grub/i386-pc/boot.img || GRUB_OK=0
-have "i386-pc/*.mod modulleri" usr/lib/grub/i386-pc/normal.mod boot/grub/i386-pc/normal.mod || GRUB_OK=0
-have "x86_64-efi platformu"    usr/lib/grub/x86_64-efi boot/grub/x86_64-efi || GRUB_OK=0
+have "i386-pc platform dizini" lib/grub/i386-pc boot/grub/i386-pc || GRUB_OK=0
+have "i386-pc/boot.img"        lib/grub/i386-pc/boot.img boot/grub/i386-pc/boot.img || GRUB_OK=0
+have "i386-pc/*.mod modulleri" lib/grub/i386-pc/normal.mod boot/grub/i386-pc/normal.mod || GRUB_OK=0
+have "x86_64-efi platformu"    lib/grub/x86_64-efi boot/grub/x86_64-efi || GRUB_OK=0
 
 echo
 echo "2) syslinux (mkusb.sh bunu kullaniyor; QEMU'da BIOS boot dogrulandi)"

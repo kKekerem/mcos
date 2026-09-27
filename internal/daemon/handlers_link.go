@@ -3,19 +3,23 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mcos/internal/cluster"
 	"mcos/internal/ipc"
 	"mcos/internal/java"
+	"mcos/internal/linkjar"
 	"mcos/internal/model"
 	"mcos/internal/portmgr"
+	"mcos/internal/server"
 	"mcos/internal/store"
 )
 
@@ -33,16 +37,57 @@ import (
 // envanterini görebilir ve yalnızca mod istemciye transfer paketi
 // gönderebilir.
 
-// linkModSearchPaths is where mcos-link.jar may live in the image.
+// linkJarDirs are where the per-version link jars and index-*.tsv live.
 //
-// Birden çok yola bakıyoruz çünkü mod üç yoldan gelebilir: imaja gömülü
-// (/usr/lib/mcos/mods), çevrimdışı paketten (/data/artifacts) veya
-// geliştirme makinesinde derlenmiş (./dist/mods).
+// Yakalanan hata (kullanıcı, gerçek PC): "PC eşleştirmede ortak dünyayı
+// açınca 'mcos link kurulu değil' diyor." Mod yalnızca 1.21.11 için vardı;
+// çevrimiçi kurulan sunucu 26.3 alıyordu. Artık her sürümün jar'ı ve hangi
+// sürüme hangisinin gittiğini söyleyen indeks bu klasörlerde (seçim kuralı
+// internal/linkjar'da; mcos-node da aynısını kullanıyor):
+//   - /usr/lib/mcos/mods/link: imaja gömülü (post-build; küçük, RAM'e girer),
+//   - /data/mcos/mods/link: kalıcı bölüm (imajda olmayan bir sürüm sonradan
+//     eklenebilsin),
+//   - dist/mods/link: geliştirme makinesi (make mod).
+//
+// Değişken, çünkü sınamalar sahte klasör verir.
+var linkJarDirs = []string{
+	"/usr/lib/mcos/mods/link",
+	"/data/mcos/mods/link",
+	"dist/mods/link",
+}
+
+// linkModSearchPaths is the OLD, index-less layout (mcos-link.jar,
+// mcos-link-paper.jar) and also where fabric-api may already sit.
+//
+// Eski jar'lar YALNIZCA 1.21.11 içindir (bkz. linkjar.LegacyMC); indeksli
+// düzen bir sürümü kapsamıyorsa son çare olarak burada aranırlar. Birden
+// çok yol: imaja gömülü, kalıcı bölüm, çevrimdışı paket (/data/artifacts)
+// ve geliştirme makinesi (./dist/mods).
 var linkModSearchPaths = []string{
 	"/usr/lib/mcos/mods",
 	"/data/mcos/mods",
 	"/data/artifacts",
 	"dist/mods",
+}
+
+// fabricAPIDirs are the local stores searched for fabric-api.
+//
+// fabric-api kök dosya sistemine GİRMEZ (her sürüm ~2 MB; hepsi RAM'den
+// ~40 MB yerdi): post-build onu çevrimdışı paketle ISO'ya koyar, mcos-install
+// AYNI adla /data/artifacts'a kopyalar. Önce yerel — MCOS internetsiz
+// çalışabilmeli; Modrinth son çare (fetchFabricAPI).
+func fabricAPIDirs() []string {
+	dirs := append([]string{}, linkModSearchPaths...)
+	return append(dirs, "/usr/lib/mcos/offline", "dist/offline")
+}
+
+// linkLocator is the jar selection used by every install path here.
+func linkLocator() linkjar.Locator {
+	return linkjar.Locator{
+		Dirs:       linkJarDirs,
+		LegacyDirs: linkModSearchPaths,
+		DepDirs:    fabricAPIDirs(),
+	}
 }
 
 // Ortak dunya eklentisinin iki yapisi vardir.
@@ -73,6 +118,11 @@ const (
 // proje) gerekir. Doğrulanmamış bir kombinasyonu sessizce desteklemektense
 // açıkça reddetmek doğru — kullanıcının isteği zaten "fabric ve paper için
 // derle" idi ve ikisi de gerçek sunucularda denendi.
+//
+// Aynı eşleme internal/linkjar.LoaderFor'da da var (mcos-node onu kullanıyor);
+// TestLinkArtifactMatchesLinkjar ikisinin ayrışmadığını denetler. Burada
+// yalnızca HEDEF dosya adı ve klasör seçilir: hangi jar'ın (hangi Minecraft
+// sürümü için) kopyalanacağı linkjar'ın işi.
 func linkArtifact(sw model.Software) (name, dir string, ok bool) {
 	switch {
 	case sw == model.SoftwareFabric:
@@ -96,7 +146,22 @@ func (d *Daemon) LinkSpec() (model.LinkSpec, bool) {
 	if srv == nil {
 		return model.LinkSpec{}, false
 	}
+	var files []model.LinkFile
+	var inst []model.LinkInstance
+	if srv.Link.OriginID == "" {
+		// Kurucuyuz: eşlerin kuracağı mod/eklenti listesi bizim sunucumuzdan
+		// çıkar (bkz. cluster/linkfiles.go). Eşten gelmiş bir kopyada liste
+		// YOK: kurulumu yalnızca kurucu yayar.
+		files = cluster.ScanLinkFiles(d.serverDataDir(srv))
+		// Aynı makinedeki kardeş kopyalar da düğümdür (bkz. instances.go).
+		// Yalnızca kurucuda: eşin listesi kurucudan gelir.
+		list, _ := d.store.ListServers()
+		inst = d.localInstances(srv, list)
+	}
 	return model.LinkSpec{
+		Instances:  inst,
+		PublicAddr: srv.WAN.Hostname,
+		Files:      files,
 		Mode:       srv.Link.Mode,
 		ServerName: srv.Name,
 		Software:   string(srv.Software),
@@ -108,7 +173,38 @@ func (d *Daemon) LinkSpec() (model.LinkSpec, bool) {
 		LinkPort:   srv.Link.LinkPort,
 		SlabChunks: srv.Link.SlabChunks,
 		Origin:     d.Config().Cluster.NodeName,
+		// Eşten gelmiş bir kopya kurucusunu korur: koordinatör bu alana
+		// bakarak kurulumu yalnızca kurucunun yaymasını sağlar.
+		OriginID: srv.Link.OriginID,
+		Rules:    linkRulesFor(d.serverDataDir(srv), srv),
 	}.Normalize(), true
+}
+
+// linkRulesFor: kurucu kurallarını kendi server.properties'inden okur; eş
+// kopyası kurucudan aldığını aynen iletir (bkz. model.LinkRules).
+func linkRulesFor(dataDir string, srv *model.Server) *model.LinkRules {
+	if srv.Link.OriginID != "" {
+		return srv.Link.Rules
+	}
+	return server.ReadLinkRules(dataDir, srv)
+}
+
+// serverDataDir is where a server's files live.
+func (d *Daemon) serverDataDir(srv *model.Server) string {
+	if srv.DataDir != "" {
+		return srv.DataDir
+	}
+	return d.store.Paths.ServerData(srv.ID)
+}
+
+// LinkDataDir implements cluster.LinkFileHost: eşler mod/eklenti jar'larını
+// buradan çeker.
+func (d *Daemon) LinkDataDir() (string, bool) {
+	srv := d.sharedWorldServer()
+	if srv == nil {
+		return "", false
+	}
+	return d.serverDataDir(srv), true
 }
 
 // sharedWorldServer returns the server running in shared-world mode, or nil.
@@ -118,7 +214,10 @@ func (d *Daemon) sharedWorldServer() *model.Server {
 		return nil
 	}
 	for _, s := range list {
-		if s.Link.Mode == model.LinkSharedWorld {
+		// Kardeş kopyalar da ortak dünya kipinde (server.properties için)
+		// ama dünyanın sahibi ana sunucudur; kardeş seçilseydi eşlere
+		// "<ad> #2" adıyla ikinci bir dünya yayılırdı.
+		if s.Link.Mode == model.LinkSharedWorld && !s.IsSibling() {
 			return s
 		}
 	}
@@ -153,8 +252,14 @@ func (d *Daemon) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 	spec = spec.Normalize()
 	if spec.Mode != model.LinkSharedWorld {
 		// Eş ortak dünyayı KAPATTI: bizim sunucumuzu silmiyoruz (dünya
-		// kullanıcının verisidir), yalnızca kipi düşürüyoruz.
+		// kullanıcının verisidir), kipi düşürüp DURDURUYORUZ. Masaüstü düğüm
+		// de durduruyor; burada durdurmamak, dünyanın yalnızca yarısını
+		// tutan bir sunucuyu tek başına açık bırakıyordu (panel ise "eşlerdeki
+		// kopyalar durdurulmaz" diyordu — iki taraf tutarsızdı).
 		if srv := d.sharedWorldServer(); srv != nil {
+			if srv.Link.OriginID != "" {
+				_ = d.servers.Stop(srv.ID)
+			}
 			srv.Link.Mode = model.LinkOff
 			srv.UpdatedAt = time.Now()
 			if err := d.store.SaveServer(srv); err != nil {
@@ -225,8 +330,9 @@ func (d *Daemon) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 	// diyerek hemen donuyordu. Sonuc: panel "Fabric 1.21.1" yaziyor ama
 	// makine hala eski paper-1.20.1.jar dosyasini calistiriyordu. Dogru yol
 	// (handleServerChangeVersion) bunu MarkUninstalled ile yapiyor.
-	if !created &&
-		(srv.Software != model.Software(spec.Software) || srv.MCVersion != spec.MCVersion) {
+	changed := !created &&
+		(srv.Software != model.Software(spec.Software) || srv.MCVersion != spec.MCVersion)
+	if changed {
 		d.servers.MarkUninstalled(srv.ID)
 	}
 
@@ -240,13 +346,21 @@ func (d *Daemon) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 	srv.SupportsMods = srv.Software.SupportsMods()
 	srv.LevelSeed = spec.Seed
 	srv.Difficulty = string(spec.Difficulty)
+	prevRules := srv.Link.Rules
 	srv.Link = model.LinkConfig{
 		Mode:       model.LinkSharedWorld,
 		Difficulty: spec.Difficulty,
 		SlabChunks: spec.SlabChunks,
 		Seed:       spec.Seed,
 		LinkPort:   spec.LinkPort,
+		// Kurucu BAŞKASI: bu makine kurulumu geri yaymamalı.
+		OriginID: spec.OriginID,
+		Rules:    spec.Rules,
 	}
+	spec.Rules.ApplyTo(srv)
+	// Kural değiştiyse (ör. kurucu online-mode'u kapattı) çalışan sunucu
+	// yeniden başlamalı: server.properties yalnızca açılışta okunur.
+	rulesChanged := !created && spec.Rules != nil && !prevRules.Equal(spec.Rules)
 	srv.UpdatedAt = time.Now()
 
 	if err := d.store.SaveServer(srv); err != nil {
@@ -260,146 +374,297 @@ func (d *Daemon) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 	d.log.Infof("link: %s sunucusu %s (%s tarafından, tohum %s)",
 		srv.Name, verb, spec.Origin, spec.Seed)
 
+	// Mod bu makinede kurulabilecek mi — kurulumla AYNI seçim (linkjar).
+	// Kurulum arka planda koşuyor ve hatası yalnızca bu makinenin günlüğüne
+	// düşüyordu; kurucu "oluşturuldu" görüp sınırın neden çalışmadığını
+	// bilemiyordu. Neden yanıt metnine eklenir (eşleştirme iletisinde
+	// görünür); sunucu yine kurulur, çünkü dünyanın bu yarısı kullanıcının
+	// verisidir ve jar'lar eklenince bir sonraki eşitlemede mod da gelir.
+	modWarn := ""
+	if _, err := linkLocator().Find(srv.Software, srv.MCVersion); err != nil {
+		modWarn = " — UYARI: " + err.Error()
+	}
+
+	// ── Zaten çalışıyorsa ve hiçbir şey değişmediyse DOKUNMA ──────────────
+	// Kurucu kurulumu eşitleme döngüsüyle yeniden gönderir (katılımcı listesi
+	// ya da port değişince). Eskiden burada ne "çalışıyor mu" ne de "ne
+	// değişti" soruluyordu: yazılım değişse bile çalışan sunucu eski jar'la
+	// sürüyordu, çünkü yalnızca durmuş sunucular başlatılıyordu.
+	dataDir := d.serverDataDir(srv)
+	st := d.servers.State(srv.ID)
+	running := st == model.StateRunning || st == model.StateStarting
+	filesPending := cluster.LinkFilesPending(dataDir, spec.Files)
+	// Eldeki dünya BAŞKA bir tohumla üretilmişse (daha önce aynı adla farklı
+	// bir ortak dünya kurulmuştu) Minecraft level.dat'taki tohumu kullanır ve
+	// bu yarı yanlış araziyi üretir. Kenara alınmalı; bu da durdurmayı ister.
+	seedChanged := false
+	if have, err := cluster.WorldSeed(dataDir); err == nil && !cluster.SameSeed(have, spec.Seed) {
+		seedChanged = true
+	}
+	if running && !changed && !seedChanged && !filesPending && !rulesChanged {
+		return fmt.Sprintf("%s %s (port %d, çalışıyor)%s", srv.Name, verb, srv.Port, modWarn), srv.Port, nil
+	}
+
 	// Kurulum ve mod yüklemesi ARKA PLANDA: eş bizden 60 saniyeden uzun
 	// süren bir indirme beklememeli, yoksa zaman aşımına uğrar ve kurulumu
 	// başarısız sanır.
+	files := append([]model.LinkFile(nil), spec.Files...)
 	go func(s *model.Server) {
+		if running {
+			d.log.Infof("link: %s yeniden başlatılıyor (kurulum değişti)", s.Name)
+			d.stopAndWait(s.ID)
+		}
+		if seedChanged {
+			moved, err := cluster.RetireMismatchedWorld(dataDir, s.LevelSeed)
+			if err != nil {
+				d.log.Warnf("link: %s dünyası kenara alınamadı: %v", s.Name, err)
+			} else if len(moved) > 0 {
+				d.log.Warnf("link: %s tohumu değişti; eski dünya kenara alındı: %s",
+					s.Name, strings.Join(moved, ", "))
+			}
+		}
 		if err := d.servers.EnsureInstalled(context.Background(), s); err != nil {
 			d.log.Errorf("link: %q kurulamadı: %v", s.Name, err)
 			return
 		}
+		// Kurucunun mod/eklentileri: sunucu BAŞLAMADAN önce yerinde olmalı,
+		// yoksa ilk açılışta dünyanın bu yarısı modsuz üretilir.
+		if c := d.cluster.LinkCoord(); c != nil {
+			if _, err := c.SyncLinkFiles(context.Background(), dataDir, files); err != nil {
+				d.log.Warnf("link: %s mod/eklenti eşitlemesi eksik: %v", s.Name, err)
+			}
+		}
 		if err := d.installLinkMod(s); err != nil {
 			d.log.Errorf("link: mod kurulamadı (%s): %v", s.Name, err)
 		}
+		// ── Düzeltilen eksik: sunucu KURULUYOR ama BAŞLATILMIYORDU ──────
+		// Kullanıcının isteği "o da başlasın" idi. Eşten gelen kurulum
+		// sunucuyu oluşturup indiriyordu, sonra orada bırakıyordu: dünyanın
+		// bu yarısı biri panelden elle "Başlat" diyene kadar kapalıydı ve
+		// sınırı geçen oyuncu boşluğa aktarılıyordu.
+		if st := d.servers.State(s.ID); st == model.StateRunning || st == model.StateStarting {
+			return
+		}
+		s.RAMMB, s.CPUQuota = d.clampToBudget(s.RAMMB, s.CPUQuota)
+		if err := d.servers.Start(context.Background(), s); err != nil {
+			d.log.Errorf("link: %q başlatılamadı: %v", s.Name, err)
+			return
+		}
+		d.log.Infof("link: %s başlatıldı (port %d)", s.Name, s.Port)
 	}(srv.Clone())
 
-	return fmt.Sprintf("%s %s (port %d)", srv.Name, verb, srv.Port), srv.Port, nil
+	return fmt.Sprintf("%s %s (port %d)%s", srv.Name, verb, srv.Port, modWarn), srv.Port, nil
 }
 
-// installLinkMod copies mcos-link.jar into the server's mods directory.
+// liveWorldSeed reads the world's seed, forcing a save if the server runs.
+//
+// ── Yakalanan gerçek hata (uçtan uca sınamada ölçüldü) ──────────────────────
+// Minecraft level.dat'ı İLK KAYITTA yazar (5 dakikalık otomatik kayıt ya da
+// kapanış). Yeni açılmış bir sunucuda dünya BELLEKTE rastgele bir tohumla
+// üretilmiş ama level.dat henüz YOK: WorldSeed "dünya yok" der, ortak dünya
+// yeni bir tohum üretip eşlere onu gönderirdi — kurucu ise rastgele tohumla
+// üretmeye devam ederdi. Çalışan sunucuya "save-all flush" gönderip level.dat
+// diske düşene kadar bekliyoruz (ölçüldü: Paper 1.21.11'de < 1 sn).
+func (d *Daemon) liveWorldSeed(srv *model.Server, dataDir string) (string, error) {
+	have, err := cluster.WorldSeed(dataDir)
+	if !errors.Is(err, cluster.ErrNoWorld) {
+		return have, err
+	}
+	st := d.servers.State(srv.ID)
+	if st == model.StateStarting {
+		// Açılış sürüyor: dünya şu an üretiliyor olabilir. Açılmasını bekle,
+		// yoksa kaydetme komutu boşa gider.
+		deadline := time.Now().Add(3 * time.Minute)
+		for st == model.StateStarting && time.Now().Before(deadline) {
+			time.Sleep(time.Second)
+			st = d.servers.State(srv.ID)
+		}
+	}
+	if st != model.StateRunning {
+		return "", err // çalışmıyor ve dünya yok: tohum serbestçe seçilebilir
+	}
+	if cerr := d.servers.Command(srv.ID, "save-all flush"); cerr != nil {
+		return "", fmt.Errorf("dünya kaydettirilemedi: %w", cerr)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if have, err = cluster.WorldSeed(dataDir); !errors.Is(err, cluster.ErrNoWorld) {
+			return have, err
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	// Sunucu çalışıyor ama level.dat gelmedi: tohumu BİLMİYORUZ. "Dünya yok"
+	// demek yeni bir tohum ürettirirdi; hata olarak bildir.
+	return "", fmt.Errorf("sunucu çalışıyor ama level.dat yazılmadı")
+}
+
+// stopAndWait stops a server and waits (bounded) until it has exited.
+//
+// Dünya klasörünü taşımadan ya da jar'ı değiştirmeden önce süreç GERÇEKTEN
+// bitmiş olmalı: Minecraft kapanırken dünyayı diske yazar.
+func (d *Daemon) stopAndWait(id string) {
+	_ = d.servers.Stop(id)
+	deadline := time.Now().Add(90 * time.Second)
+	for time.Now().Before(deadline) {
+		st := d.servers.State(id)
+		if st != model.StateRunning && st != model.StateStarting && st != model.StateStopping {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// installLinkMod copies the right mcos-link jar into the server.
 //
 // Mod OLMADAN ortak dünya çalışmaz: oyuncu sınırı geçtiğinde hiçbir şey
 // olmaz ve dünyanın öbür yarısı boş görünür. Bu yüzden eksikliği sessizce
-// geçmiyoruz — panel "mod kurulu değil" diye açıkça yazıyor.
-func (d *Daemon) installLinkMod(srv *model.Server) error {
+// geçmiyoruz: hata NEDENİYLE döner, link.status'ta ModProblem olarak görünür
+// ve link.enable onu kullanıcıya hata olarak verir.
+//
+// Hangi jar: sunucunun Minecraft sürümüne göre linkjar seçer (indeks). Hedef
+// ad SABİT (mods/mcos-link.jar, plugins/mcos-link-paper.jar): linkModInstalled
+// ve eski sunucuların temizliği bu adlara bakıyor.
+//
+// ── Uyumsuz sürümde eski kopya KALDIRILIR ───────────────────────────────────
+// Link modu VARSAYILAN OLARAK her sunucuya kuruluyor. Eskiden fabric.mod.json
+// kendini ">=1.20.5" ile uyumlu ilan ediyordu ve 1.21.11 jar'ı 1.21.1'de
+// açılışta NoSuchFieldError ile düşüyordu (uçtan uca sınamada görüldü).
+// Sürümü değişen bir sunucuda önceki sürümün jar'ı kalırsa aynısı olur:
+// kaldırılır ki sunucu en azından ortak dünyasız açılsın.
+//
+// ── Fabric: API ÖNCE, mod SONRA ─────────────────────────────────────────────
+// mcos-link fabric-api'yi SERT bağımlılık olarak bildiriyor; Fabric Loader
+// eksik sert bağımlılıkta modu atlamaz, SUNUCUYU HİÇ AÇMAZ:
+//
+//	Incompatible mods found!
+//	- Mod 'MCOS Link' (mcos-link) 1.0.1 requires any version of
+//	  fabric-api, which is missing!
+//
+// (Gerçek bir Fabric 1.21.11 sunucusunda görüldü.) API sağlanamıyorsa mod da
+// KURULMAZ — varsa eski kopyası da kaldırılır. Ortak dünyasız çalışan bir
+// sunucu, hiç açılmayan bir sunucudan iyidir.
+func (d *Daemon) installLinkMod(srv *model.Server) (err error) {
+	// Aynı sunucuya iki kurulum aynı anda koşmasın (bkz. lockLinkInstall).
+	unlock := lockLinkInstall(srv.ID)
+	defer unlock()
+	defer func() { recordLinkProblem(srv.ID, err) }()
 	name, sub, ok := linkArtifact(srv.Software)
 	if !ok {
-		return fmt.Errorf("%s ne mod ne eklenti yükler; ortak dünya için "+
-			"Fabric veya Paper gerekir", srv.Software)
+		if _, lerr := linkjar.LoaderFor(srv.Software); lerr != nil {
+			return lerr
+		}
+		return fmt.Errorf("%s ortak dünyayı desteklemiyor", srv.Software)
 	}
-	src := findLinkArtifact(name)
-	if src == "" {
-		return fmt.Errorf("%s bulunamadı (make mod ile derlenir)", name)
+	dir := filepath.Join(d.serverDataDir(srv), sub)
+	dst := filepath.Join(dir, name)
+	res, err := linkLocator().Find(srv.Software, srv.MCVersion)
+	if err != nil {
+		if linkjar.KindOf(err) == linkjar.KindVersion {
+			_ = os.Remove(dst)
+		}
+		return err
 	}
-	dataDir := srv.DataDir
-	if dataDir == "" {
-		dataDir = d.store.Paths.ServerData(srv.ID)
-	}
-	dir := filepath.Join(dataDir, sub)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-
-	// ── Fabric: API ÖNCE, mod SONRA ─────────────────────────────────────
-	//
-	// Bu sıra zorunlu ve sebebi ölçüldü. mcos-link'in fabric.mod.json'ı
-	// fabric-api'yi SERT BAĞIMLILIK olarak bildiriyor. Fabric Loader eksik
-	// bir sert bağımlılıkta modu atlamaz — SUNUCUYU HİÇ AÇMAZ:
-	//
-	//   Incompatible mods found!
-	//   - Mod 'MCOS Link' (mcos-link) 1.0.1 requires any version of
-	//     fabric-api, which is missing!
-	//   net.fabricmc.loader.impl.FormattedException: Some of your mods are
-	//   incompatible with the game or each other!
-	//
-	// (Gerçek bir Fabric 1.21.11 sunucusunda görüldü.) Bu, ensureLinkArtifact
-	// modu VARSAYILAN OLARAK her sunucuya kurduğu için çok ağır bir sonuç
-	// doğuruyordu: MCOS'un kurduğu her Fabric sunucusu açılmayı reddederdi.
-	//
-	// Bu yüzden API sağlanamıyorsa mod da KURULMAZ ve hata döndürülür.
-	// Ortak dünyasız çalışan bir sunucu, hiç açılmayan bir sunucudan iyidir.
-	if sub == "mods" {
-		if err := d.ensureFabricAPI(srv, dir); err != nil {
+	if res.Loader == linkjar.Fabric && res.Dep != "" {
+		if err := d.ensureFabricAPI(srv, dir, res); err != nil {
+			_ = os.Remove(dst)
 			return err
 		}
 	}
-
-	return copyFile(src, filepath.Join(dir, name))
-}
-
-// fabricAPIGlobs are the file-name shapes Fabric API ships under.
-//
-// Modrinth "fabric-api-0.141.6+1.21.11.jar" verir; çevrimdışı paket aynı adı
-// korur (bkz. offline-manifest.txt). Yine de tek bir ada bağlanmıyoruz:
-// önbellek dosya adının başına URL özeti ekliyor
-// (providers.cachePath -> "<16 hane>-fabric-api-….jar").
-var fabricAPIGlobs = []string{
-	"fabric-api-*.jar",
-	"*-fabric-api-*.jar",
-	"fabric_api*.jar",
-}
-
-// fabricAPIPresent reports whether mods/ already carries Fabric API.
-func fabricAPIPresent(modsDir string) bool {
-	for _, g := range fabricAPIGlobs {
-		if m, _ := filepath.Glob(filepath.Join(modsDir, g)); len(m) > 0 {
-			return true
-		}
+	if err := copyFile(res.Jar, dst); err != nil {
+		return err
 	}
-	return false
+	d.log.Infof("link: %s: %s -> %s/%s (Minecraft %s)", srv.Name,
+		filepath.Base(res.Jar), sub, name, res.MC)
+	return nil
 }
 
-// findBundledFabricAPI looks for Fabric API in MCOS's local artifact stores.
+// linkProblems remembers the last install failure per server (server id ->
+// reason). linkjar.Find'ın söylemediği nedenler (fabric-api indirilemedi,
+// disk dolu) de panele ulaşsın diye: kurulum arka planda koşuyor ve hata
+// yalnızca günlükte kalıyordu.
+var linkProblems sync.Map
+
+// linkInstallLocks holds one mutex per server id.
+var linkInstallLocks sync.Map
+
+// lockLinkInstall serializes installLinkMod for one server; dönüş kilidi açar.
 //
-// ÖNCE YEREL: MCOS internetsiz çalışabilmeli. Çevrimdışı paket zaten
-// fabric-api'yi içeriyor (offline-manifest.txt) ve mcos-install onu
-// /data/artifacts'a tohumluyor; ağa çıkmak son çaredir.
-func findBundledFabricAPI() string {
-	dirs := append([]string{}, linkModSearchPaths...)
-	dirs = append(dirs, "/usr/lib/mcos/offline", "dist/offline")
-	for _, dir := range dirs {
-		for _, g := range fabricAPIGlobs {
-			matches, _ := filepath.Glob(filepath.Join(dir, g))
-			for _, m := range matches {
-				if st, err := os.Stat(m); err == nil && st.Size() > 0 {
-					return m
-				}
-			}
-		}
+// Aynı sunucuya iki kurulum AYNI ANDA koşabiliyor: link.enable, sunucu
+// oluşturma/sürüm değiştirme gorutinindeki ensureLinkArtifact ile ya da eşin
+// art arda iki ApplyLinkSpec gorutini. İkisi de "fabric-api yok" görüp
+// indirir, ikisi de aynı "<ad>.tmp" dosyasına yazar ve ikincinin os.Rename'i
+// "no such file" ile düşer — link.enable anlamsız bir hatayla reddedilirdi.
+// Sınamada ölçüldü (TestConcurrentInstallLinkModFetchesOnce): kilitsiz iki
+// eş zamanlı kurulum fabric-api'yi İKİ kez indirdi ve biri "rename
+// …/mods/mcos-link.jar.tmp …: no such file or directory" ile düştü.
+func lockLinkInstall(id string) func() {
+	v, _ := linkInstallLocks.LoadOrStore(id, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
+
+func recordLinkProblem(id string, err error) {
+	if err == nil {
+		linkProblems.Delete(id)
+		return
+	}
+	linkProblems.Store(id, err.Error())
+}
+
+// linkModProblem says why the mod is not on this server ("" = bilinmiyor).
+//
+// Önce BUGÜNKÜ gerçek (Find): son kurulumdan sonra jar eklenmiş ya da sürüm
+// değişmiş olabilir. Seçim başarılıysa son kurulum hatası anlatılır.
+func (d *Daemon) linkModProblem(srv *model.Server) string {
+	if _, err := linkLocator().Find(srv.Software, srv.MCVersion); err != nil {
+		return err.Error()
+	}
+	if v, ok := linkProblems.Load(srv.ID); ok {
+		return v.(string)
 	}
 	return ""
 }
 
-// ensureFabricAPI guarantees mods/ has Fabric API before mcos-link lands.
+// fetchFabricAPI downloads fabric-api from Modrinth (son çare).
 //
-// Sıra: zaten var mı → yerel depolarda var mı → Modrinth'ten indir. Üçü de
-// olmazsa HATA döner ve çağıran mod'u kurmaz (gerekçe installLinkMod'da).
-func (d *Daemon) ensureFabricAPI(srv *model.Server, modsDir string) error {
-	if fabricAPIPresent(modsDir) {
-		return nil
-	}
-
-	if src := findBundledFabricAPI(); src != "" {
-		dst := filepath.Join(modsDir, "fabric-api.jar")
-		if err := copyFile(src, dst); err != nil {
-			return fmt.Errorf("fabric-api kopyalanamadı: %w", err)
-		}
-		d.log.Infof("link: fabric-api yerel depodan kuruldu (%s)", src)
-		return nil
-	}
-
-	// Son çare: internet. Zaman aşımı KISA tutuldu — sunucu kurulumu bu
-	// çağrıda süresiz asılı kalmamalı.
+// Değişken, çünkü sınamalar ağa çıkmamalı. Zaman aşımı KISA: sunucu kurulumu
+// bu çağrıda süresiz asılı kalmamalı.
+var fetchFabricAPI = func(d *Daemon, mc, modsDir string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	path, err := d.catalog.InstallByID(ctx, "fabric-api", "fabric",
-		srv.MCVersion, modsDir)
-	if err != nil {
-		return fmt.Errorf("fabric-api bulunamadı ve indirilemedi (%w); "+
-			"ortak dünya modu kurulmadı — modu fabric-api olmadan koymak "+
-			"sunucunun HİÇ açılmamasına yol açardı", err)
+	return d.catalog.InstallByID(ctx, "fabric-api", "fabric", mc, modsDir)
+}
+
+// findBundledFabricAPI looks for a fabric-api built for mc in MCOS's local
+// artifact stores, whatever its exact build number (kural:
+// linkjar.FabricAPIFor — sürümü tutmayan kopya asla seçilmez).
+func findBundledFabricAPI(mc string) string {
+	return linkjar.FabricAPIFor(fabricAPIDirs(), mc)
+}
+
+// ensureFabricAPI guarantees mods/ has the RIGHT fabric-api before mcos-link
+// lands (kural ve sıra: linkjar.PrepareFabricAPI).
+//
+// Sağlanamazsa HATA döner ve çağıran mod'u kurmaz (gerekçe installLinkMod'da).
+func (d *Daemon) ensureFabricAPI(srv *model.Server, modsDir string, res linkjar.Result) error {
+	if res.DepPath == "" {
+		if p := findBundledFabricAPI(srv.MCVersion); p != "" {
+			res.DepPath = p
+			res.Dep = linkjar.CleanCacheName(filepath.Base(p))
+		}
 	}
-	d.log.Infof("link: fabric-api indirildi -> %s", path)
+	note, err := linkjar.PrepareFabricAPI(modsDir, res, srv.MCVersion, func() (string, error) {
+		return fetchFabricAPI(d, srv.MCVersion, modsDir)
+	})
+	if err != nil {
+		return fmt.Errorf("%w; ortak dünya modu kurulmadı — modu fabric-api "+
+			"olmadan koymak sunucunun HİÇ açılmamasına yol açardı", err)
+	}
+	d.log.Infof("link: %s: %s", srv.Name, note)
 	return nil
 }
 
@@ -424,33 +689,12 @@ func (d *Daemon) ensureLinkArtifact(srv *model.Server) {
 
 // linkModInstalled reports whether the mod is present for a server.
 func (d *Daemon) linkModInstalled(srv *model.Server) bool {
-	dataDir := srv.DataDir
-	if dataDir == "" {
-		dataDir = d.store.Paths.ServerData(srv.ID)
-	}
 	name, sub, ok := linkArtifact(srv.Software)
 	if !ok {
 		return false
 	}
-	st, err := os.Stat(filepath.Join(dataDir, sub, name))
+	st, err := os.Stat(filepath.Join(d.serverDataDir(srv), sub, name))
 	return err == nil && st.Size() > 0
-}
-
-// findLinkMod locates the mod jar in the image.
-func findLinkMod() string { return findLinkArtifact(linkModName) }
-
-// findLinkArtifact locates one of the two jars in the image.
-func findLinkArtifact(name string) string {
-	if name == "" {
-		return ""
-	}
-	for _, dir := range linkModSearchPaths {
-		p := filepath.Join(dir, name)
-		if st, err := os.Stat(p); err == nil && st.Size() > 0 {
-			return p
-		}
-	}
-	return ""
 }
 
 // copyFile copies src to dst atomically (temp + rename).
@@ -499,6 +743,9 @@ func (d *Daemon) handleLinkStatus(_ context.Context, _ json.RawMessage) (any, er
 		st.Difficulty = srv.Link.Difficulty
 		st.SlabChunks = srv.Link.SlabChunks
 		st.ModInstalled = d.linkModInstalled(srv)
+		if !st.ModInstalled {
+			st.ModProblem = d.linkModProblem(srv)
+		}
 	}
 
 	coord := d.cluster.LinkCoord()
@@ -515,7 +762,12 @@ func (d *Daemon) handleLinkStatus(_ context.Context, _ json.RawMessage) (any, er
 		st.Note = top.Note
 	}
 	if srv != nil && !st.ModInstalled {
-		st.Note = linkModName + " sunucuya kurulmadı — ortak dünya çalışmaz"
+		// NEDEN de yazılır: eskiden yalnızca "kurulmadı" deniyordu ve
+		// kullanıcı 26.3 sunucusunun neden ortak dünya olamadığını göremedi.
+		st.Note = "ortak dünya modu sunucuya kurulmadı — ortak dünya çalışmaz"
+		if st.ModProblem != "" {
+			st.Note = st.ModProblem + " — ortak dünya çalışmaz"
+		}
 	}
 	return st, nil
 }
@@ -542,9 +794,16 @@ func (d *Daemon) handleLinkEnable(_ context.Context, raw json.RawMessage) (any, 
 		}
 		return nil, err
 	}
-	if !srv.Software.SupportsMods() {
-		return nil, &ipc.Error{Code: ipc.CodeUnavailable,
-			Message: "ortak dünya yalnızca mod yükleyen sürümlerde çalışır (Fabric önerilir)"}
+	// linkArtifact, SupportsMods DEĞİL: eskiden burada SupportsMods vardı ve
+	// Paper'ı REDDEDİYORDU — oysa Paper için ayrı bir eklenti
+	// (mcos-link-paper.jar) var ve installLinkMod onu kuruyor. Forge ise
+	// SupportsMods'ta "evet" diyor ama Fabric modunu hiç yüklemiyor.
+	if _, _, ok := linkArtifact(srv.Software); !ok {
+		msg := "ortak dünya yalnızca Fabric ve Paper/Purpur sunucularında çalışır"
+		if _, err := linkjar.LoaderFor(srv.Software); err != nil {
+			msg = err.Error()
+		}
+		return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: msg}
 	}
 
 	// En az iki eşleşmiş cihaz gerekir — yoksa "ortak" bir dünya yok.
@@ -554,9 +813,25 @@ func (d *Daemon) handleLinkEnable(_ context.Context, raw json.RawMessage) (any, 
 			paired++
 		}
 	}
-	if paired == 0 {
+	// Aynı makinede kopyalara bölünmüş bir sunucu PC olmadan da ortak
+	// dünyadır: kopyalar birbirinin düğümüdür.
+	local := d.instanceCount(srv) - 1
+	if paired == 0 && local == 0 {
 		return nil, &ipc.Error{Code: ipc.CodeUnavailable,
-			Message: "önce en az bir PC eşleştirin (MCOS Paylaşım ekranı)"}
+			Message: "önce en az bir PC eşleştirin (MCOS Paylaşım ekranı) ya da sunucu sayısını 2+ yapın"}
+	}
+
+	// ── Mod ÖNCE: kurulamıyorsa ortak dünya AÇILMAZ ─────────────────────
+	// Kullanıcının gerçek raporu: "ortak dünyayı açınca 'mcos link kurulu
+	// değil' diyor." Eskiden burada mod hatası yalnızca günlüğe yazılıyor,
+	// sunucu yine ortak dünya olarak işaretleniyor ve kullanıcıya "ortak
+	// dünya oldu" deniyordu: eşlere kurulum gidiyor, sınır hiç çalışmıyordu.
+	// Şimdi NEDEN (ör. "Fabric 1.20.1 için ortak dünya modu yok
+	// (desteklenen: 1.20.5–26.3)") hata olarak döner ve hiçbir şey
+	// işaretlenmez.
+	if err := d.installLinkMod(srv); err != nil {
+		d.log.Warnf("link: %s ortak dünya açılamadı, mod kurulamadı: %v", srv.Name, err)
+		return nil, &ipc.Error{Code: ipc.CodeUnavailable, Message: err.Error()}
 	}
 
 	diff := model.LinkDifficulty(strings.TrimSpace(p.Difficulty))
@@ -564,6 +839,28 @@ func (d *Daemon) handleLinkEnable(_ context.Context, raw json.RawMessage) (any, 
 		diff = model.DifficultyNormal
 	}
 	seed := strings.TrimSpace(p.Seed)
+	// ── Dünya ZATEN VARSA tohum oradan gelir ─────────────────────────────
+	// Uçtan uca sınamada ölçüldü: sunucu önce kurulup açılmıştı; burada
+	// üretilen tohum yalnızca kayda yazılıyor, kurucunun level.dat'ında ise
+	// rastgele bir tohum (1347023201105565743) duruyordu. Düğüm 424242 ile
+	// kuruldu — iki ayrı dünya. Var olan bir dünyanın tohumu değiştirilemez;
+	// doğru olan, eşlere GERÇEK tohumu göndermektir.
+	seedNote := ""
+	dataDir := d.serverDataDir(srv)
+	switch have, err := d.liveWorldSeed(srv, dataDir); {
+	case err == nil:
+		if seed != "" && !cluster.SameSeed(seed, have) {
+			seedNote = fmt.Sprintf(" — bu dünya zaten %s tohumuyla oluşmuş; "+
+				"eşlere o gönderildi (girilen tohum yalnızca yeni dünyada geçerli olur)", have)
+		}
+		seed = have
+	case !errors.Is(err, cluster.ErrNoWorld):
+		// level.dat okunamıyor: tohumu bilmeden devam etmek iki ayrı dünya
+		// riskidir. Kullanıcıya açıkça söyle.
+		d.log.Warnf("link: %s dünyasının tohumu okunamadı: %v", srv.Name, err)
+		seedNote = " — UYARI: dünyanın tohumu okunamadı (" + err.Error() +
+			"); iki makinede arazi farklı olabilir"
+	}
 	if seed == "" {
 		// Tohum YOKSA üret: Minecraft'ın rastgele tohumu her düğümde
 		// FARKLI olurdu ve iki ayrı dünya oluşurdu. Bu, ortak dünyada
@@ -577,6 +874,7 @@ func (d *Daemon) handleLinkEnable(_ context.Context, raw json.RawMessage) (any, 
 		SlabChunks: p.SlabChunks,
 		Seed:       seed,
 		LinkPort:   model.DefaultLinkPort,
+		// OriginID BOŞ: kurucu bu makine.
 	}
 	srv.LevelSeed = seed
 	srv.Difficulty = string(diff)
@@ -585,8 +883,15 @@ func (d *Daemon) handleLinkEnable(_ context.Context, raw json.RawMessage) (any, 
 		return nil, err
 	}
 
-	if err := d.installLinkMod(srv); err != nil {
-		d.log.Warnf("link: mod kurulamadı: %v", err)
+	// Tohum/zorluk server.properties'e ŞİMDİ yazılır; yoksa ilk açılışa
+	// kadar diskte eski değerler durur (Start da yeniden yazar, bkz.
+	// server.WriteLinkProperties). Çalışan sunucuda zorluk komutla
+	// hemen uygulanır — yeniden başlatmadan.
+	if err := server.WriteLinkProperties(dataDir, srv); err != nil {
+		d.log.Warnf("link: server.properties yazılamadı: %v", err)
+	}
+	if st := d.servers.State(srv.ID); st == model.StateRunning {
+		_ = d.servers.Command(srv.ID, "difficulty "+string(diff))
 	}
 
 	// Eşlere gönder. Hatalar TOPLANIR ve kullanıcıya döner: bir eşin
@@ -600,7 +905,10 @@ func (d *Daemon) handleLinkEnable(_ context.Context, raw json.RawMessage) (any, 
 	}
 
 	msg := fmt.Sprintf("%s ortak dünya oldu (%d cihaz, zorluk %s)",
-		srv.Name, paired+1, model.DifficultyLabel(diff))
+		srv.Name, paired+1, model.DifficultyLabel(diff)) + seedNote
+	if local > 0 {
+		msg += fmt.Sprintf(" — bu makinede %d sunucuya bölünecek", local+1)
+	}
 	if len(problems) > 0 {
 		msg += " — ulaşılamayan: " + strings.Join(problems, ", ")
 	}
@@ -666,6 +974,123 @@ func (d *Daemon) handleClusterScan(ctx context.Context, _ json.RawMessage) (any,
 	return map[string]any{"peers": peers}, nil
 }
 
+// ── RPC: cluster.scanStart / cluster.scanStatus ─────────────────────────────
+//
+// CANLI eş taraması. Kablosuz taramasıyla AYNI desen (bkz. handlers_net.go):
+// başlat + yokla. Kullanıcının isteği her iki liste için de aynıydı —
+// "ağı tararken dönen animasyon, listeye seçenek gelince aynı animasyon".
+//
+// Neden bloklayan cluster.scan duruyor: telefon uygulaması ve betikler onu
+// kullanıyor; kaldırmak onları kırardı.
+
+// peerScanSession holds the running LAN scan.
+type peerScanSession struct {
+	mu      sync.Mutex
+	running bool
+	gen     int
+	peers   []model.Peer
+	total   int
+	done    int
+	err     string
+	started time.Time
+}
+
+func (d *Daemon) peerScanSess() *peerScanSession {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.peerScan == nil {
+		d.peerScan = &peerScanSession{}
+	}
+	return d.peerScan
+}
+
+// PeerScanProgress is what the panel polls.
+type PeerScanProgress struct {
+	Scanning bool         `json:"scanning"`
+	Peers    []model.Peer `json:"peers"`
+	Total    int          `json:"total"`
+	Done     int          `json:"done"`
+	Error    string       `json:"error,omitempty"`
+	Gen      int          `json:"gen"`
+}
+
+func peerProgressOf(s *peerScanSession) PeerScanProgress {
+	out := PeerScanProgress{
+		Scanning: s.running, Total: s.total, Done: s.done,
+		Error: s.err, Gen: s.gen,
+	}
+	out.Peers = append([]model.Peer(nil), s.peers...)
+	return out
+}
+
+func (d *Daemon) handleClusterScanStart(_ context.Context, _ json.RawMessage) (any, error) {
+	if !d.Config().Cluster.Enabled {
+		return nil, &ipc.Error{Code: ipc.CodeUnavailable,
+			Message: "PC paylaşımı kapalı — Ayarlar'dan açın"}
+	}
+	s := d.peerScanSess()
+
+	s.mu.Lock()
+	if s.running {
+		out := peerProgressOf(s)
+		s.mu.Unlock()
+		return out, nil
+	}
+	s.running = true
+	s.gen++
+	s.peers = nil
+	s.total, s.done, s.err = 0, 0, ""
+	s.started = time.Now()
+	gen := s.gen
+	out := peerProgressOf(s)
+	s.mu.Unlock()
+
+	go func() {
+		// Bağlamı İSTEKTEN AYIRIYORUZ: istek yanıtlandığı an ctx iptal olur;
+		// ona bağlanmak taramayı başlar başlamaz öldürürdü.
+		sctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+
+		peers, err := d.cluster.ScanLAN(sctx, func(p cluster.ScanProgress) {
+			s.mu.Lock()
+			if s.gen == gen {
+				s.total, s.done = p.Total, p.Done
+				// Bulunanları da taşı: ilerleme raporu yalnızca SAYI
+				// veriyor, panel ise satırları istiyor.
+				s.peers = append([]model.Peer(nil), p.Peers...)
+			}
+			s.mu.Unlock()
+		})
+
+		s.mu.Lock()
+		if s.gen == gen {
+			if err != nil {
+				s.err = err.Error()
+			} else {
+				s.peers = peers
+			}
+			s.running = false
+		}
+		s.mu.Unlock()
+	}()
+
+	return out, nil
+}
+
+func (d *Daemon) handleClusterScanStatus(_ context.Context, _ json.RawMessage) (any, error) {
+	s := d.peerScanSess()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Emniyet supabı: tarama asılı kalırsa panel sonsuza kadar beklemesin.
+	if s.running && !s.started.IsZero() && time.Since(s.started) > 40*time.Second {
+		s.running = false
+		if s.err == "" {
+			s.err = "tarama zaman aşımına uğradı"
+		}
+	}
+	return peerProgressOf(s), nil
+}
+
 // ── RPC: cluster.pairManual ─────────────────────────────────────────────────
 
 type pairManualParams struct {
@@ -690,12 +1115,35 @@ func (d *Daemon) handleClusterPairManual(ctx context.Context, raw json.RawMessag
 	defer cancel()
 
 	peer, err := d.cluster.AddManual(pctx, addr)
+	if errors.Is(err, cluster.ErrNeedsCodePairing) {
+		return map[string]any{"peer": peer, "needsCode": true,
+			"message": peer.Name + " bulundu — kodla eşleştirme başlatılıyor"}, nil
+	}
 	if err != nil {
 		return nil, &ipc.Error{Code: ipc.CodeNotFound, Message: err.Error()}
 	}
+	msg := peer.Name + " eşleştirildi (" + peer.IP + ")"
+	if peer.Problem != "" {
+		msg += " — " + peer.Problem
+	}
+
+	// Ortak dünya açıksa YENİ EŞE HEMEN KUR. Eskiden kurulum yalnızca
+	// "ortak dünyayı aç" anında gönderiliyordu; sonradan eşleşen PC hiçbir
+	// şey almıyordu. Kullanıcının isteği aynen: "eşleyince ona da sunucu
+	// kurulacak, alan belirlenecek, mod kurulacak, o da başlayacak".
+	if coord := d.cluster.LinkCoord(); coord != nil && peer.Problem == "" {
+		res, ok, perr := coord.SyncPeer(peer)
+		switch {
+		case perr != nil:
+			msg += " — ortak dünya kurulamadı: " + perr.Error()
+		case ok:
+			msg += " — ortak dünya oraya kuruluyor: " + res
+		}
+	}
+	d.log.Infof("cluster: %s", msg)
 	return map[string]any{
 		"peer":    peer,
-		"message": peer.Name + " eşleştirildi (" + peer.IP + ")",
+		"message": msg,
 	}, nil
 }
 
@@ -713,6 +1161,10 @@ func (d *Daemon) handleClusterSecret(_ context.Context, _ json.RawMessage) (any,
 		"nodeName": d.Config().Cluster.NodeName,
 		"port":     d.Config().Cluster.Port,
 		"address":  clusterAddress(d.Config().Cluster.Port),
+		// enabled: panel kapalıyken "Ağı tara" yerine "PC paylaşımını aç"
+		// gösterebilsin. Eskiden kullanıcı taramaya basıyor, "kapalı —
+		// Ayarlar'dan açın" hatası alıp ekranı terk etmek zorunda kalıyordu.
+		"enabled": d.Config().Cluster.Enabled,
 	}, nil
 }
 

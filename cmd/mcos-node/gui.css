@@ -1,0 +1,51 @@
+/* MCOS Düğüm penceresine özgü parçalar (ortak tema: internal/deskgui/theme.css).
+ *
+ * Eşleştirme isteği kartı BİLEREK büyük: kullanıcı MCOS ekranındaki kodu
+ * buradakiyle karşılaştıracak — küçük bir satır gözden kaçıyor, iki ekran
+ * arasında gidip gelirken kod bir bakışta okunmalı.
+ */
+.durum {
+  display: flex; align-items: center; gap: 18px;
+  padding: 18px 20px; margin-bottom: 16px;
+  background: var(--surface); border: 1px solid var(--divider);
+  border-radius: var(--radius);
+}
+.durum .simge {
+  flex: none; width: 52px; height: 52px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 26px; font-weight: 800; color: var(--on);
+  background: var(--faint);
+}
+.durum.ok .simge { background: var(--ok); }
+.durum.vurgu .simge { background: var(--accent); }
+.durum.uyari .simge { background: var(--warn); }
+.durum .baslik { font-size: 20px; font-weight: 700; }
+.durum .aciklama { color: var(--dim); margin-top: 3px; line-height: 1.45; }
+.durum .metin { flex: 1; min-width: 0; }
+
+.teklif {
+  margin-bottom: 16px; padding: 20px 22px;
+  background: linear-gradient(180deg, #17302e 0%, var(--surface) 100%);
+  border: 2px solid var(--accent); border-radius: var(--radius);
+  box-shadow: 0 0 0 4px #23a99c22;
+}
+.teklif .ust-satir { display: flex; align-items: center; gap: 10px; font-weight: 700; color: var(--accent); letter-spacing: .02em; text-transform: uppercase; font-size: 12.5px; }
+.teklif .kim { font-size: 19px; font-weight: 700; margin: 8px 0 2px; }
+.teklif .kim .ip { color: var(--dim); font-weight: 400; font-family: var(--mono); font-size: 14px; }
+.teklif .kod {
+  font-family: var(--mono); font-size: 46px; font-weight: 800; letter-spacing: .08em;
+  color: var(--text); margin: 10px 0 4px; line-height: 1.1;
+}
+.teklif .soru { color: var(--dim); margin-bottom: 14px; }
+.teklif .dugmeler button { font-size: 15px; padding: 10px 22px; }
+.teklif .sure { margin-left: auto; color: var(--faint); font-size: 12.5px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+.teklif.kabul { border-color: var(--ok); box-shadow: 0 0 0 4px #46a75822; background: linear-gradient(180deg, #1a2d1f 0%, var(--surface) 100%); }
+.teklif.kabul .ust-satir { color: var(--ok); }
+
+details.gelismis > summary {
+  cursor: pointer; color: var(--dim); font-weight: 600; list-style: none;
+  user-select: none;
+}
+details.gelismis > summary::before { content: "▸ "; }
+details.gelismis[open] > summary::before { content: "▾ "; }
+details.gelismis[open] > summary { margin-bottom: 10px; }

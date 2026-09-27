@@ -54,11 +54,10 @@ dependencies {
 }
 
 tasks.withType(JavaCompile).configureEach {
-    // Minecraft 1.21.11 Java 21 ister (Mojang manifesti
-    // javaVersion.majorVersion=21 diyor; bkz. offline-manifest.txt). Fabric
-    // esi de ayni degeri kullanir. Java 25'e YALNIZCA Paper'in takvim
-    // surumlerine (26.x) gecilirse ihtiyac olur ve o gecis, surumu
-    // cevrimdisi paketten kopardigi icin bilerek yapilmiyor.
+    // Java 21 bayt kodu: 1.20.5 .. 1.21.11 Java 21 ile calisir, 26.x Java 25
+    // ister ama Java 21 bayt kodunu yukler (26.1.2 / 26.2 / 26.3 ve Purpur
+    // 26.3'te denendi). 25'e cikmak, 1.21.x sunucularini
+    // UnsupportedClassVersionError ile kirardi. Fabric esi de 21 kullanir.
     it.options.release = 21
     it.options.encoding = 'UTF-8'
 }
@@ -79,16 +78,27 @@ processResources {
 
 // ── MCOS'a teslim ───────────────────────────────────────────────────────────
 //
-// Daemon eklentiyi SABIT bir adla arar (mcos-link-paper.jar); surum numarasi
-// iceren bir dosya adi, her yukseltmede daemon'un arama yolunu guncellemeyi
-// gerektirirdi. Bkz. internal/daemon/handlers_link.go linkArtifact().
+// dist/mods/link/ altina IKI dosya gider:
+//   mcos-link-paper.jar  — SABIT ad; surum numarasi iceren bir ad, her
+//                          yukseltmede daemon'un arama yolunu guncellemeyi
+//                          gerektirirdi.
+//   index-paper.tsv      — hangi Minecraft surumunde hangi jar'in DENENDIGI.
+//                          Kaynagi bu klasordeki index-paper.tsv'dir; yeni
+//                          bir surum denendiginde oraya satir eklenir.
+//
+// Eski dist/mods/mcos-link-paper.jar'a BILEREK dokunulmuyor ve artik oraya
+// yazilmiyor: daemon'un dist/mods/link'e gecisi ayri bir iste yapiliyor. O
+// dosya api-version 1.21.11'e pinli ESKI jar'dir; 1.21.11'den eski
+// sunucularda "Unsupported API version 1.21.11" ile reddedilir.
 tasks.register('deployToMcos', Copy) {
     dependsOn tasks.jar
-    from tasks.jar.archiveFile
-    into rootProject.file('../../dist/mods')
-    rename { 'mcos-link-paper.jar' }
+    into rootProject.file('../../dist/mods/link')
+    from(tasks.jar.archiveFile) {
+        rename { 'mcos-link-paper.jar' }
+    }
+    from('index-paper.tsv')
     doLast {
-        println 'mcos-link-paper.jar -> dist/mods/'
+        println 'mcos-link-paper.jar + index-paper.tsv -> dist/mods/link/'
     }
 }
 

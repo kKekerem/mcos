@@ -38,6 +38,9 @@ type Manager struct {
 	mu       sync.Mutex // serializes installs (avoid two downloads of same major)
 	progMu   sync.Mutex
 	progress map[int]*DownloadProgress
+	// builtinRoot, imajla gelen JRE'lerin arandığı kök (bkz. builtin.go).
+	// Boşsa gömülü tarama kapalıdır; testler geçici bir dizin verir.
+	builtinRoot string
 }
 
 // NewManager constructs a Java manager.
@@ -47,6 +50,8 @@ func NewManager(st *store.Store, lg *log.Logger) *Manager {
 		log:      lg,
 		client:   defaultHTTPClient(),
 		progress: make(map[int]*DownloadProgress),
+
+		builtinRoot: defaultBuiltinRoot(),
 	}
 }
 
@@ -63,13 +68,29 @@ func (m *Manager) ProgressMap() map[int]DownloadProgress {
 	return res
 }
 
-// List returns all registered runtimes, sorted by major.
+// List returns every usable runtime — the image's built-in ones plus the
+// registered downloads — one per major, sorted by major.
+//
+// Gömülü bir ana sürüm, kayıt defterindeki aynı ana sürümü GÖLGELER (bkz.
+// Get). Listede ikisini birden göstermek, "hangisi kullanılacak?" sorusunu
+// kullanıcıya bırakmak olurdu; oysa cevap her zaman gömülü olandır.
 func (m *Manager) List() ([]model.JavaRuntime, error) {
 	ix, err := m.store.LoadJavaIndex()
 	if err != nil {
 		return nil, err
 	}
-	rts := ix.Runtimes
+	builtin := m.Builtin()
+	have := make(map[int]bool, len(builtin))
+	rts := make([]model.JavaRuntime, 0, len(builtin)+len(ix.Runtimes))
+	for _, rt := range builtin {
+		have[rt.Major] = true
+		rts = append(rts, rt)
+	}
+	for _, rt := range ix.Runtimes {
+		if !have[rt.Major] {
+			rts = append(rts, rt)
+		}
+	}
 	sort.Slice(rts, func(i, j int) bool { return rts[i].Major < rts[j].Major })
 	return rts, nil
 }
@@ -78,15 +99,21 @@ func (m *Manager) List() ([]model.JavaRuntime, error) {
 // already installed.
 func (m *Manager) Resolve(mcVersion string) (major int, installed bool, err error) {
 	major = RequiredJavaMajor(mcVersion)
-	ix, err := m.store.LoadJavaIndex()
-	if err != nil {
-		return major, false, err
-	}
-	return major, ix.Find(major) != nil, nil
+	_, installed, err = m.Get(major)
+	return major, installed, err
 }
 
-// Get returns the registered runtime for a major, if present.
+// Get returns the runtime for a major, if present: the image's built-in one
+// first, then a registered download.
+//
+// Gömülü olan ÖNCE gelir. Önceki imajlarda "Java 21 kur"a basmış bir
+// kullanıcının /data/java/temurin-21 kopyası kalıcı bölümde duruyor; o
+// kopya imajın SHA-256'sı doğrulanmış JRE'sinden eski olabilir ve diskten
+// okunur. Gömülü olan zaten RAM'dedir ve bu imajla sınanmıştır.
 func (m *Manager) Get(major int) (*model.JavaRuntime, bool, error) {
+	if rt := m.builtinFor(major); rt != nil {
+		return rt, true, nil
+	}
 	ix, err := m.store.LoadJavaIndex()
 	if err != nil {
 		return nil, false, err
@@ -96,7 +123,7 @@ func (m *Manager) Get(major int) (*model.JavaRuntime, bool, error) {
 }
 
 // Ensure returns the runtime for a major, installing it from Adoptium if it is
-// not yet present.
+// not yet present. A built-in major never touches the network.
 func (m *Manager) Ensure(major int) (*model.JavaRuntime, error) {
 	if rt, ok, err := m.Get(major); err != nil {
 		return nil, err
@@ -107,17 +134,20 @@ func (m *Manager) Ensure(major int) (*model.JavaRuntime, error) {
 }
 
 // Install downloads and registers a Temurin JDK for the given major version.
+//
+// Gömülü bir ana sürüm için HİÇBİR ŞEY indirilmez ve gömülü çalışma zamanı
+// döner: sihirbazın "Gerekli Java'yı kur" adımı ve eski istemcilerin
+// java.install çağrısı böylece internetsiz de başarıyla biter.
 func (m *Manager) Install(major int) (*model.JavaRuntime, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Re-check under the lock in case a concurrent caller already installed it.
+	// Re-check under the lock in case a concurrent caller already installed it
+	// (or the image ships it built in).
 	if rt, ok, _ := m.Get(major); ok {
 		return rt, nil
 	}
 
-	url := temurinURL(major)
-	m.logf("java: installing Temurin %d from %s", major, url)
 	if err := os.MkdirAll(m.store.Paths.JavaDir(), 0o755); err != nil {
 		return nil, err
 	}
@@ -131,19 +161,7 @@ func (m *Manager) Install(major int) (*model.JavaRuntime, error) {
 	m.progress[major] = prog
 	m.progMu.Unlock()
 
-	archive, err := downloadFileWithProgress(m.client, url, m.store.Paths.JavaDir(), func(dl, tot int64) {
-		m.progMu.Lock()
-		defer m.progMu.Unlock()
-		prog.Downloaded = dl
-		prog.Total = tot
-		if tot > 0 {
-			prog.Percent = int((dl * 100) / tot)
-		} else {
-			prog.Percent = 50
-		}
-		prog.Status = fmt.Sprintf("İndiriliyor... %% %d (%d MB / %d MB)", prog.Percent, dl/(1024*1024), tot/(1024*1024))
-	})
-	if err != nil {
+	fail := func(err error) (*model.JavaRuntime, error) {
 		m.progMu.Lock()
 		prog.Status = "Hata"
 		prog.Done = true
@@ -151,7 +169,39 @@ func (m *Manager) Install(major int) (*model.JavaRuntime, error) {
 		m.progMu.Unlock()
 		return nil, err
 	}
-	defer os.Remove(archive)
+
+	// Önce yerel arşiv (çevrimdışı paket, bkz. LocalArchiveDirs): internetsiz
+	// makinede 26.x sunucusu da kurulabilsin. Yerel arşiv SİLİNMEZ — tohumlanmış
+	// bir paket dosyasıdır, bir sonraki kurulum da onu kullanır.
+	archive := localArchive(major)
+	if archive != "" {
+		m.logf("java: installing Temurin %d from local archive %s", major, archive)
+	} else {
+		var err error
+		for _, image := range []string{"jre", "jdk"} {
+			url := temurinURL(major, image)
+			m.logf("java: installing Temurin %d from %s", major, url)
+			archive, err = downloadFileWithProgress(m.client, url, m.store.Paths.JavaDir(), func(dl, tot int64) {
+				m.progMu.Lock()
+				defer m.progMu.Unlock()
+				prog.Downloaded = dl
+				prog.Total = tot
+				if tot > 0 {
+					prog.Percent = int((dl * 100) / tot)
+				} else {
+					prog.Percent = 50
+				}
+				prog.Status = fmt.Sprintf("İndiriliyor... %% %d (%d MB / %d MB)", prog.Percent, dl/(1024*1024), tot/(1024*1024))
+			})
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return fail(err)
+		}
+		defer os.Remove(archive)
+	}
 
 	m.progMu.Lock()
 	prog.Status = "Çıkartılıyor ve kuruluyor..."
@@ -199,12 +249,19 @@ func (m *Manager) Install(major int) (*model.JavaRuntime, error) {
 }
 
 // Remove unregisters a major and deletes its files.
+//
+// Gömülü bir ana sürümün yalnızca kayıt defterindeki (indirilmiş, gölgede
+// kalan) kopyası silinir; kopya yoksa ErrBuiltinRemove döner. Gömülü dosyalar
+// rootfs'te durur ve silinmez.
 func (m *Manager) Remove(major int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ix, err := m.store.LoadJavaIndex()
 	if err != nil {
 		return err
+	}
+	if m.builtinFor(major) != nil && ix.Find(major) == nil {
+		return fmt.Errorf("java %d: %w", major, ErrBuiltinRemove)
 	}
 	out := ix.Runtimes[:0]
 	var removed *model.JavaRuntime

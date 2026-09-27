@@ -14,6 +14,19 @@ import (
 // buradan import etmek sözleşme katmanını iş mantığına bağlar ve ileride import
 // döngüsüne yol açar. Paylaşılan veri tipleri "internal/model" içine konur.
 
+// USBFoldersResult lists importable server folders on USB drives.
+type USBFoldersResult struct {
+	Items []model.USBServerFolder `json:"items"`
+}
+
+// ImportUSBParams selects a USB folder to import as a new server.
+type ImportUSBParams struct {
+	Device  string `json:"device"`
+	RelPath string `json:"relPath"`
+	Name    string `json:"name,omitempty"`  // boş: klasör adı
+	RAMMB   int    `json:"ramMB,omitempty"` // boş: 2048
+}
+
 // USBScanResult wraps the list of .jar files found on attached removable drives.
 type USBScanResult struct {
 	Items []model.USBJar `json:"items"`
@@ -78,12 +91,25 @@ type ServerCreateParams struct {
 	Difficulty   string `json:"difficulty,omitempty"`
 	// OnlineMode and PVP default to true (Minecraft's own default) when the
 	// caller omits them, so they are pointers to distinguish "unset" from false.
-	OnlineMode   *bool  `json:"onlineMode,omitempty"`
-	PVP          *bool  `json:"pvp,omitempty"`
-	Hardcore     bool   `json:"hardcore,omitempty"`
-	Whitelist    bool   `json:"whitelist,omitempty"`
-	ClusterShare bool   `json:"clusterShare,omitempty"`
-	DataDir      string `json:"dataDir,omitempty"`
+	OnlineMode   *bool `json:"onlineMode,omitempty"`
+	PVP          *bool `json:"pvp,omitempty"`
+	Hardcore     bool  `json:"hardcore,omitempty"`
+	Whitelist    bool  `json:"whitelist,omitempty"`
+	ClusterShare bool  `json:"clusterShare,omitempty"`
+	// PerfPack: kurulumdan sonra performans paketi kurulsun mu. nil = AÇIK
+	// (eski istemciler alanı göndermez; varsayılan davranış paketi kurmak).
+	PerfPack *bool `json:"perfPack,omitempty"`
+	// Instances: dünya aynı makinede kaç sunucuya bölünsün (nil/1 = tek).
+	// InstancesAuto: sayıyı oyuncu sınırından MCOS seçsin (bkz.
+	// model.AutoInstanceCount). İkisi de eklemeli: eski istemciler göndermez.
+	Instances     *int  `json:"instances,omitempty"`
+	InstancesAuto *bool `json:"instancesAuto,omitempty"`
+
+	// ImportFrom (YALNIZCA daemon içi, IPC'den ayarlanamaz): USB'den aktarılan
+	// ve /data üzerinde hazırlanmış klasör. Oluşturma, yazılım kurulumu
+	// BAŞLAMADAN onu sunucunun veri klasörüne taşır (bkz. handlers_import.go).
+	ImportFrom string `json:"-"`
+	DataDir    string `json:"dataDir,omitempty"`
 }
 
 type ServerUpdateParams struct {
@@ -97,6 +123,9 @@ type ServerUpdateParams struct {
 	JVMFlags     string `json:"jvmFlags,omitempty"`
 	Autostart    *bool  `json:"autostart,omitempty"`
 	WAN          *bool  `json:"wan,omitempty"`
+	// Bkz. ServerCreateParams.Instances; bir sonraki açılışta uygulanır.
+	Instances     *int  `json:"instances,omitempty"`
+	InstancesAuto *bool `json:"instancesAuto,omitempty"`
 }
 
 // ServerChangeVersionParams re-installs a server at a new version/software,
@@ -112,6 +141,13 @@ type ServerChangeVersionParams struct {
 type CatalogSearchParams struct {
 	ServerID string `json:"serverId"`
 	Query    string `json:"query"`
+	// AnyVersion, Minecraft sürüm süzgecini kaldırır.
+	//
+	// Gerekli, çünkü birçok eklenti yeni bir MC sürümü için ayrıca
+	// etiketlenmez (yazar "1.21" der, sunucu "1.21.4"tür). Süzgeçli arama 0
+	// sonuç verdiğinde kullanıcının elinde bir çıkış olmalı; yoksa "hiçbir
+	// şey yok" sanıp vazgeçer.
+	AnyVersion bool `json:"anyVersion,omitempty"`
 }
 
 // CatalogItem is one catalog search hit.
@@ -120,18 +156,54 @@ type CatalogItem struct {
 	Title       string `json:"title"`
 	Description string `json:"description"`
 	Downloads   int    `json:"downloads"`
-	Type        string `json:"type"`
+	// Type, Modrinth'in proje türüdür ("mod" gibi). DİKKAT: Modrinth
+	// WorldEdit'e bile "mod" der; panel rozetini buradan DEĞİL, sunucunun
+	// yazılımından türetir.
+	Type string `json:"type"`
+	// Loader, yükleyici zincirinin bu projede bulunan ilk halkasıdır (ör.
+	// purpur sunucusunda "paper"). Boşsa süzgeç uygulanmamıştır.
+	Loader string `json:"loader,omitempty"`
 }
 
-// CatalogSearchResult lists catalog hits.
+// CatalogSearchResult lists catalog hits plus the filters that were applied,
+// so the panel can print "paper · 1.21.1 · 21 sonuç".
 type CatalogSearchResult struct {
 	Items []CatalogItem `json:"items"`
+	// Total, Modrinth'in bildirdiği toplam eşleşmedir (Items sayfalanmıştır).
+	Total int `json:"total,omitempty"`
+	// Loaders, sorulan yükleyici zinciridir (en özgülü önce).
+	Loaders []string `json:"loaders,omitempty"`
+	// GameVersion boşsa sürüm süzgeci uygulanmamıştır.
+	GameVersion string `json:"gameVersion,omitempty"`
+	// ProjectType, aranan tür ("plugin", "mod", "datapack").
+	ProjectType string `json:"projectType,omitempty"`
 }
 
 // CatalogInstallParams installs a catalog project into a server.
 type CatalogInstallParams struct {
 	ServerID string `json:"serverId"`
 	Slug     string `json:"slug"`
+	// AnyVersion, aramadaki aynı anahtarın karşılığıdır: süzgeçsiz aramada
+	// listelenen bir proje, kurulumda "uyumlu dosya yok" diye reddedilmemeli.
+	AnyVersion bool `json:"anyVersion,omitempty"`
+}
+
+// CatalogInstallResult reports what was installed and HOW it was chosen.
+//
+// Message ESKİ istemcilerle uyum için dosya adıdır (eski panel "kuruldu: "
+// önekiyle gösterir). Summary, yeni panelin alt çubukta gösterdiği tek
+// satırdır: "worldedit (paper uyumlu) kuruldu".
+type CatalogInstallResult struct {
+	OK      bool   `json:"ok"`
+	Message string `json:"message,omitempty"`
+	Summary string `json:"summary,omitempty"`
+	// File, diske yazılan dosyanın adıdır (dizinsiz).
+	File string `json:"file,omitempty"`
+	// Loader, dosyanın bulunduğu yükleyici etiketi; Wanted sunucununki.
+	Loader string `json:"loader,omitempty"`
+	Wanted string `json:"wanted,omitempty"`
+	// Detail, seçimin ayrıntılı açıklamasıdır (sürüm, etiket uyarısı).
+	Detail string `json:"detail,omitempty"`
 }
 
 // ServerVersionsParams asks for available Minecraft versions for a flavour.
@@ -146,6 +218,14 @@ type ServerVersionsResult struct {
 	Versions       []string `json:"versions"`
 	Latest         string   `json:"latest,omitempty"`
 	LatestSnapshot string   `json:"latestSnapshot,omitempty"`
+	// Fallback: liste yazılımın KENDİ kaynağından gelmedi (ağ yok ya da o
+	// API yanıt vermedi); Mojang'ın listesi ya da daemon'a gömülü liste
+	// döndü. Listedeki bazı sürümler o yazılımda olmayabilir — arayüz bunu
+	// söylemeli. Eski istemciler alanı yok sayar.
+	Fallback bool `json:"fallback,omitempty"`
+	// Source, listenin geldiği yer: "fill.papermc.io", "meta.fabricmc.net",
+	// "launchermeta.mojang.com", … ya da gömülü liste için "yerleşik".
+	Source string `json:"source,omitempty"`
 }
 
 // WiFiNetwork is one scanned access point.
@@ -158,6 +238,26 @@ type WiFiNetwork struct {
 // WiFiScanResult lists nearby networks (best signal first).
 type WiFiScanResult struct {
 	Networks []WiFiNetwork `json:"networks"`
+}
+
+// WiFiScanProgress is the state of the running (or last) scan session.
+//
+// ── Neden tek parça WiFiScanResult yetmiyor ─────────────────────────────────
+//
+// Kablosuz tarama 4-12 saniye sürer (bkz. netcfg.ScanLive). Panel bu süre
+// boyunca pencereyi AÇIK tutup ağları geldikçe göstermek istiyor; bunun için
+// "başlat" ve "ne durumdayız" ayrı çağrılar olmak zorunda. Tek bir bloklayan
+// çağrı ile canlı liste mümkün değil.
+//
+// Gen (üretim numarası) her YENİ tarama oturumunda artar: panel, kendi
+// başlattığı oturumun sonuçlarını mı yoksa daha eski bir oturumun artığını mı
+// gördüğünü buradan anlar. Bu olmadan, kullanıcı pencereyi kapatıp hemen
+// yeniden açtığında eski oturumun listesi yeni pencereye sızardı.
+type WiFiScanProgress struct {
+	Scanning bool          `json:"scanning"`
+	Networks []WiFiNetwork `json:"networks"`
+	Error    string        `json:"error,omitempty"`
+	Gen      int           `json:"gen"`
 }
 
 // WiFiApplyParams connects to a network and persists it to the config.
@@ -216,6 +316,9 @@ type TurboParams struct {
 // TurboResult reports the new turbo state after a toggle.
 type TurboResult struct {
 	Enabled bool `json:"enabled"`
+	// Detail: anahtarın donanımda GERÇEKTE neyi değiştirdiği (frekans,
+	// fanlar, P-çekirdekleri). Eski istemciler alanı yok sayar.
+	Detail *model.TurboStatus `json:"detail,omitempty"`
 }
 
 // DiskTarget is one candidate block device for the "make USB persistent" flow.
@@ -374,6 +477,20 @@ type WorldsDeleteParams struct {
 // ClusterPeersResult returns the known peer list.
 type ClusterPeersResult struct {
 	Peers []model.Peer `json:"peers"`
+}
+
+// PairOfferResult carries the code to compare (Supported=false: karşı taraf
+// kodla eşleştirmeyi bilmiyor, eski anahtar yolu kullanılmalı).
+type PairOfferResult struct {
+	Supported bool   `json:"supported"`
+	Code      string `json:"code,omitempty"`
+}
+
+// PairConfirmResult is the state after sending the sealed key:
+// "tamam" | "bekliyor" | "reddedildi" | "yok".
+type PairConfirmResult struct {
+	State   string `json:"state"`
+	Message string `json:"message,omitempty"`
 }
 
 // ClusterPairParams pairs or unpairs a peer.

@@ -27,6 +27,16 @@ type Peer struct {
 	Paired     bool      `json:"paired"`
 	ActiveJobs int       `json:"activeJobs"`
 	LastSeen   time.Time `json:"lastSeen"`
+	// Version, eşin bildirdiği MCOS sürümüdür (boş: bilinmiyor).
+	Version string `json:"version,omitempty"`
+	// Problem, bu eşle ilgili SON sorunun kullanıcıya gösterilecek Türkçe
+	// açıklamasıdır ("anahtar yanlış", "güvenlik duvarı 2222'yi engelliyor
+	// olabilir"...). Boşsa sorun yok.
+	//
+	// NEDEN ALAN: eskiden panel yalnızca "eşleşmemiş/EŞLEŞTİ" gösteriyordu;
+	// anahtar yanlışsa ya da düğüm kuramıyorsa eşleşme "EŞLEŞTİ" görünüp
+	// hiçbir şey olmuyordu ve kullanıcı nedenini göremiyordu.
+	Problem string `json:"problem,omitempty"`
 }
 
 // TaskKind categorizes a distributable unit of work.

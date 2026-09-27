@@ -8,11 +8,16 @@
 #   4. MBR bootstrap yazılmış mı (BIOS)
 #   5. Veri bölümünün etiketi MCOS-DATA mı (kalıcılık buna bağlı)
 #
-# Kullanım: scripts/verify-usb.sh dist/mcos-uefi.img
+# Kullanım: scripts/verify-usb.sh dist/mcos-uefi.img [bios|uefi|both]
+#
+# İkinci argüman BEKLENEN kiptir. Kip içerikten tahmin edilir; tahmin tek
+# başına yetmez: EFI önyükleyicisi eksik kalmış bir "both" imajı düz BIOS
+# imajı gibi görünür ve tüm kontrollerden geçerdi (UEFI bilgisayarda açılmaz).
 
 set -uo pipefail
 
 IMG="${1:-}"
+BEKLENEN="${2:-}"
 [ -n "$IMG" ] || { echo "Kullanım: $0 <imaj>" >&2; exit 2; }
 [ -f "$IMG" ] || { echo "imaj yok: $IMG" >&2; exit 2; }
 
@@ -114,10 +119,18 @@ else
     check_file 'bzImage\|BZIMAGE' "çekirdek (/bzImage)"
     check_file 'initrd'           "initramfs (/initrd.img)"
 
-    if [ "$MODE" = uefi ]; then
+    # MBR'li imajda EFI önyükleyici de varsa bu "both" imajıdır (mkusb.sh
+    # --mode both): iki yol da eksiksiz olmalı, yoksa imaj bilgisayarların
+    # yarısında açılmaz.
+    if [ "$MODE" = bios ] && printf '%s\n' "$FATLIST" | grep -qi 'BOOTX64'; then
+        note "MBR + EFI önyükleyici: hem BIOS hem UEFI imajı (both)"
+        MODE=both
+    fi
+    if [ "$MODE" = uefi ] || [ "$MODE" = both ]; then
         check_file 'BOOTX64'  "UEFI önyükleyici (/EFI/BOOT/BOOTX64.EFI)"
         check_file 'grub *cfg' "GRUB yapılandırması (/EFI/BOOT/grub.cfg)"
-    else
+    fi
+    if [ "$MODE" = bios ] || [ "$MODE" = both ]; then
         check_file 'ldlinux *sys' "syslinux çekirdeği (ldlinux.sys)"
         check_file 'ldlinux *c32' "syslinux modülü ldlinux.c32"
         check_file 'menu *c32'    "syslinux modülü menu.c32"
@@ -156,6 +169,15 @@ if [ -n "${P2_START:-}" ]; then
         bad "veri bolumu etiketi '${VOLNAME:-yok}' — MCOS-DATA olmali, yoksa Java/sunucular kalici OLMAZ"
     fi
 
+fi
+
+if [ -n "$BEKLENEN" ]; then
+    echo
+    if [ "$MODE" = "$BEKLENEN" ]; then
+        ok "kip beklendiği gibi: $MODE"
+    else
+        bad "kip '$MODE' — beklenen '$BEKLENEN'"
+    fi
 fi
 
 echo

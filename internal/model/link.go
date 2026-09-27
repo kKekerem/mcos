@@ -125,6 +125,25 @@ type LinkConfig struct {
 	Seed string `json:"seed,omitempty"`
 	// LinkPort is the TCP port the Minecraft-side mod listens on.
 	LinkPort int `json:"linkPort,omitempty"`
+	// OriginID, bu ortak dünyayı KURAN makinenin düğüm kimliğidir; boşsa
+	// dünya bu makinede kurulmuştur.
+	//
+	// NEDEN GEREKLİ: kurulumu eşlere yalnızca kurucu yaymalı. Eşten gelen
+	// bir kopya da kendini "kurucu" sansaydı kurulumu GERİ yollar ve kurucu
+	// sunucunun belleğini eşin kısılmış bütçesine indirirdi (ApplyLinkSpec
+	// RAM'i alıcının bütçesine kısar).
+	OriginID string `json:"originId,omitempty"`
+
+	// Rules: bu sunucu bir EŞ KOPYASIYSA kurucudan gelen oyun kuralları.
+	// Her açılışta server.properties'e yazılır (server.WriteLinkProperties).
+	// Kurucuda nil'dir: kurucunun kuralları kendi server.properties'idir ve
+	// kullanıcının oradaki elle değişikliği ezilmemeli.
+	Rules *LinkRules `json:"rules,omitempty"`
+
+	// Auto: ortak dünya kullanıcı açtığı için DEĞİL, sunucu aynı makinede
+	// birden çok kopyaya bölündüğü için açıldı. Kopya sayısı 1'e inince
+	// MCOS kipi kendisi geri kapatır; kullanıcının elle açtığına dokunmaz.
+	Auto bool `json:"auto,omitempty"`
 }
 
 // PairingPort is where MCOS nodes accept pairing and shared-world pushes.
@@ -263,6 +282,24 @@ type LinkNode struct {
 	Players int `json:"players,omitempty"`
 	// LastSeen is when this node last answered.
 	LastSeen time.Time `json:"lastSeen,omitempty"`
+	// ModReady: bu düğümün sunucusundaki ortak dünya modu düğümler arası
+	// portunda (LinkPort) yanıt veriyor mu. nil: henüz yoklanmadı.
+	//
+	// NEDEN: "Online" yalnızca eşleştirme portunun (2222) yanıt verdiğini
+	// söyler. İki VM'li sınamada eşte mod KURULAMAMIŞ, sunucu modsuz
+	// açılmıştı; kurucu yine "2 düğüm çevrimiçi" gösteriyordu ve sınırı geçen
+	// oyuncunun verisi hiçbir yere gidemezdi.
+	ModReady *bool `json:"modReady,omitempty"`
+	// Local: düğüm, topolojiyi okuyan makinedeki bir KARDEŞ kopyadır (aynı
+	// makinede bölünmüş dünya). Mod bunu görünce oyuncuyu, bağlandığı
+	// adrese (LAN IP'si, genel IP) kardeşin portuyla gönderir; Host alanı
+	// LAN adresidir ve internetten gelen oyuncu ona ulaşamaz.
+	Local bool `json:"local,omitempty"`
+	// PublicAddr, düğümün internet adresidir (playit tüneli, "ad:port" ya
+	// da yalnızca ad). Yalnızca bu makinenin düğümleri için doldurulur:
+	// playit ile gelen oyuncu kardeşe o kardeşin KENDİ tüneliyle aktarılır
+	// (tünel adresi ana sunucununkinden farklıdır, port eklemek işe yaramaz).
+	PublicAddr string `json:"publicAddr,omitempty"`
 }
 
 // LinkStatus is what the panel shows on the pairing screen.
@@ -278,6 +315,11 @@ type LinkStatus struct {
 	ModInstalled bool `json:"modInstalled"`
 	// ModVersion is the installed mod version, if known.
 	ModVersion string `json:"modVersion,omitempty"`
+	// ModProblem says WHY the mod is not installed (Turkish, user-facing).
+	// Eskiden panel yalnızca "mod kurulu değil" diyordu; asıl neden (ör.
+	// "Fabric 1.20.1 için ortak dünya modu yok (desteklenen: 1.20.5–26.3)")
+	// yalnızca günlükte kalıyordu.
+	ModProblem string `json:"modProblem,omitempty"`
 	// Note carries a human-readable explanation for the panel.
 	Note string `json:"note,omitempty"`
 	// Handoffs counts player transfers since the server started.
@@ -313,6 +355,74 @@ type LinkSpec struct {
 	SlabChunks int `json:"slabChunks"`
 	// Origin is the node that created this world (for logs).
 	Origin string `json:"origin,omitempty"`
+	// OriginID is the creator's stable node id (bkz. LinkConfig.OriginID).
+	OriginID string `json:"originId,omitempty"`
+	// Members, kurucunun gördüğü KATILIMCI LİSTESİDİR, dilim sırasıyla.
+	//
+	// NEDEN GEREKLİ: eskiden her düğüm listeyi kendi eşleştirmelerinden
+	// kuruyordu. Üç makinede kurucu [A,B,C] görürken B yalnızca [A,B]
+	// görüyordu (B, C ile hiç eşleşmedi) — iki makine dünyanın AYNI
+	// parçasını sahiplenir, oyuncu yanlış sunucuya aktarılırdı. Liste artık
+	// tek bir yerde (kurucuda) hesaplanıp herkese gönderiliyor.
+	Members []LinkMember `json:"members,omitempty"`
+	// Files, kurucunun sunucusundaki mod/eklenti jar'larıdır (mcos-link ve
+	// fabric-api HARİÇ; onları her düğüm kendisi kurar).
+	//
+	// NEDEN GEREKLİ: kullanıcının isteği "eşleşince ona sunucu kurulacak,
+	// mod kurulacak, senkron olacak" idi. Eskiden düğüm yalnızca mcos-link'i
+	// alıyordu; kurucuya eklenen her eklenti/mod düğümde YOKTU. Fabric'te bu
+	// sınırı geçen oyuncunun eşyalarının/bloklarının yok olması, Paper'da
+	// komutların ve korumaların dünyanın yarısında çalışmaması demekti.
+	// Düğüm dosyaları kurucudan "linkFile" isteğiyle, anahtarla çeker ve
+	// SHA-256 ile doğrular (bkz. cluster/linkfiles.go).
+	Files []LinkFile `json:"files,omitempty"`
+
+	// Rules, iki yarının da AYNI olması gereken oyun kurallarıdır (bkz.
+	// LinkRules). nil: eski bir kurucu göndermedi; eş kendi değerini korur.
+	Rules *LinkRules `json:"rules,omitempty"`
+
+	// Instances, bu makinede aynı dünyayı çalıştıran KARDEŞ kopyalardır.
+	//
+	// json:"-": eşlere GİTMEZ ve özete (specHash) girmez. Eşler kardeşleri
+	// Members listesinden öğrenir; eski sürüm bir eş bilinmeyen alanı atıp
+	// farklı bir özet hesaplasaydı kurulum sonsuza dek yeniden gönderilirdi.
+	Instances []LinkInstance `json:"-"`
+	// PublicAddr, ana sunucunun playit adresidir (bkz. LinkNode.PublicAddr).
+	// Aynı nedenle eşlere gitmez.
+	PublicAddr string `json:"-"`
+}
+
+// LinkInstance is one local sibling copy of the shared-world server.
+type LinkInstance struct {
+	Index      int
+	MCPort     int
+	LinkPort   int
+	Online     bool
+	PublicAddr string
+}
+
+// LinkFile is one mod/plugin jar the origin runs.
+type LinkFile struct {
+	// Dir: "mods" ya da "plugins". Başka bir değer KABUL EDİLMEZ — eşten
+	// gelen bir ad, sunucu klasörünün dışına yazdırmamalı.
+	Dir    string `json:"dir"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+// LinkMember is one participant as the origin sees it.
+//
+// LinkNode'dan AYRI: zaman damgası ve oyuncu sayısı yok, çünkü bu yapı
+// eşlere gönderilenin özetine (hash) giriyor; her saniye değişen bir alan,
+// kurulumu durmadan yeniden göndertirdi.
+type LinkMember struct {
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name"`
+	Host     string `json:"host"`
+	MCPort   int    `json:"mcPort"`
+	LinkPort int    `json:"linkPort"`
+	Online   bool   `json:"online"`
 }
 
 // Normalize fills in defaults for a spec received over the wire.
@@ -342,4 +452,46 @@ func (s LinkSpec) Normalize() LinkSpec {
 		s.ServerName = "Ortak Dünya"
 	}
 	return s
+}
+
+// LinkRules, ortak dünyanın iki yarısında aynı olması ZORUNLU oyun kuralları.
+//
+// ── Yakalanan gerçek hata (iki sanal makineli uçtan uca sınamada ölçüldü) ──
+// Kurucu sunucu online-mode=false (korsan/çevrimdışı hesaplar) ile kurulmuştu;
+// eşin kopyası ise sabit OnlineMode:true ile doğuyordu. Oyuncu sınırı geçti,
+// kurucunun modu aktarım paketini doğru gönderdi, ama eş oyuncuyu
+// "multiplayer.disconnect.unverified_username" ile ATTI. Kurulum kural
+// taşımadığı için iki yarı farklı kurallarla çalışıyordu. Oyun kipi, zor
+// mod (hardcore) ve PvP de aynı nedenle taşınır: sınırı geçen oyuncu başka
+// bir oyuna düşmemeli.
+type LinkRules struct {
+	OnlineMode bool   `json:"onlineMode"`
+	Gamemode   string `json:"gamemode,omitempty"`
+	Hardcore   bool   `json:"hardcore,omitempty"`
+	PVP        bool   `json:"pvp"`
+	MaxPlayers int    `json:"maxPlayers,omitempty"`
+}
+
+// Equal reports whether two rule sets are the same (nil == nil).
+func (r *LinkRules) Equal(o *LinkRules) bool {
+	if r == nil || o == nil {
+		return r == nil && o == nil
+	}
+	return *r == *o
+}
+
+// ApplyTo copies the rules into a server record (panelin gösterdiği alanlar).
+func (r *LinkRules) ApplyTo(srv *Server) {
+	if r == nil || srv == nil {
+		return
+	}
+	srv.OnlineMode = r.OnlineMode
+	srv.PVP = r.PVP
+	srv.Hardcore = r.Hardcore
+	if r.Gamemode != "" {
+		srv.Gamemode = r.Gamemode
+	}
+	if r.MaxPlayers > 0 {
+		srv.MaxPlayers = r.MaxPlayers
+	}
 }

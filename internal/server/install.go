@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mcos/internal/java"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"mcos/internal/model"
@@ -66,6 +68,14 @@ func (m *Manager) Install(ctx context.Context, srv *model.Server) error {
 	dataDir := m.ensureDataDir(srv)
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
+	}
+
+	// Kurucular (Forge/NeoForge) da Java ile çalışır: eski kayıttaki düşük
+	// Java burada da yükseltilir, yoksa 26.x kurucusu Java 21'de düşer.
+	if java.RaiseToRequired(srv) {
+		if err := m.store.SaveServer(srv); err != nil {
+			m.logf("server: %q kaydedilemedi: %v", srv.Name, err)
+		}
 	}
 
 	// Ensure Java is available (installers need it; jar flavors don't, but we
@@ -196,12 +206,77 @@ func applyProperties(dir string, srv *model.Server) error {
 	if s := strings.TrimSpace(srv.LevelSeed); s != "" {
 		kv = append(kv, [2]string{"level-seed", s})
 	}
+
+	// ── Düzeltilen gerçek hata: accepts-transfers HİÇ YAZILMIYORDU ──────
+	//
+	// Ortak dünya (MCOS Link) oyuncuyu sınırda öteki sunucuya aktarmak için
+	// ServerTransferS2CPacket kullanıyor. Minecraft'ta HEDEF sunucu, gelen
+	// aktarımı kabul etmek için "accepts-transfers=true" ayarını ister ve
+	// VARSAYILAN DEĞER FALSE'tur.
+	//
+	// Bu ayar hiçbir yerde yazılmıyordu. Eklentinin kendi javadoc'u onu
+	// "zorunlu ön koşul" ilan ediyor (McosLinkPlugin.java:39-47) ama Go
+	// tarafı yazmıyordu — yani ortak dünya özelliği SON ADIMDA kırıktı:
+	// oyuncu sınırı geçiyor, veri gidiyor, aktarım paketi yollanıyor ve
+	// hedef sunucu istemciyi REDDEDİYORDU.
+	//
+	// Kullanıcının "mcos eşleme çalışsın" demesinin sebebi büyük olasılıkla
+	// buydu: her şey doğru görünüyor, yalnızca son adım sessizce düşüyor.
+	//
+	// Her zaman yazılıyor (yalnızca ortak dünyada değil): ayarın açık olması
+	// tek başına bir risk değil — aktarımı ancak MCOS'un kendi eklentisi
+	// başlatabilir ve hedef zaten kimlik doğrulaması yapıyor.
+	kv = append(kv, [2]string{"accepts-transfers", "true"})
 	for _, p := range kv {
 		if err := setProperty(dir, p[0], p[1]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// ReadLinkRules reads the rules a shared world must share from the ORIGIN's
+// server.properties.
+//
+// Dosya gerçeğin kaynağıdır: kullanıcı online-mode'u sonradan panelin dosya
+// düzenleyicisinden değiştirmiş olabilir; kayıttaki alan ise yalnızca
+// oluşturmadaki değeri tutar. Dosya yoksa ya da anahtar eksikse kayıttaki
+// değer kullanılır.
+func ReadLinkRules(dir string, srv *model.Server) *model.LinkRules {
+	r := &model.LinkRules{
+		OnlineMode: srv.OnlineMode, Gamemode: srv.Gamemode, Hardcore: srv.Hardcore,
+		PVP: srv.PVP, MaxPlayers: srv.MaxPlayers,
+	}
+	f, err := os.Open(filepath.Join(dir, "server.properties"))
+	if err != nil {
+		return r
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		k, v, ok := strings.Cut(strings.TrimSpace(sc.Text()), "=")
+		if !ok || strings.HasPrefix(k, "#") {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		switch strings.TrimSpace(k) {
+		case "online-mode":
+			r.OnlineMode = v == "true"
+		case "pvp":
+			r.PVP = v == "true"
+		case "hardcore":
+			r.Hardcore = v == "true"
+		case "gamemode":
+			if v != "" {
+				r.Gamemode = v
+			}
+		case "max-players":
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				r.MaxPlayers = n
+			}
+		}
+	}
+	return r
 }
 
 func boolStr(b bool) string {
@@ -232,4 +307,57 @@ func setProperty(dir, key, value string) error {
 		lines = append(lines, key+"="+value)
 	}
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+// WriteLinkProperties writes the keys a shared world MUST agree on.
+//
+// ── Yakalanan gerçek hata (uçtan uca sınamada ölçüldü) ──────────────────────
+// applyProperties yalnızca KURULUMDA bir kez çalışır. Sunucu önce kurulup
+// sonra "ortak dünya" yapılınca tohum ve zorluk yalnızca kayda yazılıyordu;
+// kurucu MCOS'ta server.properties "level-seed=" boş ve "difficulty=easy"
+// kaldı, düğüm ise 424242/hard ile açıldı — iki AYRI dünya.
+//
+// Bu yüzden ortak dünya sunucusu HER BAŞLATILIŞTA bu anahtarları yeniden
+// yazar (bkz. Manager.Start). Yalnızca üç anahtar: kullanıcının elle
+// düzenlediği diğer ayarlara dokunulmaz.
+func WriteLinkProperties(dir string, srv *model.Server) error {
+	if srv.Link.Mode != model.LinkSharedWorld {
+		return nil
+	}
+	kv := [][2]string{{"accepts-transfers", "true"}}
+	// Kardeş kopya: portu MCOS atadı ve (başka bir sunucu o portu alırsa)
+	// yeniden atayabilir. Kurulumda bir kez yazılan değere güvenilirse
+	// kardeş ana sunucunun portunda açılmaya çalışıp düşerdi.
+	if srv.IsSibling() && srv.Port > 0 {
+		kv = append(kv, [2]string{"server-port", strconv.Itoa(srv.Port)})
+	}
+	if d := strings.TrimSpace(srv.Difficulty); d != "" {
+		kv = append(kv, [2]string{"difficulty", d})
+	}
+	// Tohum: dünya zaten varsa Minecraft bunu okumaz (level.dat kazanır),
+	// ama yazmanın zararı yok ve dünya silinip yeniden üretilirse doğru
+	// arazi çıkar.
+	if s := strings.TrimSpace(srv.LevelSeed); s != "" {
+		kv = append(kv, [2]string{"level-seed", s})
+	}
+	// Eş kopyası: kurucunun oyun kuralları (bkz. model.LinkRules; online-mode
+	// uyuşmazlığı aktarılan oyuncuyu attırıyordu).
+	if r := srv.Link.Rules; r != nil {
+		kv = append(kv,
+			[2]string{"online-mode", strconv.FormatBool(r.OnlineMode)},
+			[2]string{"pvp", strconv.FormatBool(r.PVP)},
+			[2]string{"hardcore", strconv.FormatBool(r.Hardcore)})
+		if r.Gamemode != "" {
+			kv = append(kv, [2]string{"gamemode", r.Gamemode})
+		}
+		if r.MaxPlayers > 0 {
+			kv = append(kv, [2]string{"max-players", strconv.Itoa(r.MaxPlayers)})
+		}
+	}
+	for _, p := range kv {
+		if err := setProperty(dir, p[0], p[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

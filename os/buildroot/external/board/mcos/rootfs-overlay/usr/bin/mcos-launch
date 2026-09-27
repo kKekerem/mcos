@@ -38,14 +38,15 @@ MCOS_FONT_NAMES="FiraCode Nerd Font,DejaVu Sans Mono,Liberation Mono,Noto Emoji"
 # Acilis animasyonu servisler baslarken calisir ve SON KARESINI kaydeder;
 # panel oradan yakinlasarak acilir. Bayrak dosyalari /run altinda, yani
 # RAM diskinde: yeniden baslatinca kendiliginden kaybolurlar.
-SPLASH_MSG="/run/mcos-splash.msg"      # init'in yazdigi tek satirlik durum
-SPLASH_FRAME="/run/mcos-splash.rgba"   # panelin gecis icin okudugu son kare
-BOOT_READY="/run/mcos-boot.ready"      # bu dosya olusunca splash biter
-SPLASH_STARTED="/run/mcos-splash.started"
+MCOS_RUN="/dev/.mcos"
+SPLASH_MSG="$MCOS_RUN/stage"      # init'in yazdigi tek satirlik durum
+SPLASH_FRAME="$MCOS_RUN/frame.rgba"   # panelin gecis icin okudugu son kare
+BOOT_READY="$MCOS_RUN/ready"      # bu dosya olusunca splash biter
+SPLASH_STARTED="$MCOS_RUN/splash.started"
 # SPLASH_PIDFILE, rcS'in erken baslattigi animasyonun PID'ini tasir
 # (etc/init.d/S04splash). Bu betik animasyonu oradan devralir; bkz.
 # adopt_early_splash.
-SPLASH_PIDFILE="/run/mcos-splash.pid"
+SPLASH_PIDFILE="$MCOS_RUN/splash.pid"
 SPLASH_PID=""
 # VT_STATE, fbvt devralma zincirinin ACIK oldugunu gosterir (internal/fbvt).
 # Konsolu devralan ILK program devralmadan onceki durumu buraya yazar; zinciri
@@ -86,7 +87,9 @@ prepare_console() {
     dmesg -n 1 2>/dev/null || true
     echo 0 > /proc/sys/kernel/printk 2>/dev/null || true
     printf '\033[9;0]' 2>/dev/null || true
-    setterm -blank 0 -powerdown 0 >/dev/null 2>&1 || true
+    # setterm imajda yok; ayni isi yapan kacis dizileri: ekran kararmasi
+    # kapali (9;0, ustte) ve guc tasarrufu kapali (14;0).
+    printf '\033[14;0]' 2>/dev/null || true
     kbd_mode -u >/dev/null 2>&1 || true
     printf '\033%%G' 2>/dev/null || true
     # Yalnizca imajda GERCEKTEN bulunan fontlar (bkz. S99mcos yorumu).
@@ -100,8 +103,21 @@ prepare_console() {
 # stage, acilis ekranindaki durum satirini gunceller.
 #
 # Splash calismiyorsa da zararsizdir: yalnizca bir dosyaya yazar.
+# stage, acilis ekranina GERCEK ilerlemeyi bildirir.
+#
+# Iki bicimde cagrilir:
+#   stage daemon                 -> tablodaki yuzde ve metin (mcos-stage)
+#   stage 72 "Ozel metin"        -> acik yuzde
+#
+# Eskiden yalnizca METIN yaziyordu ve yuzde zamandan uyduruluyordu; kullanici
+# "acilis ekranindaki her sey gercek olsun" dedi (bkz. /usr/bin/mcos-stage).
 stage() {
-    echo "$1" > "$SPLASH_MSG" 2>/dev/null || true
+    if [ -x /usr/bin/mcos-stage ]; then
+        /usr/bin/mcos-stage "$@" 2>/dev/null || true
+        return 0
+    fi
+    # mcos-stage yoksa eski bicim: yalnizca metin.
+    echo "${2:-$1}" > "$SPLASH_MSG" 2>/dev/null || true
 }
 
 # animations_enabled, kullanicinin acilis animasyonunu kapatip kapatmadigina bakar.
@@ -176,7 +192,7 @@ start_splash() {
 
     : > "$SPLASH_STARTED" 2>/dev/null || true
     rm -f "$BOOT_READY" "$SPLASH_FRAME" 2>/dev/null || true
-    stage "Sistem baslatiliyor..."
+    stage init
 
     # --keep verildigi an panel VT'si grafik kipinde kalacak demektir: bundan
     # sonra o VT'ye yazilan hicbir metin gorunmez.
@@ -244,9 +260,11 @@ finish_splash() {
         if [ -n "$SPLASH_PID" ]; then
             pid_running "$SPLASH_PID" || break
         else
-            # pgrep yoksa komut 127 dondurur ve dongu hemen biter: eksik bir
-            # arac yuzunden acilis BEKLEMEZ.
-            pgrep mcos-splash >/dev/null 2>&1 || break
+            # PID bilinmiyorsa ADA gore bak. Eskiden burada pgrep vardi ve
+            # pgrep imajda olmadigi icin dongu HEP hemen biterdi: animasyon
+            # sureci kapanmadan panel cizmeye baslardi (iki program ayni
+            # cerceve arabellegine yazar).
+            proc_running mcos-splash || break
         fi
         sleep 0.1 2>/dev/null || sleep 1
         i=$((i + 1))
@@ -272,7 +290,10 @@ finish_splash() {
         wait "$SPLASH_PID" 2>/dev/null || true
         SPLASH_PID=""
     else
-        pkill mcos-splash >/dev/null 2>&1 || true
+        # pkill imajda YOK (scripts/test-install-tools.sh yakaladi): hata
+        # "|| true" ile yutuluyor ve rcS'in baslattigi acilis ekrani hic
+        # oldurulmuyordu. busybox killall var.
+        killall mcos-splash >/dev/null 2>&1 || true
     fi
     rm -f "$SPLASH_PIDFILE" 2>/dev/null || true
 }
@@ -361,6 +382,48 @@ recovery_console() {
     console_sane "$RECOVERY_DEVICE"
 }
 
+# POWER_GRACE, kapanmanin tamamlanmasi icin beklenen sure (saniye).
+POWER_GRACE=60
+
+# power_wait, KAPAT/YENIDEN BASLAT sonrasi ekrani siyah ve SESSIZ tutar.
+#
+# ── Yakalanan gercek hata ──────────────────────────────────────────────────
+#
+# QEMU'da kapanis olcuidu: kapanma animasyonu ekrani siyaha indiriyor, panel
+# cikiyor ve HEMEN ardindan bu betigin kurtarma menusu o siyahin uzerine
+# basiliyordu:
+#
+#   MCOS paneli kapandi.
+#     [1] Paneli yeniden ac (varsayilan)
+#     ...
+#   Secim [1] (15 sn):
+#
+# Kullanicinin kapanista gordugu son sey, ozenle yapilmis animasyon degil bir
+# metin menusuydu. Dahasi menu 15 saniye sonra varsayilana dusuyor ve
+# KAPANMAKTA OLAN sistemde paneli YENIDEN ACIYORDU.
+#
+# Panel artik "bilerek kapandim" diyebiliyor (cikis kodu 65) ve bu fonksiyon
+# devrali: ekran siyah kalir, hicbir sey yazilmaz, panel yeniden acilmaz.
+#
+# Ama sonsuza kadar susulmaz: kapanma TAKILIRSA (init bir sunucuyu
+# durduramiyor, bir disk senkronize olmuyor) kullaniciyi kara ekranla yalniz
+# birakmak en kotu sonuc olurdu. POWER_GRACE saniye sonra konusulur ve
+# kurtarma menusu geri gelir.
+power_wait() {
+    # Ekrani temizle ve IMLECI GIZLE: yanip sonen bir imlec, "kapaniyor"
+    # hissini bozan tek piksel olurdu.
+    printf '\033[2J\033[H\033[?25l' >"$ACTIVE_DEVICE" 2>/dev/null || true
+    i=0
+    while [ "$i" -lt "$POWER_GRACE" ]; do
+        sleep 1
+        i=$((i + 1))
+    done
+    # Buraya ulasildiysa sistem hala ayakta: artik konusalim.
+    console_sane "$ACTIVE_DEVICE"
+    echo ""
+    echo "Kapanma ${POWER_GRACE} saniyedir tamamlanmadi - sistem takilmis olabilir."
+}
+
 # panel_console, girdi/ciktiyi panel VT'sine geri verir.
 #
 # Kurtarma arayuzu baska bir VT'ye tasinmis olabilir; panel HER ZAMAN kendi
@@ -381,9 +444,53 @@ panel_console() {
     exec <"$PANEL_DEVICE" >"$PANEL_DEVICE" 2>&1
 }
 
+# log_line, ekrana DEGIL gunluge yazar.
+#
+# Acilista ekranda yalnizca MCOS animasyonu olmali; ama teshis bilgisini
+# tamamen atmak da kabul edilemez. Ikisinin arasi: her sey /run/mcos/launch.log
+# dosyasina gider ve kurtarma menusunden okunabilir.
+LAUNCH_LOG="/run/mcos/launch.log"
+log_line() {
+    mkdir -p /run/mcos 2>/dev/null || true
+    echo "$(date -Is 2>/dev/null) $*" >> "$LAUNCH_LOG" 2>/dev/null || true
+}
+
+# mcosd_running, daemon'un calisip calismadigini /proc'tan sorar.
+#
+# ── Duzeltilen gercek hata ──────────────────────────────────────────────────
+#
+# Burada `pgrep mcosd` vardi ve PGREP BU IMAJDA YOK. Bulunamayan komut hata
+# donuyor, "!" onu "calismiyor" diye okuyor ve S99mcos'un ZATEN baslattigi
+# daemon'un yanina IKINCISI aciliyordu.
+#
+# QEMU'da SSH ile dogrulandi: iki mcosd sureci (ppid=1 ve ppid=mcos-launch).
+# Ikisi de ayni /data kokunu kullaniyor; ikisinin de sunucu denetleyicisi ve
+# yedek zamanlayicisi var. Ayni Minecraft sunucusunun iki kez baslatilmasi
+# demek: iki JVM ayni dunya klasorune yazar ve dunya bozulur.
+#
+# /proc taramasi hicbir ek komuta bagli degil: busybox'in kendi kabugu yeter.
+# (Daemon ayrica KENDI kilidini de tutuyor -- bkz. cmd/mcosd/singleton.go.
+#  Iki savunma, cunku daemon'u baslatabilecek baska yollar da var.)
+# proc_running, verilen ADDA calisan bir surec var mi diye /proc'a bakar.
+#
+# Hicbir ek komuta bagli DEGIL: busybox kabugunun kendisi yeter. pgrep bu
+# imajda YOK ve ona dayanan her kontrol sessizce yanlis cevap veriyordu.
+proc_running() {
+    want="$1"
+    for p in /proc/[0-9]*; do
+        [ -r "$p/comm" ] || continue
+        read -r c < "$p/comm" 2>/dev/null || continue
+        [ "$c" = "$want" ] && return 0
+    done
+    return 1
+}
+
+mcosd_running() { proc_running mcosd; }
+
 start_daemon() {
-    if ! pgrep mcosd >/dev/null 2>&1; then
-        echo ">> MCOS daemon baslatiliyor..."
+    if ! mcosd_running; then
+        # Ekrana DEGIL gunluge: acilista logo disinda hicbir metin gorunmemeli.
+        log_line "MCOS daemon baslatiliyor"
         /usr/bin/mcosd --data-root /data --listen "$SOCK" >"$LOG" 2>&1 &
     fi
 }
@@ -419,9 +526,17 @@ wait_daemon() {
 }
 
 prepare_network_radios() {
-    rfkill unblock all 2>/dev/null || true
-    rfkill unblock wifi 2>/dev/null || true
-    rfkill unblock wlan 2>/dev/null || true
+    # rfkill yumusak engelini ARACSIZ kaldir. Burada "rfkill unblock ..."
+    # vardi ama olculdu: rfkill ikilisi imajda YOK (util-linux eski
+    # yapilandirmayla, --disable-rfkill ile derlenmis). Hata 2>/dev/null ile
+    # yutuldugu icin uçak kipinde kalmis bir dizustude kart hic acilmiyordu.
+    # Cekirdegin sysfs arayuzu (soft dosyasi) her zaman var.
+    for r in /sys/class/rfkill/rfkill*; do
+        [ -r "$r/type" ] || continue
+        case "$(cat "$r/type" 2>/dev/null)" in
+            wlan|all) echo 0 > "$r/soft" 2>/dev/null || true ;;
+        esac
+    done
     for iface in /sys/class/net/*; do
         dev=$(basename "$iface")
         if [ -e "$iface/phy80211" ] || [ -e "$iface/wireless" ] || echo "$dev" | grep -qE '^wlan|^wlp|^wls'; then
@@ -461,8 +576,30 @@ detect_font_size() {
     fi
 }
 
+# has_display, panelin cizebilecegi bir ekran olup olmadigini soyler.
+#
+# Panel artik ONCE ekran kartina (DRM, /dev/dri/card*) ciziyor; /dev/fb0
+# yalnizca geri dusus. Eskiden yalnizca fb0'a bakiliyordu ve ikisi de yoksa
+# HEMEN vazgeciliyordu. Oysa eski BIOS + VGA metin kipindeki bir makinede
+# firmware framebuffer'i yoktur; ekran karti surucusu (i915/amdgpu) probe'unu
+# birkac saniye SONRA bitirir. Bu yuzden 15 saniyeye kadar beklenir
+# (cekirdegin baglayici yoklama araligi 10 sn'yi kapsayacak kadar).
 has_framebuffer() {
-    [ -c /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ]
+    [ -c /dev/fb0 ] || [ -e /sys/class/graphics/fb0 ] && return 0
+    for c in /dev/dri/card*; do
+        [ -c "$c" ] && return 0
+    done
+    return 1
+}
+
+wait_display() {
+    i=0
+    while [ "$i" -lt 60 ]; do
+        has_framebuffer && return 0
+        sleep 0.25 2>/dev/null || sleep 1
+        i=$((i + 1))
+    done
+    has_framebuffer
 }
 
 run_panel_fbterm() {
@@ -552,29 +689,42 @@ show_recovery() {
 
 prepare_console
 start_splash
-stage "MCOS servisi baslatiliyor..."
+stage daemon
 start_daemon
 wait_daemon
-stage "Ag aygitlari hazirlaniyor..."
+stage network
 prepare_network_radios
-stage "Yazi tipleri hazirlaniyor..."
+stage fonts
 prepare_fonts
-stage "Panel aciliyor..."
+stage panel
 
 while true; do
     # Onceki tur kurtarma menusunu baska bir VT'ye tasimis olabilir; panel
     # kendi VT'sinde acilmali.
     panel_console
-    printf '\033[2J\033[H'
-    echo "MCOS hazirlaniyor..."
-    echo "Klavye ile kullanin: ok tuslari, Enter, Esc, Tab."
-    echo ""
+    # ── Ekran SESSIZ tutuluyor ──────────────────────────────────────────────
+    #
+    # Burada ekrana "MCOS hazirlaniyor... / Klavye ile kullanin: ..." yaziliyordu.
+    # Kullanicinin istegi acikti:
+    #
+    #   "acinca direkt logo gelmeli. ilk basta mcos yukleniyor daemon aciliyor
+    #    felan var ya onlar olmasin"
+    #
+    # O satirlar acilis animasyonunun ustune basiliyor ve markali acilisi
+    # bozuyordu. Metin SILINMIYOR, yalnizca ekran yerine gunluge gidiyor:
+    # bir sey ters giderse "mcos-launch nereye kadar geldi" sorusunun cevabi
+    # hala duruyor.
+    #
+    # Ekran yalnizca TEMIZLENIYOR: panel kendi karesini cizene kadar arada
+    # eski konsol metni gorunmesin.
+    printf '\033[2J\033[H\033[?25l'
+    log_line "MCOS hazirlaniyor (panel aciliyor)"
 
     panel_failed=""
     MODE="$(panel_mode)"
 
-    if ! has_framebuffer; then
-        panel_failed="framebuffer (/dev/fb0) bulunamadi"
+    if ! wait_display; then
+        panel_failed="ekran bulunamadi (ne /dev/dri/card* ne /dev/fb0 - 15 sn beklendi)"
         show_recovery "$panel_failed"
     elif [ "$MODE" != "legacy" ] && [ -x /usr/bin/mcos-panel-fb ]; then
         # YENI panel. Cikis kodu 0 ise kullanici normal cikti (veya F12 ile
@@ -587,7 +737,11 @@ while true; do
         # kalici olarak kaydedilir, boylece bir sonraki acilista da eski panel
         # gelir. Bu ayrimi yapmasaydik F12 yeni paneli yeniden acardi ve
         # kullanici yeni arayuzde bir sorun oldugunda kilitli kalirdi.
-        if [ "$rc" -eq 64 ]; then
+        if [ "$rc" -eq 65 ]; then
+            # Kullanici KAPAT/YENIDEN BASLAT dedi ve istek cekirdege iletildi.
+            # Panel BILEREK kapandi: menu gosterilmez, panel yeniden acilmaz.
+            power_wait
+        elif [ "$rc" -eq 64 ]; then
             echo "eski panele geciliyor (F12)"
             mkdir -p /data/mcos 2>/dev/null || true
             echo "mode=legacy" > /data/mcos/panel.conf 2>/dev/null || true

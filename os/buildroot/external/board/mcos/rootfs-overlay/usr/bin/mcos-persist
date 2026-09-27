@@ -1,78 +1,285 @@
 #!/bin/sh
-# mcos-persist — make the booted USB persistent (optional).
+# mcos-persist — acilan USB'nin bos alanina kalici veri bolumu (MCOS-DATA) ekler.
 #
-# MCOS normally runs entirely from RAM (initramfs); config + servers live under
-# /data, which S99mcos mounts from a partition labelled MCOS-DATA. This script
-# adds that partition to free space on the booted USB so /data survives reboots.
-# It is idempotent and conservative: it only ever APPENDS a new partition and
-# never touches the existing ISO partition/data.
+# MCOS normalde tamamen RAM'den calisir; ayarlar, sunucular ve Java /data
+# altinda durur. /data kalici bir bolumde degilse yeniden baslatinca her sey
+# gider. Bu betik USB'nin BOS alanina yeni bir ext4 bolumu ekler; var olan
+# bolumlere ve ISO'nun kendisine DOKUNMAZ.
 #
-# Usage: mcos-persist [/dev/sdX]   (no arg = auto-detect the booted USB)
-set -e
+# Kullanim: mcos-persist [/dev/sdX]   (arguman yoksa acilan USB bulunur)
+#
+# Cikis kodlari:
+#   0  kalicilik hazir (yeni kuruldu ya da zaten vardi)
+#   1  gercek hata (mesaj ne oldugunu soyler; diske YAZILMADI ya da yarim kalmadi)
+#   3  bu ortamda gecerli degil (DVD/ISO, salt okunur) — ariza degil
+#
+# Ventoy USB'sinde bolum EKLENMEZ (Ventoy'un duzeni bozulur); onun yerine
+# Ventoy'un veri bolumunde bir kalicilik DOSYASI olusturulur (mcos-vtoydata).
+#
+# ══════════════════════════════════════════════════════════════════════════
+# YAKALANAN GERCEK HATALAR (eski surum)
+# ══════════════════════════════════════════════════════════════════════════
+#
+# 1) KALICILIK HIC OLMUYORDU. Eski surum sfdisk'e, yoksa busybox fdisk'e
+#    "n p <bos> <bos> w" veriyordu. Imajda sfdisk YOK. grub-mkrescue'nun
+#    urettigi ISO ise GPT tasiyor (olculdu: 4 bolum, yedek GPT basligi diskin
+#    degil ISO'nun sonunda) ve busybox fdisk GPT'yi hic tanimiyor. Hata
+#    "|| true" ile yutuluyordu.
+#
+# 2) VERI KAYBI. Ardindan "en yuksek numarali bolum" yeni bolum sayilip ona
+#    mkfs.ext4 -F basiliyordu. Bolumleme olmadigi icin o bolum ISO'nun kendi
+#    4. bolumuydu. USB kalici olmuyor, ustelik bozuluyordu.
+#
+# 3) TUZAK: GPT duzeltilmeden "parted -s mkpart" bolumu disk sonuna koyamaz,
+#    "Error: ... 237MB to 237MB" yazar AMA CIKIS KODU 0 DONER (olculdu, parted
+#    3.6). Cikis koduna guvenen bir betik basarili sanirdi. Bu yuzden basari
+#    bolum listesinin ONCE/SONRA farkiyla olculuyor.
+#
+# Bu surumun yontemi, ISO'nun 2 GB'lik bir kopyasi uzerinde denendi ve sonuc
+# QEMU'da hem BIOS hem UEFI ile acildi; /data yeni bolumden baglandi.
+
+set -eu
 
 log() { echo "mcos-persist: $*"; }
+die() { log "HATA: $*"; exit 1; }
+yok() { log "$*"; exit 3; }
 
-# Already persistent? Nothing to do.
+for t in parted mkfs.ext4 dd od; do
+    command -v "$t" >/dev/null 2>&1 || die "gerekli arac yok: $t"
+done
+
+# Zaten kalici mi?
+#
+# Once /data'nin KENDISINE bak: Ventoy kalicilik dosyasi bir loop aygitidir
+# ve busybox findfs/blkid loop aygitlarini taramiyor. Yakalanan hata (QEMU,
+# Ventoy duzeni): /data zaten dosyadan bagliyken ikinci "Kalici yap" bunu
+# goremedi, ayni dosya sistemini ikinci kez baglayip /data'yi KENDI USTUNE
+# kopyaladi ve kullanimdaki loop aygitini ayirmaya calisti.
+VERI_AYGIT="$(awk '$2 == "/data" { print $1 }' /proc/mounts | tail -1)"
+if [ -n "$VERI_AYGIT" ] && [ -b "$VERI_AYGIT" ] && \
+   [ "$(dd if="$VERI_AYGIT" bs=1 skip=1144 count=16 2>/dev/null | tr -d '\000')" = "MCOS-DATA" ]; then
+    log "/data zaten kalici ($VERI_AYGIT, MCOS-DATA) — degisiklik yok."
+    exit 0
+fi
 if /usr/bin/mcos-findfs MCOS-DATA >/dev/null 2>&1; then
-    log "MCOS-DATA zaten mevcut — kalıcılık aktif, değişiklik yok."
+    log "MCOS-DATA zaten mevcut — kalicilik aktif, degisiklik yok."
     exit 0
 fi
 
-# Resolve the target whole-disk device.
+# tam_disk, bir bolum yolundan onu tasiyan DISKI bulur.
+#
+# Canli ISO'dan (DVD, QEMU -cdrom) acildiginda boot ortami /dev/sr0'dir ve bu
+# bir bolum degil, diskin kendisidir; eski "rakamlari kirp" kurali onu
+# /dev/sr yapiyordu (boyle bir aygit yok). Dogru cevap sysfs'te: aygit ancak
+# "partition" dosyasi varsa bolumdur.
+tam_disk() {
+    ad="${1#/dev/}"
+    if [ -f "/sys/class/block/$ad/partition" ]; then
+        ust="$(basename "$(dirname "$(readlink -f "/sys/class/block/$ad")")")"
+        [ -b "/dev/$ust" ] && { echo "/dev/$ust"; return 0; }
+    fi
+    echo "/dev/$ad"
+}
+
+# fs_etiket, aygittaki dosya sisteminin etiketini SUPER BLOKTAN okur.
+#
+# Imajdaki blkid BUSYBOX'in ve bu imajda cok eksik: "-o value -s ..."
+# seceneklerini tanimiyor, TYPE basmiyor ve FAT etiketini HIC gostermiyor
+# (olculdu, QEMU: VTOYEFI etiketli FAT bolumu icin cikti BOS). Ona dayanan iki
+# guvenlik denetimi (Ventoy korumasi, "bolumde dosya sistemi var mi")
+# sessizce hep geciyordu. Etiketler dogrudan okunuyor (mcos-findfs'in
+# yaptigi gibi): ext @1144 (16), FAT32 @71 (11), FAT16/12 @43 (11).
+fs_etiket() {
+    case "$(fs_tur "$1")" in
+        ext) imza "$1" 1144 16 | tr -d '\000' ;;
+        vfat)
+            if [ "$(imza "$1" 82 5)" = "FAT32" ]; then
+                imza "$1" 71 11
+            else
+                imza "$1" 43 11
+            fi | sed 's/ *$//' ;;
+    esac
+}
+
+# fs_tur, aygittaki dosya sistemini SUPER BLOKTAN okur.
+#
+# Busybox blkid bu imajda TYPE alanini HIC BASMIYOR (olculdu, QEMU:
+# "/dev/vda5: LABEL="MCOS-DATA" UUID="..."" — tur yok). Ture blkid ile bakan
+# bir denetim her zaman "dosya sistemi yok" derdi ve baska bir dosya
+# sistemini bicimlendirmeye izin verirdi. Imzalar dogrudan okunuyor.
+imza() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null; }
+imza_hex() { imza "$@" | od -An -tx1 | tr -d ' \n'; }
+fs_tur() {
+    d="$1"
+    [ "$(imza_hex "$d" 1080 2)" = "53ef" ] && { echo ext; return; }
+    case "$(imza "$d" 3 8)" in
+        "NTFS    ") echo ntfs; return ;;
+        "EXFAT   ") echo exfat; return ;;
+    esac
+    [ "$(imza "$d" 82 5)" = "FAT32" ] && { echo vfat; return; }
+    case "$(imza "$d" 54 5)" in FAT1*) echo vfat; return ;; esac
+    [ "$(imza "$d" 32769 5)" = "CD001" ] && { echo iso9660; return; }
+    [ "$(imza "$d" 0 4)" = "XFSB" ] && { echo xfs; return; }
+    [ "$(imza "$d" 65600 8)" = "_BHRfS_M" ] && { echo btrfs; return; }
+    [ "$(imza_hex "$d" 0 4)" = "4c554b53" ] && { echo luks; return; }
+    [ "$(imza "$d" 4086 10)" = "SWAPSPACE2" ] && { echo swap; return; }
+    echo ""
+}
+
+# ventoy_kalici, Ventoy USB'sinde kalicilik dosyasini olusturur ve simdiki
+# ayarlari icine tasir. Bolum tablosuna DOKUNMAZ.
+ventoy_kalici() {
+    log "Ventoy USB'si — bolum eklenmiyor; Ventoy bolumunde kalicilik dosyasi olusturuluyor"
+    /usr/bin/mcos-vtoydata olustur 2>&1 | sed 's/^/  /'
+    # Boru hattinin cikis kodu sed'in; asil sonucu dosyanin varligi soyler.
+    loop="$(/usr/bin/mcos-vtoydata bagla 2>/dev/null)" || die "Ventoy kalicilik dosyasi olusturulamadi"
+    M=/run/mcos-persist.$$
+    mkdir -p "$M"
+    if mount "$loop" "$M" 2>/dev/null; then
+        [ -d /data ] && cp -a /data/. "$M/" 2>/dev/null || true
+        sync
+        umount "$M" 2>/dev/null || true
+        log "ayarlar kalicilik dosyasina tasindi"
+    fi
+    rmdir "$M" 2>/dev/null || true
+    losetup -d "$loop" 2>/dev/null || true
+    log "tamam — kalicilik hazir (Ventoy bolumunde /mcos/mcos-data.dat). Yeniden baslatinca /data bu dosyadan acilir."
+    return 0
+}
+
+# bolumler, diskin bolumlerini (sysfs'e gore) siralar.
+bolumler() {
+    for p in /sys/class/block/"$1"/"$1"*; do
+        [ -e "$p/partition" ] && basename "$p"
+    done | sort
+}
+
+# ── Hedef disk ─────────────────────────────────────────────────────────────
 DEV="${1:-}"
 if [ -z "$DEV" ]; then
-    # The booted USB carries the root volume label "MCOS-ROOT".
-    BOOTPART="$(/usr/bin/mcos-findfs MCOS-ROOT 2>/dev/null || true)"
-    # Canli ISO'nun birim etiketi Makefile'da "MCOS" olarak veriliyor;
-    # MCOS-ROOT yalnizca mcos-install calistiktan SONRA var olur. Bu yuzden
-    # olasi tum etiketler sirayla denenir (eskiden yalnizca MCOS-ROOT
-    # deneniyordu, dolayisiyla canli sistemde otomatik bulma hic calismiyordu).
-    if [ -z "$BOOTPART" ]; then
-        for lbl in MCOS-BOOT MCOS MCOS_LIVE; do
-            BOOTPART="$(/usr/bin/mcos-findfs "$lbl" 2>/dev/null || true)"
-            [ -n "$BOOTPART" ] && break
-        done
+    BOOTPART=""
+    for lbl in MCOS-ROOT MCOS-BOOT MCOS MCOS_LIVE; do
+        BOOTPART="$(/usr/bin/mcos-findfs "$lbl" 2>/dev/null || true)"
+        [ -n "$BOOTPART" ] && break
+    done
+    if [ -z "$BOOTPART" ] && /usr/bin/mcos-vtoydata bul >/dev/null 2>&1; then
+        # Ventoy'dan acildi: Ventoy ISO'yu belleğe yukler, ISO hicbir blok
+        # aygitinda BOLUM olarak gorunmez; yukaridaki etiketler bulunamaz.
+        # (Olculdu: Ventoy 1.1.17 normal kip, QEMU — yalnizca Ventoy ve
+        # VTOYEFI bolumleri var.) Eskiden burada "otomatik bulunamadi"
+        # denip cikiliyordu.
+        ventoy_kalici
+        exit $?
     fi
-    if [ -z "$BOOTPART" ]; then
-        log "boot USB otomatik bulunamadı. Aygıtı elle verin: mcos-persist /dev/sdX"
-        exit 1
-    fi
-    # Strip the partition suffix to get the whole disk (sda2->sda, nvme0n1p2->nvme0n1).
-    DEV="$(echo "$BOOTPART" | sed -E 's,(p?)[0-9]+$,,')"
+    [ -n "$BOOTPART" ] || die "acilan USB otomatik bulunamadi. Aygiti elle verin: mcos-persist /dev/sdX"
+    DEV="$(tam_disk "$BOOTPART")"
 fi
-
-[ -b "$DEV" ] || { log "geçersiz blok aygıtı: $DEV"; exit 1; }
+[ -b "$DEV" ] || die "gecersiz blok aygiti: $DEV"
+AD="$(basename "$DEV")"
 log "hedef disk: $DEV"
 
-# Append a new Linux partition spanning the remaining free space.
-if command -v sfdisk >/dev/null 2>&1; then
-    log "boş alana yeni bölüm ekleniyor (sfdisk)…"
-    echo ',,L' | sfdisk --append "$DEV"
-elif command -v fdisk >/dev/null 2>&1; then
-    log "boş alana yeni bölüm ekleniyor (fdisk)…"
-    # n=new, p=primary, default number, default first/last sector, w=write.
-    fdisk "$DEV" >/dev/null 2>&1 <<EOF || true
-n
-p
+# ── Bu ortamda gecerli mi? ─────────────────────────────────────────────────
+case "$AD" in
+    sr[0-9]*|scd[0-9]*)
+        yok "DVD/ISO'dan acildiniz ($DEV) — kalicilik icin MCOS'u bir USB bellege ya da diske kurun." ;;
+esac
+if [ "$(cat "/sys/class/block/$AD/ro" 2>/dev/null || echo 0)" = "1" ]; then
+    yok "ortam salt okunur ($DEV) — kalicilik eklenemez."
+fi
+# Ventoy USB'sinin BOLUM duzenine dokunulmaz: bolum eklemek Ventoy'u bozar.
+# Kalicilik Ventoy'un veri bolumunde bir DOSYA ile saglanir (mcos-vtoydata;
+# Ventoy'un kendi eklentisi MCOS'ta calismaz — udev/device-mapper ister).
+for p in $(bolumler "$AD"); do
+    case "$(fs_etiket "/dev/$p")" in
+        Ventoy|VTOYEFI)
+            ventoy_kalici
+            exit $? ;;
+    esac
+done
 
+# ── Bolum tablosu ──────────────────────────────────────────────────────────
+TABLO="$(parted -m -s "$DEV" print 2>/dev/null | sed -n '2p' | cut -d: -f6)"
+case "$TABLO" in
+    gpt)
+        # Yedek GPT basligini diskin sonuna tasi. grub-mkrescue ISO'yu
+        # yazildigi diskin boyunu bilmeden uretir; baslik ISO'nun sonunda
+        # kalir ve o noktadan sonrasi "kullanilamaz" gorunur. parted bunu
+        # "Fix" ile duzeltir; -s kipinde soru sorulmadigi icin cevap elle
+        # veriliyor. MBR'deki onyukleme kodu korunur (olculdu: 440 bayt ayni).
+        printf 'Fix\n' | parted ---pretend-input-tty "$DEV" print >/dev/null 2>&1 || true
+        ;;
+    msdos) ;;
+    *) die "tanimlanamayan bolum tablosu ($TABLO) — $DEV'e dokunulmadi" ;;
+esac
 
-w
-EOF
+# ── Bos alan ───────────────────────────────────────────────────────────────
+BOS="$(parted -m -s "$DEV" unit s print free 2>/dev/null | grep ':free;$' | tail -1 || true)"
+[ -n "$BOS" ] || die "diskin sonunda bos alan yok — $DEV'e dokunulmadi"
+BAS="$(echo "$BOS" | cut -d: -f2 | tr -d s)"
+SON="$(echo "$BOS" | cut -d: -f3 | tr -d s)"
+# 1 MiB'a hizala: hizasiz bolum flash bellekte yazmayi yavaslatir.
+BAS=$(( (BAS + 2047) / 2048 * 2048 ))
+SEKTOR=$(( SON - BAS ))
+# En az 512 MiB: daha azina bir Minecraft sunucusu bile sigmaz.
+[ "$SEKTOR" -ge 1048576 ] || die "bos alan cok kucuk ($((SEKTOR / 2048)) MiB) — en az 512 MiB gerekir"
+log "bos alan: $((SEKTOR / 2048)) MiB (sektor $BAS - $SON)"
+
+# ── Bolumu ekle ────────────────────────────────────────────────────────────
+ONCE="$(bolumler "$AD")"
+if [ "$TABLO" = gpt ]; then
+    parted -s "$DEV" mkpart MCOS-DATA ext4 "${BAS}s" 100% 2>&1 || true
 else
-    log "bölümleme aracı (sfdisk/fdisk) yok — kalıcılık yapılamadı."
-    exit 1
+    parted -s "$DEV" mkpart primary ext4 "${BAS}s" 100% 2>&1 || true
+fi
+# Cekirdege bildir. Canli sistem bu diskten acildigi icin disk MESGUL
+# olabilir; partprobe bu durumda bolumleri tek tek ekler (BLKPG).
+partprobe "$DEV" 2>/dev/null || true
+
+YENI=""
+i=0
+while [ "$i" -lt 20 ]; do
+    for p in $(bolumler "$AD"); do
+        echo "$ONCE" | grep -qx "$p" || YENI="$p"
+    done
+    [ -n "$YENI" ] && [ -b "/dev/$YENI" ] && break
+    sleep 0.25 2>/dev/null || sleep 1
+    i=$((i + 1))
+done
+# BASARI OLCUSU: cikis kodu degil, bolum listesindeki FARK (bkz. hata 3).
+[ -n "$YENI" ] || die "yeni bolum olusmadi — hicbir sey bicimlendirilmedi"
+
+# ── Guvenlik denetimleri: yalnizca GERCEKTEN YENI ve BOS bolum bicimlenir ──
+grep -q "^/dev/$YENI " /proc/mounts && die "/dev/$YENI bagli — bicimlendirilmedi"
+ESKI_TUR="$(fs_tur "/dev/$YENI")"
+ESKI_ETIKET="$(fs_etiket "/dev/$YENI")"
+if [ "$ESKI_ETIKET" = "MCOS-DATA" ] && [ "$ESKI_TUR" = "ext" ]; then
+    # Bu USB daha once kalici yapilmis, sonra ustune ISO yeniden yazilmis:
+    # dd yalnizca ISO'nun boyu kadarini ezer, eski veri bolumu ayni sektorde
+    # DURUYOR. Bicimlendirmek kullanicinin sunucularini silerdi; yeniden
+    # kullaniyoruz.
+    log "/dev/$YENI uzerinde onceki MCOS verisi bulundu — BICIMLENDIRILMEDEN kullaniliyor."
+    log "tamam — kalicilik hazir (/dev/$YENI, onceki sunucular ve ayarlar korundu)."
+    exit 0
+fi
+if [ -n "$ESKI_TUR" ]; then
+    die "/dev/$YENI uzerinde baska bir dosya sistemi var ($ESKI_TUR${ESKI_ETIKET:+, etiket $ESKI_ETIKET}) — veri kaybi olmasin diye bicimlendirilmedi"
 fi
 
-# Re-read the partition table and let device nodes appear.
-partx -a "$DEV" 2>/dev/null || partprobe "$DEV" 2>/dev/null || blockdev --rereadpt "$DEV" 2>/dev/null || true
-sleep 1
+log "bicimlendiriliyor: /dev/$YENI (ext4, etiket MCOS-DATA)…"
+mkfs.ext4 -q -F -L MCOS-DATA "/dev/$YENI" >/dev/null 2>&1 || die "/dev/$YENI bicimlendirilemedi"
 
-# The new partition is the highest-numbered one on DEV.
-NEWPART="$(ls "${DEV}"* 2>/dev/null | grep -E "${DEV}p?[0-9]+$" | sort -V | tail -1)"
-[ -b "$NEWPART" ] || { log "yeni bölüm düğümü bulunamadı (reboot sonrası tekrar deneyin)"; exit 1; }
+# ── Simdiki ayarlari tasi ──────────────────────────────────────────────────
+# Kurulum sihirbazinda girilen ayarlar (config.json, Wi-Fi, tema) su an RAM'deki
+# /data'da. Kopyalanmazsa kullanici yeniden baslatinca sihirbazi BASTAN doldurur.
+M=/run/mcos-persist.$$
+mkdir -p "$M"
+if mount "/dev/$YENI" "$M" 2>/dev/null; then
+    [ -d /data ] && cp -a /data/. "$M/" 2>/dev/null || true
+    sync
+    umount "$M" 2>/dev/null || true
+    log "ayarlar kalici bolume tasindi"
+fi
+rmdir "$M" 2>/dev/null || true
 
-log "biçimlendiriliyor: $NEWPART (ext4, etiket MCOS-DATA)…"
-mkfs.ext4 -F -L MCOS-DATA "$NEWPART" >/dev/null 2>&1
-
-log "tamam — bundan sonra /data kalıcı ($NEWPART). İsterseniz reboot edin."
+log "tamam — kalicilik hazir (/dev/$YENI). Yeniden baslatinca /data bu bolumden acilir."
 exit 0

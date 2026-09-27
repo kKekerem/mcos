@@ -26,9 +26,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"mcos/internal/fbfont"
 	"mcos/internal/fbui"
 	"mcos/internal/ipcclient"
 	"mcos/internal/model"
+	"mcos/internal/sound"
 )
 
 // SetPointerDevices records which pointing devices the host found.
@@ -109,13 +111,17 @@ type App struct {
 	servers []*model.Server
 	cfg     *model.Config
 
+	// cfgTick, yapılandırmanın kaç turda bir tazeleneceğini sayar
+	// (bkz. run.go refresh).
+	cfgTick int
+
+	// headless: ekran görüntüsü kipi. Ses çalınmaz, arka plan goroutine'i
+	// başlatılmaz (bkz. sound.go).
+	headless bool
+
 	events []fbui.Event
 	modal  Modal
-	// wifiPickerWanted: kullanici ag listesini ISTEDI mi. Tarama saniyeler
-	// surdugu icin bu arada baska bir pencere acilmis olabilir; o zaman
-	// listeyi acmak, kullanicinin actigi pencereyi habersizce yok ederdi.
-	wifiListWanted bool
-	scrim          fbui.ScrimCache
+	scrim  fbui.ScrimCache
 
 	// Bolumlere ozgu, daemon'dan cekilen ek veriler. Ana durum (status,
 	// servers, cfg) her saniye yenilenir; bunlar ise YALNIZCA o bolume
@@ -126,7 +132,6 @@ type App struct {
 	tunnels      []model.TunnelStatus
 	usbJars      []model.USBJar
 	usbScanned   bool
-	wifiNote     string
 
 	// ── PC eşleştirme / ortak dünya ─────────────────────────────────────
 	// clusterID, BU makinenin eşleştirme kimliğidir (ad, adres, anahtar).
@@ -147,6 +152,14 @@ type App struct {
 	// Ekran bilgisi: gercek cozunurluk ve kullanicinin sectigi acilis modu.
 	screenW, screenH int
 	displayPref      string
+	// live: ekran kartına (DRM) çiziliyorsa mod çalışırken değişebilir.
+	// nil = fbdev yolu; Ekran bölümü GRUB tabanlı listeyi gösterir.
+	live LiveDisplay
+	// ownedFace, mod değişiminde BİZİM yüklediğimiz yazı tipi (bir sonraki
+	// değişimde kapatılır; açılıştakini cmd katmanı kapatır).
+	ownedFace *fbfont.Face
+	// hl, listelerdeki seçim şeridinin kayma animasyonu (draw.go).
+	hl highlightAnim
 
 	// asleep: ekran kapalı, sunucular çalışmaya devam ediyor.
 	asleep   bool
@@ -159,6 +172,10 @@ type App struct {
 
 	spin  int
 	dirty bool
+
+	// jobs, arka planda süren uzun işler (Java kurulumu, Wi-Fi, eklenti...).
+	// Durum çubuğu bunları her ekranda gösterir; bkz. jobs.go.
+	jobs map[string]*bgJob
 
 	// refreshing, arka plan yoklamasının sürdüğünü söyler. Atomik, çünkü
 	// hem ana döngüden hem goroutine'den okunur ve a.mu'yu beklemeden
@@ -187,6 +204,14 @@ type App struct {
 	// alanlar tutmak, hangisinin açık olduğunu tek bir bool'a sıkıştırmaktan
 	// ve yanlış çizmekten daha güvenli.
 	wizard *Wizard
+
+	// detail, Sunucular listesinde Enter ile açılan sunucu detayıdır. nil ise
+	// liste çizilir.
+	//
+	// Yeni bir Section DEĞİL, bir alt durum: kenar çubuğunda "Sunucular"
+	// seçili kalmalı ve Esc listeye (aynı satıra) dönmeli. Ayrı bir bölüm
+	// olsaydı menüde hiçbir sunucuya bağlı olmayan boş bir satır belirirdi.
+	detail *ServerDetail
 
 	// setup, ilk kurulum sihirbazıdır. nil ise normal panel çizilir.
 	//
@@ -262,8 +287,32 @@ func (a *App) needsFastRedraw() bool {
 	a.mu.Lock()
 	m := a.modal
 	lockBusy := a.locked && a.lockAn.animating()
+	// ── Yakalanan gerçek hata: GEÇİŞLER SANİYEDE 12 KAREYLE OYNUYORDU ────
+	//
+	// Bölüm geçişi ve açılış yakınlaşması yalnızca Tick()'te (80 ms'lik
+	// animasyon tiki) "kirli" işaretleniyordu; kare döngüsü de yalnızca kirli
+	// olunca çiziyor. Sonuç: 180 ms'lik bir kayma 2-3 kareyle oynuyordu —
+	// monitör 60 ya da 144 Hz olsa bile. Ölçüldü (bench_test.go
+	// TestGecisKareHizi): 180 ms'de 3 kare. Kullanıcının "animasyonlar akıcı
+	// değil" dediği şey. Süren bir geçiş artık KARE tikinde çiziliyor; dönen
+	// gösterge gibi yavaş şeyler 80 ms'de kalıyor (boştaki sunucu makinesinde
+	// CPU yakmamak için).
+	//
+	// Yalnızca AKAN bir geçiş sayılıyor: saati henüz başlamamış (pending,
+	// açılış karesi bekleniyor) ya da süresi dolmuş ama bir sonraki çizimde
+	// temizlenecek bir geçiş için saniyede 60 kare istemek boşa CPU olurdu
+	// (lock_anim_test'ler bunu yakaladı).
+	transBusy := false
+	if tr := a.trans; tr != nil && !tr.pending {
+		if t, _ := tr.progress(); t < 1 {
+			transBusy = true
+		}
+	}
 	a.mu.Unlock()
-	if lockBusy {
+	if lockBusy || transBusy {
+		return true
+	}
+	if a.stripeSliding() {
 		return true
 	}
 	an, ok := m.(Animated)
@@ -285,7 +334,8 @@ func New(ui *fbui.UI, cl *ipcclient.Client) *App {
 func (a *App) Emit(kind fbui.EventKind, text string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.events = append(a.events, fbui.Event{Kind: kind, Text: text, At: time.Now()})
+	// nowFunc: durum çubuğu (statusEvent) olayın yaşını aynı saatle ölçer.
+	a.events = append(a.events, fbui.Event{Kind: kind, Text: text, At: nowFunc()})
 	if len(a.events) > maxEvents {
 		a.events = a.events[len(a.events)-maxEvents:]
 	}
@@ -532,10 +582,67 @@ func (a *App) OpenModal(m Modal) {
 	a.mu.Lock()
 	a.modal = m
 	a.dirty = true
+	a.clearBusyLocked()
 	a.mu.Unlock()
 	// Perde ÖNBELLEĞİ geçersiz kılınır: arkadaki ekran pencere açılırken
 	// yeniden çizilecek ve bulanıklık o görüntüden alınacak.
 	a.scrim.Invalidate()
+	a.playSound(sound.Open)
+}
+
+// clearBusyLocked drops a trailing "…yapılıyor" line once a dialog answers it.
+//
+// ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
+//
+// Bir pencere açan her eylem önce durum çubuğuna "… alınıyor" yazıyor, sonra
+// gelen yanıtla pencereyi açıyordu — ama o satırı KİMSE silmiyordu. QEMU'da
+// ölçüldü: ekran paylaşımı penceresi kapandıktan dakikalar sonra bile alt
+// çubukta "ekran paylaşımı durumu alınıyor…" dönmeye devam ediyordu.
+//
+// Görüntüden daha pahalısı da var: App.needsFastRedraw, son olay EventBusy
+// ise HER tikte yeniden çizim ister. Yani unutulmuş tek bir satır, boştaki
+// bir Minecraft sunucusunda paneli sonsuza kadar saniyede 12 kare çizdiriyordu.
+//
+// Pencerenin kendisi o isteğin CEVABIDIR: açıldığı an bekleme satırı düşer.
+// Kendi animasyonu olan pencereler (canlı tarama gibi) Tick içinde ayrıca ele
+// alınır, onlar bu satıra muhtaç değil.
+//
+// a.mu TUTULARAK çağrılır.
+func (a *App) clearBusyLocked() {
+	if n := len(a.events); n > 0 && a.events[n-1].Kind == fbui.EventBusy {
+		a.events = a.events[:n-1]
+	}
+}
+
+// closeModalIf dismisses the dialog ONLY if it is still the one that was open.
+//
+// ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
+//
+// Tuş/tıklama yolu şöyleydi:
+//
+//	if m.Key(a, key) { a.CloseModal() }
+//
+// Yani "pencere işini bitirdi" dediğinde AÇIK OLAN pencere kapatılıyordu.
+// Ama bir pencerenin geri çağrısı YENİ bir pencere açabilir — ve çoğu zaman
+// açar: SSH penceresindeki "Parola koy" bir metin kutusu açıyor, eş
+// listesindeki bir cihaz onay penceresi açıyor, korumalı bir Wi-Fi ağı
+// parola kutusu açıyor.
+//
+// O durumda CloseModal, az önce açılan YENİ pencereyi kapatıyordu. Sonuç
+// QEMU'da gözlendi: "Parola koy / değiştir"e basmak pencereyi kapatıyor,
+// hiçbir şey açılmıyordu — SSH parolası HİÇ kurulamıyordu ve sebebi
+// ekrandan anlaşılmıyordu.
+//
+// Tek tek her geri çağrıda "false döndürmeyi unutma" kuralı işlemez; bir gün
+// biri unutur. Bu yüzden karar burada: kapatma yalnızca pencere DEĞİŞMEDİYSE
+// yapılır.
+func (a *App) closeModalIf(m Modal) {
+	a.mu.Lock()
+	same := a.modal == m
+	a.mu.Unlock()
+	if same {
+		a.CloseModal()
+	}
 }
 
 // CloseModal dismisses the current dialog.
@@ -546,6 +653,7 @@ func (a *App) CloseModal() {
 	a.dirty = true
 	a.mu.Unlock()
 	a.scrim.Invalidate()
+	a.playSound(sound.Close)
 }
 
 // ActiveModal returns the open dialog, or nil.
@@ -594,6 +702,10 @@ func (a *App) Tick() bool {
 		}
 	}
 	if len(a.events) > 0 && a.events[len(a.events)-1].Kind == fbui.EventBusy {
+		return true
+	}
+	// Süren arka plan işi: gösterge döner ve geçen süre ilerler.
+	if len(a.jobs) > 0 {
 		return true
 	}
 	// İmleç görünürken, boşta kaldığında KENDİLİĞİNDEN kaybolur; o anı

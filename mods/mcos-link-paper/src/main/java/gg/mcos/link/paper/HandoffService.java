@@ -478,7 +478,8 @@ public final class HandoffService {
                     // zamanlayıcıda yığın izi basar ve oyuncu hiçbir şey
                     // olmamış gibi kalır. Başarısız gönderimle aynı muamele.
                     try {
-                        p.transfer(target.host, target.mcPort);
+                        InetSocketAddress to = transferAddress(p, top, target);
+                        p.transfer(to.getHostString(), to.getPort());
                     } catch (IllegalStateException e) {
                         Log.warn("aktarım paketi gönderilemedi (" + name
                                 + "): " + e.getMessage());
@@ -511,6 +512,87 @@ public final class HandoffService {
      * yazılmadığı için "oyuncu kaydı bulunamadı" gibi KALICI bir durum,
      * saniyede bir kayıt yazma + bir uyarı satırı üretiyordu.
      */
+
+    /**
+     * Oyuncunun aktarılacağı adres.
+     *
+     * <p>Eşleşmiş başka bir PC'ye: topolojideki adres (LAN). Aynı makinedeki
+     * bölünmüş dünya kopyasına ({@code target.local}) ise oyuncunun BAĞLANDIĞI
+     * adres + kopyanın portu: LAN'dan gelen oyuncu LAN adresini, port
+     * yönlendirmesiyle genel IP'den gelen oyuncu genel IP'yi yazmıştır; ikisinde
+     * de doğru makineye ulaşır. Topolojideki LAN adresi internetten gelen
+     * oyuncu için işe yaramazdı.
+     *
+     * <p>playit: tünel adresi her port için AYRIDIR ("ad.joinmc.link" başka bir
+     * porta yönlendirmez). Oyuncu bu düğümün playit adresiyle geldiyse hedefin
+     * KENDİ playit adresi kullanılır; hedefin tüneli henüz yoksa LAN adresi.
+     */
+    static InetSocketAddress transferAddress(Player p, Topology top, Topology.Node target) {
+        InetSocketAddress lan = InetSocketAddress.createUnresolved(target.host, target.mcPort);
+        if (!target.local) {
+            return lan;
+        }
+        InetSocketAddress vh = p.getVirtualHost();
+        String typed = vh == null ? "" : stripHost(vh.getHostString());
+        if (typed.isEmpty() || typed.equalsIgnoreCase("localhost")) {
+            return lan;
+        }
+        Topology.Node me = top.node(top.self);
+        if (me != null && !me.publicAddr.isEmpty()
+                && stripHost(hostOf(me.publicAddr)).equalsIgnoreCase(typed)) {
+            if (target.publicAddr.isEmpty()) {
+                return lan;
+            }
+            return InetSocketAddress.createUnresolved(
+                    hostOf(target.publicAddr), portOf(target.publicAddr, 25565));
+        }
+        return InetSocketAddress.createUnresolved(typed, target.mcPort);
+    }
+
+    /** "ad:port" içinden ad (IPv6 köşeli ayraçlarını da tanır). */
+    static String hostOf(String addr) {
+        String a = addr.trim();
+        if (a.startsWith("[")) {
+            int end = a.indexOf(']');
+            return end > 0 ? a.substring(1, end) : a;
+        }
+        int i = a.lastIndexOf(':');
+        return (i > 0 && a.indexOf(':') == i) ? a.substring(0, i) : a;
+    }
+
+    /** "ad:port" içinden port; yoksa def (istemci SRV kaydına bakar). */
+    static int portOf(String addr, int def) {
+        String a = addr.trim();
+        int i = a.lastIndexOf(':');
+        if (i <= 0 || a.endsWith("]") || (a.indexOf(':') != i && !a.startsWith("["))) {
+            return def;
+        }
+        try {
+            return Integer.parseInt(a.substring(i + 1));
+        } catch (NumberFormatException e) {
+            return def;
+        }
+    }
+
+    /**
+     * El sıkışmadaki adı temizler: SRV ile çözülen adlar sonda nokta taşır,
+     * Forge istemcileri "\0FML\0" ekler.
+     */
+    static String stripHost(String h) {
+        if (h == null) {
+            return "";
+        }
+        int z = h.indexOf('\0');
+        if (z >= 0) {
+            h = h.substring(0, z);
+        }
+        h = h.trim();
+        while (h.endsWith(".")) {
+            h = h.substring(0, h.length() - 1);
+        }
+        return h;
+    }
+
     private void abort(Player player, UUID id, String why) {
         inFlight.remove(id);
         lastTransfer.put(id, System.currentTimeMillis());

@@ -6,10 +6,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
+	"strconv"
 	"strings"
 
 	"mcos/internal/log"
+	"mcos/internal/mcver"
 	"mcos/internal/model"
 )
 
@@ -81,7 +82,9 @@ func forgeInstaller(ctx context.Context, client *http.Client, mc string) (string
 	if forgeVer == "" {
 		return "", "", fmt.Errorf("forge: no build for MC %q", mc)
 	}
-	full := mc + "-" + forgeVer
+	// Eski dallarda maven adı ek taşıyor (1.7.10 -> "…-1.7.10"): bkz.
+	// forge_maven.go.
+	full := forgeMavenSurumu(ctx, client, mc+"-"+forgeVer)
 	url := fmt.Sprintf("%s/%s/forge-%s-installer.jar", forgeMaven, full, full)
 	return url, full, nil
 }
@@ -92,9 +95,10 @@ const neoforgeVersionsAPI = "https://maven.neoforged.net/api/maven/versions/rele
 const neoforgeMaven = "https://maven.neoforged.net/releases/net/neoforged/neoforge"
 
 func neoforgeInstaller(ctx context.Context, client *http.Client, mc string) (string, string, error) {
-	prefix, err := neoVersionPrefix(mc)
-	if err != nil {
-		return "", "", err
+	prefix, ok := mcver.NeoForgePrefix(mc)
+	if !ok {
+		return "", "", fmt.Errorf("neoforge: Minecraft %q için NeoForge yok "+
+			"(NeoForge 1.20.2 ve sonrasının tam sürümlerini destekler)", mc)
 	}
 	var resp struct {
 		Versions []string `json:"versions"`
@@ -102,34 +106,57 @@ func neoforgeInstaller(ctx context.Context, client *http.Client, mc string) (str
 	if err := getJSON(ctx, client, neoforgeVersionsAPI, &resp); err != nil {
 		return "", "", fmt.Errorf("neoforge: versions: %w", err)
 	}
-	var matches []string
-	for _, v := range resp.Versions {
-		if strings.HasPrefix(v, prefix+".") {
-			matches = append(matches, v)
-		}
-	}
-	if len(matches) == 0 {
+	ver, ok := pickNeoForge(resp.Versions, prefix)
+	if !ok {
 		return "", "", fmt.Errorf("neoforge: no build for MC %q (prefix %s)", mc, prefix)
 	}
-	sort.Strings(matches)
-	ver := matches[len(matches)-1]
 	url := fmt.Sprintf("%s/%s/neoforge-%s-installer.jar", neoforgeMaven, ver, ver)
 	return url, ver, nil
 }
 
-// neoVersionPrefix maps an MC version to the NeoForge version prefix:
-// 1.21.1 -> "21.1", 1.21 -> "21.0", 1.20.4 -> "20.4".
-func neoVersionPrefix(mc string) (string, error) {
-	parts := strings.Split(mc, ".")
-	if len(parts) < 2 || parts[0] != "1" {
-		return "", fmt.Errorf("neoforge: unsupported MC version %q", mc)
+// pickNeoForge chooses the build for a NeoForge prefix: stable over beta over
+// alpha, then the highest build NUMBER.
+//
+// ── Yakalanan gerçek hata: metin sıralaması eski derleme seçiyordu ──────────
+// Eşleşenler sort.Strings ile sıralanıp sonuncusu alınıyordu. Gerçek sürüm
+// listesiyle (maven.neoforged.net, 2026-09-27):
+//
+//	1.21.1  -> 21.1.99 seçiliyordu, en yenisi 21.1.252 ("99" > "252" metin)
+//	1.21.11 -> 21.11.9-beta seçiliyordu, kararlı 21.11.45 varken
+//
+// Ayrıca 26.x'in "26.1.0.0-alpha.1+snapshot-1" gibi derlemeleri Minecraft
+// ANLIK GÖRÜNTÜLERİ içindir; tam sürüm sunucusuna kurulmaz, atlanır. 26.3'te
+// henüz yalnızca "-beta" derlemeler var: kararlı yoksa en yeni beta alınır.
+func pickNeoForge(all []string, prefix string) (string, bool) {
+	best, bestRank := "", 99
+	for _, v := range all {
+		rest, ok := strings.CutPrefix(v, prefix+".")
+		if !ok {
+			continue
+		}
+		num, suffix := rest, ""
+		if i := strings.IndexAny(rest, "-+"); i >= 0 {
+			num, suffix = rest[:i], rest[i:]
+		}
+		// Önekten sonra TEK bir derleme numarası olmalı: "21.1" öneki
+		// "21.1.3.4" gibi başka bir düzeni yakalamasın.
+		if _, err := strconv.Atoi(num); err != nil || strings.Contains(suffix, "+") {
+			continue
+		}
+		rank := 3
+		switch {
+		case suffix == "":
+			rank = 0
+		case strings.HasPrefix(suffix, "-beta"):
+			rank = 1
+		case strings.HasPrefix(suffix, "-alpha"):
+			rank = 2
+		}
+		if best == "" || rank < bestRank || (rank == bestRank && mcver.CompareNumeric(v, best) > 0) {
+			best, bestRank = v, rank
+		}
 	}
-	minor := parts[1]
-	patch := "0"
-	if len(parts) >= 3 {
-		patch = parts[2]
-	}
-	return minor + "." + patch, nil
+	return best, best != ""
 }
 
 // --- launch artifact discovery ------------------------------------------

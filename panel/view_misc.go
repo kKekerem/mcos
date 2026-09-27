@@ -10,6 +10,35 @@ import (
 	"mcos/panel/theme"
 )
 
+// javaTargets, Yazılım bölümündeki Java satırlarıdır. Sıra sayı tuşlarıyla
+// (1–5) ve Enter'ın kurduğu sürümle AYNI olmalı: üçü eskiden ayrı ayrı elle
+// yazılmıştı (dört satır, "0..3" imleç sınırı, {17,21,11,8}); satır eklemek
+// hepsini birlikte güncellemeyi gerektiriyordu.
+var javaTargets = []struct {
+	major int
+	badge string
+	name  string
+	desc  string
+}{
+	{17, "LTS ÖNERİLEN", "Java 17 (Temurin JDK)", "Paper/Spigot 1.17 - 1.20.4 için standart"},
+	// "1.20.5+ ve 1.21+" DEĞİL: 26.x Java 25 ister (Mojang manifesti,
+	// javaVersion.majorVersion = 25). Eski yazı 26.3 için Java 21'e
+	// yönlendiriyordu. Sıra ve sayı tuşları korunur; 25 sona (5) eklendi.
+	{21, "LTS", "Java 21 (Temurin JDK)", "Minecraft 1.20.5 - 1.21.11 sunucuları için"},
+	{11, "LTS ESKİ", "Java 11 (Temurin JDK)", "Minecraft 1.12 - 1.16 arası için"},
+	{8, "LEGACY", "Java 8 (Temurin JDK)", "Legacy Minecraft 1.8 - 1.12 için"},
+	{25, "LTS EN YENİ", "Java 25 (Temurin JDK)", "Minecraft 26.1 ve sonrası için"},
+}
+
+// javaRowMajors, javaTargets'ın sırasıyla ana sürümleridir.
+var javaRowMajors = func() []int {
+	out := make([]int, len(javaTargets))
+	for i, t := range javaTargets {
+		out[i] = t.major
+	}
+	return out
+}()
+
 func (a *App) renderSoftware(w, h int) string {
 	th := a.th
 	var b strings.Builder
@@ -22,17 +51,7 @@ func (a *App) renderSoftware(w, h int) string {
 		installedMap[rt.Major] = rt
 	}
 
-	targets := []struct {
-		major int
-		badge string
-		name  string
-		desc  string
-	}{
-		{17, "LTS ÖNERİLEN", "Java 17 (Temurin JDK)", "Paper/Spigot 1.17 - 1.20.4 için standart"},
-		{21, "LTS EN YENİ", "Java 21 (Temurin JDK)", "Minecraft 1.20.5+ ve 1.21+ sunucuları için"},
-		{11, "LTS ESKİ", "Java 11 (Temurin JDK)", "Minecraft 1.12 - 1.16 arası için"},
-		{8, "LEGACY", "Java 8 (Temurin JDK)", "Legacy Minecraft 1.8 - 1.12 için"},
-	}
+	targets := javaTargets
 
 	for idx, t := range targets {
 		sel := (a.focus == focusContent && a.rowCursor == idx)

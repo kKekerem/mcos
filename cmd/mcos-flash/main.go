@@ -79,6 +79,11 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
+	// Pencereli arayüz (gui.go): Windows'ta çift tıklamanın varsayılanı.
+	if guiHook() {
+		return
+	}
+
 	if *showVer {
 		fmt.Println("mcos-flash " + version.Version)
 		return
@@ -326,7 +331,14 @@ func chooseImage(o options) (string, error) {
 		return "", errors.New("imaj yok")
 	}
 	for i, im := range images {
-		fmt.Printf("  %2d) %-40s %s\n", i+1, im.path, flash.HumanBytes(im.size))
+		not := ""
+		if i == 0 {
+			not = "  <- EN YENİ"
+		} else if bayatMi(im, images[0]) {
+			not = "  (ESKİ — en yenisinden " + eskilik(images[0].mod.Sub(im.mod)) + " önce)"
+		}
+		fmt.Printf("  %2d) %-34s %8s  %s%s\n", i+1, im.path,
+			flash.HumanBytes(im.size), im.mod.Format("02.01.2006 15:04"), not)
 	}
 	fmt.Println()
 
@@ -338,12 +350,34 @@ func chooseImage(o options) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if sec := images[n-1]; n > 1 && bayatMi(sec, images[0]) {
+		fmt.Println()
+		fmt.Printf("  ! DİKKAT: %s, en yeni imajdan %s ESKİ.\n",
+			sec.path, eskilik(images[0].mod.Sub(sec.mod)))
+		fmt.Println("  ! O tarihten sonra yapılan düzeltmeler bu imajda YOK.")
+		fmt.Printf("  ! En yenisi: %s\n\n", images[0].path)
+	}
 	return images[n-1].path, nil
+}
+
+// eskilik renders an age in the largest sensible unit.
+func eskilik(d time.Duration) string {
+	switch {
+	case d >= 48*time.Hour:
+		return fmt.Sprintf("%d gün", int(d.Hours()/24))
+	case d >= time.Hour:
+		return fmt.Sprintf("%d saat", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%d dakika", int(d.Minutes()))
+	}
 }
 
 type imageFile struct {
 	path string
 	size uint64
+	// mod, dosyanın son değişiklik zamanı. Sıralama ve "bayat" uyarısı
+	// buna dayanıyor.
+	mod time.Time
 }
 
 // minImageBytes is the smallest file treated as an image.
@@ -382,11 +416,35 @@ func findImages(dirs []string) []imageFile {
 				continue
 			}
 			seen[abs] = true
-			out = append(out, imageFile{path: p, size: uint64(info.Size())})
+			out = append(out, imageFile{path: p, size: uint64(info.Size()), mod: info.ModTime()})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].size > out[j].size })
+	// ── Yakalanan gerçek hata: BAYAT İMAJ YAZILIYORDU ──────────────────────
+	//
+	// Burada boyuta göre sıralanıyordu (en büyük önce). dist/ içinde ölçülen
+	// hâl:
+	//
+	//	mcos-uefi.img     4,0 GB   10 Eylül   <- listede 1. sıra
+	//	mcos-x86_64.img   605 MB    5 Haziran
+	//	mcos-x86_64.iso   236 MB   17 Eylül   <- EN YENİ, ama 2. sıra
+	//	m12cos-x86_64.iso 127 MB    9 Haziran
+	//
+	// "1"e basan kullanıcı bir hafta eski imajı yazıyordu: o arada yapılan
+	// hiçbir düzeltme makinesine ulaşmıyor, her denemede "hâlâ aynı" diyordu.
+	// Artık EN YENİ önce geliyor ve eskiler açıkça işaretleniyor.
+	sort.Slice(out, func(i, j int) bool { return out[i].mod.After(out[j].mod) })
 	return out
+}
+
+// bayatEsik, en yeni imajdan ne kadar eski olanın "bayat" sayılacağı.
+//
+// Bir saat: aynı derlemede üretilen ISO ve USB imajı birkaç dakika arayla
+// çıkar; onları birbirine göre bayat saymak yanlış alarm olurdu.
+const bayatEsik = time.Hour
+
+// bayatMi reports whether im is noticeably older than the newest image.
+func bayatMi(im, enYeni imageFile) bool {
+	return enYeni.mod.Sub(im.mod) > bayatEsik
 }
 
 // confirm requires the user to type the device path.

@@ -96,7 +96,7 @@ func (m *Manager) isSelf(remoteID, remoteName string) bool {
 	if remoteID != "" && m.nodeID != "" {
 		return remoteID == m.nodeID
 	}
-	return remoteName != "" && remoteName == m.nodeName
+	return remoteName != "" && remoteName == m.name()
 }
 
 // peerKey is the stable map key for a peer.

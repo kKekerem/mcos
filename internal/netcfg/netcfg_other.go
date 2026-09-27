@@ -8,6 +8,13 @@ package netcfg
 
 func scan() ([]Network, error) { return nil, nil }
 
+func scanLive(onBatch func([]Network)) ([]Network, error) {
+	if onBatch != nil {
+		onBatch(nil)
+	}
+	return nil, nil
+}
+
 func apply(ssid, pass string) error { return nil }
 
 func applyTimezone(tz string) error { return nil }

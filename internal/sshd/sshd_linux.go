@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Bu dosya SSH sunucusunu gerçekten çalıştırır.
@@ -68,8 +69,17 @@ func isFile(p string) bool {
 	return err == nil && !st.IsDir()
 }
 
+// binDirs is where findBin looks before $PATH.
+//
+// Değişken, çünkü sınama bunu boşaltıp "hiçbir harici program yokken de
+// parola konabiliyor mu" diye bakıyor. Geliştirme makinesinde
+// /usr/sbin/chpasswd VAR; imajda YOK. Sabit liste, chpasswd'a geri dönen bir
+// gerilemeyi geliştirme makinesinde görünmez kılıyordu (karşı-sınamada
+// yakalandı).
+var binDirs = []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+
 func findBin(name string) string {
-	for _, dir := range []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"} {
+	for _, dir := range binDirs {
 		p := filepath.Join(dir, name)
 		if isFile(p) {
 			return p
@@ -80,6 +90,9 @@ func findBin(name string) string {
 	}
 	return ""
 }
+
+// passwordSupported: parola yalnızca cihazda (Linux) ayarlanabilir.
+const passwordSupported = true
 
 // Available reports whether an SSH server binary exists.
 func Available() bool { return findServer() != nil }
@@ -92,16 +105,29 @@ func Flavor() string {
 	return ""
 }
 
+// earlyExitWindow is how long start waits to catch a server that dies at once.
+//
+// ── Neden bekliyoruz ────────────────────────────────────────────────────────
+// sshd yapılandırma ya da port hatasında (ör. "Bind to port 22 ... Address
+// already in use") başladıktan milisaniyeler sonra çıkar. Eskiden start()
+// cmd.Start() başarılı diye nil dönüyordu: panel "SSH açıldı" diyor, bir
+// sonraki bakışta "açık ama çalışmıyor" gösteriyor ve NEDENİ hiçbir yerde
+// görünmüyordu (yalnızca /run/mcos/mcosd.log'da).
+var earlyExitWindow = 700 * time.Millisecond
+
 // start launches the server on the given port.
-func (m *Manager) start(port int) error {
+//
+// pwAuth false ise parola girişi sunucu düzeyinde KAPATILIR (bkz. sshd.go:
+// kalıcı parola yokken shadow'da imajın varsayılanı "root" durur).
+func (m *Manager) start(port int, pwAuth bool) error {
 	m.mu.Lock()
-	already := m.running && m.port == port
+	already := m.running && m.port == port && m.pwAuth == pwAuth
 	m.mu.Unlock()
 	if already {
 		return nil
 	}
-	// Port değiştiyse önce eskisini durdur: iki sunucu aynı porta
-	// bağlanamaz ve ikincisi sessizce ölür.
+	// Port ya da parola ayarı değiştiyse önce eskisini durdur: iki sunucu
+	// aynı porta bağlanamaz ve ikincisi sessizce ölür.
 	m.Stop()
 
 	f := findServer()
@@ -115,9 +141,9 @@ func (m *Manager) start(port int) error {
 	var cmd *exec.Cmd
 	var err error
 	if f.kind == "openssh" {
-		cmd, err = m.opensshCommand(f, port)
+		cmd, err = m.opensshCommand(f, port, pwAuth)
 	} else {
-		cmd, err = m.dropbearCommand(f, port)
+		cmd, err = m.dropbearCommand(f, port, pwAuth)
 	}
 	if err != nil {
 		return err
@@ -126,8 +152,11 @@ func (m *Manager) start(port int) error {
 	// Kendi süreç grubunda: Stop() tüm grubu öldürebilsin ve daemon'a
 	// gelen bir sinyal SSH'ı yanlışlıkla düşürmesin.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
+	// Çıktı yine mcosd günlüğüne gider; son satırları ayrıca tutulur ki
+	// sunucu ölürse neden öldüğü panelde gösterilebilsin.
+	tail := newTailBuffer(os.Stderr, 4096)
+	cmd.Stdout = tail
+	cmd.Stderr = tail
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("SSH sunucusu başlatılamadı: %w", err)
@@ -137,31 +166,68 @@ func (m *Manager) start(port int) error {
 	m.proc = &process{cmd: cmd, flavor: f.kind}
 	m.running = true
 	m.port = port
+	m.pwAuth = pwAuth
+	m.lastErr = ""
 	m.mu.Unlock()
-
-	if m.log != nil {
-		m.log.Infof("sshd: SSH açık (%s, port %d)", f.kind, port)
-	}
 
 	// Süreç kendiliğinden ölürse durumu düzelt; yoksa panel sonsuza dek
 	// "çalışıyor" gösterirdi.
+	// Kapanma nedeni kanaldan gelir: Stop() ile yarışta m.lastErr boş
+	// kalabilir ama erken ölümün nedeni yine de kaybolmamalı.
+	done := make(chan string, 1)
 	go func() {
 		err := cmd.Wait()
+		why := exitReason(err, tail.LastLines(2))
 		m.mu.Lock()
-		if m.proc != nil && m.proc.cmd == cmd {
+		unexpected := m.proc != nil && m.proc.cmd == cmd
+		if unexpected {
+			// Stop() proc'u önceden nil yapar; buraya yalnızca KENDİLİĞİNDEN
+			// ölen bir sunucu için gelinir.
 			m.running = false
 			m.proc = nil
+			m.lastErr = why
 		}
 		m.mu.Unlock()
-		if m.log != nil {
-			if err != nil {
-				m.log.Warnf("sshd: SSH sunucusu durdu: %v", err)
-			} else {
-				m.log.Infof("sshd: SSH sunucusu durdu")
-			}
+		done <- why
+		if m.log == nil {
+			return
+		}
+		if unexpected {
+			m.log.Warnf("sshd: SSH sunucusu durdu: %s", why)
+		} else {
+			// Bizim durdurmamız (kapatma, port/parola değişimi) bir uyarı
+			// değil; günlükte "durdu" uyarısı gerçek çökmeleri gölgeliyordu.
+			m.log.Infof("sshd: SSH sunucusu durduruldu")
 		}
 	}()
+
+	select {
+	case why := <-done:
+		return fmt.Errorf("SSH sunucusu başlar başlamaz kapandı: %s", why)
+	case <-time.After(earlyExitWindow):
+	}
+
+	if m.log != nil {
+		auth := "yalnızca anahtar"
+		if pwAuth {
+			auth = "parola + anahtar"
+		}
+		m.log.Infof("sshd: SSH açık (%s, port %d, giriş: %s)", f.kind, port, auth)
+	}
 	return nil
+}
+
+// exitReason turns a Wait error plus the last stderr line into one sentence.
+func exitReason(err error, last string) string {
+	switch {
+	case last != "" && err != nil:
+		return fmt.Sprintf("%s (%v)", last, err)
+	case last != "":
+		return last
+	case err != nil:
+		return err.Error()
+	}
+	return "çıkış kodu 0"
 }
 
 // ── OpenSSH ─────────────────────────────────────────────────────────────────
@@ -172,12 +238,12 @@ var opensshHostKeys = []struct{ name, typ string }{
 	{"ssh_host_rsa_key", "rsa"},
 }
 
-func (m *Manager) opensshCommand(f *serverFlavor, port int) (*exec.Cmd, error) {
+func (m *Manager) opensshCommand(f *serverFlavor, port int, pwAuth bool) (*exec.Cmd, error) {
 	keys, err := m.ensureOpenSSHKeys(f.keygen)
 	if err != nil {
 		return nil, err
 	}
-	cfgPath, err := m.writeSSHDConfig(port, keys)
+	cfgPath, err := m.writeSSHDConfig(port, keys, pwAuth)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +283,7 @@ func (m *Manager) ensureOpenSSHKeys(keygen string) ([]string, error) {
 }
 
 // writeSSHDConfig writes our own sshd_config and returns its path.
-func (m *Manager) writeSSHDConfig(port int, keys []string) (string, error) {
+func (m *Manager) writeSSHDConfig(port int, keys []string, pwAuth bool) (string, error) {
 	var b strings.Builder
 	b.WriteString("# MCOS tarafından üretildi — elle düzenlemeyin.\n")
 	b.WriteString("# Panelden SSH'ı kapatıp açmak bu dosyayı yeniden yazar.\n")
@@ -231,13 +297,23 @@ func (m *Manager) writeSSHDConfig(port int, keys []string) (string, error) {
 	b.WriteString("PermitRootLogin yes\n")
 	b.WriteString("AuthorizedKeysFile " + authorizedKeysPath + "\n")
 	b.WriteString("PubkeyAuthentication yes\n")
-	b.WriteString("PasswordAuthentication yes\n")
+	// Parola girişi YALNIZCA kullanıcının koyduğu kalıcı bir parola varken
+	// açık. Yoksa /etc/shadow'da imajın varsayılanı ("root") durur ve
+	// yalnızca anahtar ekleyip SSH'ı açan kullanıcının makinesine aynı
+	// ağdaki herkes root/root ile girebiliyordu (QEMU'da ölçüldü).
+	if pwAuth {
+		b.WriteString("PasswordAuthentication yes\n")
+	} else {
+		b.WriteString("PasswordAuthentication no\n")
+	}
 	// Boş parolayla giriş ASLA: /etc/shadow'da parola kurulmamışsa
 	// SSH kapısı herkese açık olurdu.
 	b.WriteString("PermitEmptyPasswords no\n")
 	b.WriteString("ChallengeResponseAuthentication no\n")
 	b.WriteString("KbdInteractiveAuthentication no\n")
-	b.WriteString("UsePAM no\n")
+	// "UsePAM no" YAZILMIYOR: imajdaki sshd PAM'siz derlenmiş ve her
+	// başlangıçta "Unsupported option UsePAM" uyarısı basıyordu (QEMU'da
+	// görüldü). OpenSSH'ın derleme varsayılanı zaten "no".
 	b.WriteString("PrintMotd no\n")
 	fmt.Fprintf(&b, "PidFile %s\n", filepath.Join(m.hostKeyDir(), "sshd.pid"))
 	// Yavaş bir mini PC'de ters DNS araması girişleri 30 saniye
@@ -245,7 +321,11 @@ func (m *Manager) writeSSHDConfig(port int, keys []string) (string, error) {
 	b.WriteString("UseDNS no\n")
 	if sftp := findSFTPServer(); sftp != "" {
 		// sftp: telefondan/masaüstünden dosya kopyalamayı mümkün kılar.
-		fmt.Fprintf(&b, "Subsystem sftp %s\n", sftp)
+		// -d: WinSCP doğrudan sunucular klasöründe açılsın (kullanıcının
+		// isteği: "bizi sunucular klasörünü göstersin"). Kök kilitlenmez
+		// (chroot yok): klasördeki adlı bağlar /data/servers'a gider ve
+		// chroot'ta çözülemezdi.
+		fmt.Fprintf(&b, "Subsystem sftp %s -d %s\n", sftp, filepath.Join(m.dataDir, SFTPDirName))
 	}
 
 	path := filepath.Join(m.hostKeyDir(), "sshd_config")
@@ -281,9 +361,14 @@ var dropbearKeys = []struct{ name, typ string }{
 	{"dropbear_rsa_host_key", "rsa"},
 }
 
-func (m *Manager) dropbearCommand(f *serverFlavor, port int) (*exec.Cmd, error) {
+func (m *Manager) dropbearCommand(f *serverFlavor, port int, pwAuth bool) (*exec.Cmd, error) {
 	dir := m.hostKeyDir()
 	args := []string{"-F", "-E", "-p", strconv.Itoa(port)}
+	if !pwAuth {
+		// -s: parola girişi kapalı (OpenSSH'taki PasswordAuthentication no
+		// ile aynı gerekçe; bkz. writeSSHDConfig).
+		args = append(args, "-s")
+	}
 
 	found := 0
 	for _, k := range dropbearKeys {
@@ -339,35 +424,13 @@ func (m *Manager) Stop() {
 	}
 }
 
-// SetPassword sets the root login password.
-//
-// ── Neden chpasswd ──────────────────────────────────────────────────────────
-// Parolayı /etc/shadow'a doğru biçimde (tuzlanmış, doğru algoritma, doğru
-// alan sayısı) yazmak elle yapılacak bir iş değil. chpasswd BusyBox'ta da
-// vardır ve bunu doğru yapar.
-//
-// Parola STDIN'den verilir, komut satırından DEĞİL: komut satırı argümanları
-// /proc üzerinden makinedeki her sürece görünür.
-func SetPassword(user, password string) error {
-	if user == "" {
-		user = "root"
+// dataVolatile reports whether dir is on a RAM filesystem (lost at reboot).
+func dataVolatile(dir string) bool {
+	b, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return false
 	}
-	if strings.ContainsAny(password, "\n:") {
-		// chpasswd girdisi "kullanıcı:parola" satırlarıdır; iki nokta ya da
-		// satır sonu o biçimi bozar.
-		return fmt.Errorf("parola iki nokta veya satır sonu içeremez")
-	}
-	bin := findBin("chpasswd")
-	if bin == "" {
-		return fmt.Errorf("chpasswd bulunamadı")
-	}
-	cmd := exec.Command(bin)
-	cmd.Stdin = strings.NewReader(user + ":" + password + "\n")
-	if b, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("parola ayarlanamadı: %v (%s)", err,
-			strings.TrimSpace(string(b)))
-	}
-	return nil
+	return volatileMount(string(b), dir)
 }
 
 // localAddresses lists the addresses a user can ssh to.

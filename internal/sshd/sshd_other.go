@@ -2,8 +2,6 @@
 
 package sshd
 
-import "fmt"
-
 // Bu dosya Linux dışı yapılar içindir.
 //
 // ── Neden var ───────────────────────────────────────────────────────────────
@@ -22,14 +20,16 @@ func Available() bool { return false }
 // Flavor names the implementation; none off-device.
 func Flavor() string { return "" }
 
-func (m *Manager) start(int) error { return ErrUnavailable }
+func (m *Manager) start(int, bool) error { return ErrUnavailable }
 
 // Stop is a no-op: nothing was ever started.
 func (m *Manager) Stop() {}
 
-// SetPassword is unsupported off-device.
-func SetPassword(string, string) error {
-	return fmt.Errorf("parola yalnızca MCOS cihazında ayarlanabilir")
-}
+// passwordSupported: bu platformda /etc/shadow yok; Manager.SetPassword
+// sessizce başarılı olmak yerine açık bir hata döner.
+const passwordSupported = false
+
+// dataVolatile: cihaz dışında kalıcılık sorusu anlamsız.
+func dataVolatile(string) bool { return false }
 
 func localAddresses() []string { return nil }

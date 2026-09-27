@@ -39,7 +39,36 @@ func lockTestApp(t *testing.T) *App {
 	if !a.Locked() {
 		t.Fatal("panel kilitlenmedi")
 	}
+	// Lock() bir giriş solması başlatır ve o sürerken kare tikinde çizim
+	// istemek DOĞRUDUR (bkz. TestKilitGirisSolmasiAkici). Bu yardımcıyı
+	// kullanan testler KARARLI durumu ölçüyor: solma bitmiş sayılır.
+	a.mu.Lock()
+	a.trans = nil
+	a.mu.Unlock()
 	return a
+}
+
+// TestKilitGirisSolmasiAkici: kilit ekranına geçiş solması KARE hızında akar.
+//
+// Eskiden geçişler yalnızca 80 ms'lik animasyon tikinde çiziliyordu (saniyede
+// ~12 kare); bench_test.go TestGecisKareHizi bunu 180 ms'de 3 kare olarak
+// ölçtü.
+func TestKilitGirisSolmasiAkici(t *testing.T) {
+	a, _ := newTestApp(t)
+	_, _, cfg := a.Snapshot()
+	if cfg == nil {
+		cfg = model.DefaultConfig()
+	}
+	if err := cfg.Security.SetPassword("gizli"); err != nil {
+		t.Fatal(err)
+	}
+	a.mu.Lock()
+	a.cfg = cfg
+	a.mu.Unlock()
+	a.Lock()
+	if !a.needsFastRedraw() {
+		t.Fatal("kilit ekranına geçiş sürerken kare tikinde çizim istenmiyor")
+	}
 }
 
 func TestLockTypingAnimates(t *testing.T) {

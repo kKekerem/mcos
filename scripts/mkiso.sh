@@ -25,6 +25,18 @@ mkdir -p "$D/boot/grub" "$D/EFI/BOOT"
 cp "$BR_OUTPUT/images/bzImage" "$D/boot/bzImage"
 cp "$BR_OUTPUT/images/rootfs.cpio.gz" "$D/boot/initrd.img"
 
+# Güncelleme sistemi: derleme kimliği ve sürüm ISO'ya yazılır (Makefile "iso"
+# hedefiyle aynı). Kimlik initrd'nin İÇİNDEKİ dosyadan okunur; ikisi farklı
+# olursa kurulu sistemdeki açılış eşitlemesi (rootfs-overlay/init) yanılır.
+BID="$(gzip -dc "$BR_OUTPUT/images/rootfs.cpio.gz" 2>/dev/null |
+  cpio -i --quiet --to-stdout etc/mcos-build-id ./etc/mcos-build-id 2>/dev/null | head -n 1 || true)"
+[ -n "$BID" ] || BID="$(head -n 1 "$BR_OUTPUT/target/etc/mcos-build-id" 2>/dev/null || true)"
+[ -n "$BID" ] || { echo "HATA: derleme kimliği yok (etc/mcos-build-id); önce make os"; exit 1; }
+mkdir -p "$D/mcos"
+printf '%s\n' "$BID" > "$D/mcos/build-id"
+tr -d ' \r\n' < "$(dirname "$0")/../VERSION" > "$D/mcos/version" 2>/dev/null || echo 0.0.0 > "$D/mcos/version"
+echo >> "$D/mcos/version"
+
 {
   mcos_grub_header 5
   cat <<EOF

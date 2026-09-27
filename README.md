@@ -84,6 +84,22 @@ MCOS, bir Minecraft sunucusunu kurmak, çalıştırmak, izlemek, yedeklemek ve i
 | 💾 | **Masaüstü kurulum aracı** — Windows ve Linux'ta USB'ye kalıcı MCOS yazar; sunucu/tarayıcı gerekmez |
 | 📶 | **Wi-Fi düzeltmesi** — `wireless-regdb` eklendi; "kart çalışıyor ama ağ görmüyor" sorunu giderildi |
 
+### Son eklenenler
+
+| | Yenilik |
+|---|---|
+| 📡 | **Canlı Wi-Fi taraması** — "tara" dendiği an pencere açılır; radar döner ve ağlar **bulundukça** satır satır düşer (eskiden tarama bitene kadar hiçbir şey görünmüyordu) |
+| 🔊 | **Ses efektleri** — geçişlerde, pencere açılış/kapanışında, açılış ve kapanışta kısa tonlar. Ses dosyası yok: tonlar kodda üretiliyor. **Ayarlar → Ses efektleri** ile kapatılır |
+| 🌙 | **Kapanış animasyonu** — panel dışa zoomlanarak uzaklaşır, "Kapatılıyor" ekranı gelir, o da uzaklaşır ve ekran **siyah kalır**: kapanırken ne kurtarma menüsü ne çekirdek logu basılır |
+| ⏭️ | **"Atla" düğmesi** — zorunlu olmayan sihirbaz sayfalarında sağda; `Tab` ile de atlanır |
+| ⚡ | **Tek seçimde otomatik ilerleme** — sayfada verilecek tek karar varsa (şablon, sunucu yazılımı) seçim yapınca "Devam"a basmak gerekmez |
+| 🔘 | **Buton odağı düzeltildi** — seçili buton mavi dolgu + **beyaz halka** alır; butonlar arası boşluk 24 px'ten 36 px'e çıktı |
+| 🌐 | **playit artık gerçekten gömülü** — ajan ikilileri imajın parçası (eskiden hiç kopyalanmıyordu) |
+| 🧠 | **76 MB RAM kazancı** — çevrimdışı sunucu paketi artık initramfs'e değil, önyükleme ortamına yazılıyor |
+| 🖥️ | **Ekran paylaşımı (VNC)** — RealVNC Viewer ile bu ekranın aynısına bağlanın; klavye ve fare de çalışır |
+| 🤫 | **Sessiz açılış** — çekirdek logları artık ekrana düşmüyor; animasyon initramfs'in ilk anında başlıyor |
+| 📈 | **Gerçek açılış ilerlemesi** — halka artık süreden değil, biten adımlardan doluyor; altta gerçek donanım yazıyor |
+
 ---
 
 ## 🎬 Açılıştan Panele
@@ -99,11 +115,28 @@ MCOS, bir Minecraft sunucusunu kurmak, çalıştırmak, izlemek, yedeklemek ve i
 Açılış sırası:
 
 ```
- çekirdek  →  mcos-splash  →  mcosd + ağ + fontlar  →  panel
-              (animasyon)      (durum satırı güncellenir)   ↑
+ çekirdek → /init → mcos-splash → mcosd + ağ + fontlar → panel
+   (sessiz)  (animasyonu        (ilerleme GERÇEK           ↑
+             HEMEN başlatır)     adımlardan gelir)          │
                      └──────── son kare kaydedilir ─────────┘
                                                   yakınlaşarak açılır
 ```
+
+> [!NOTE]
+> **Çekirdek logları ekrana düşmez.** Komut satırı `quiet loglevel=0` ve
+> çekirdek açma satırları da kapalı (`CONFIG_X86_VERBOSE_BOOTUP=n`).
+> Animasyon initramfs'in `/init`'inden, yani userspace'in ilk anında
+> başladığı için doldurulacak bir boşluk yok. Kayıt kaybolmaz: `dmesg` ile
+> okunur ve kurtarma açılış girdisi hâlâ her şeyi ekrana basar.
+
+**Açılış ekranındaki her şey gerçektir:**
+
+| Öğe | Nereden gelir |
+|---|---|
+| İlerleme halkası | Biten açılış adımları (`mcos-stage`) — süreden **değil** |
+| Durum satırı | O adımı bitiren betiğin kendi bildirimi |
+| Alt satır | `/proc/cpuinfo` + `/proc/meminfo`: işlemci modeli, çekirdek sayısı, bellek |
+| Sürüm | `internal/version` (tek kaynak) |
 
 Açılış ekranı **panel hazır olduğunda** kendiliğinden biter ve son karesini
 `/run/mcos-splash.rgba` dosyasına bırakır. Panel o kareden **yakınlaşıp
@@ -165,6 +198,30 @@ Artık çerçeveler gerçek Bézier yayı, işaretler gerçek daire, bulanıklı
 
 </div>
 
+### Ses efektleri
+
+Geçişlere kısa tonlar eşlik eder: açılış, sayfa geçişi, pencere açılış/kapanışı,
+onay, hata ve kapanış.
+
+| Konu | Nasıl |
+|---|---|
+| Ses dosyası | **Yok.** Tonlar çalınırken sinüs + zarf ile hesaplanır (imaja tek bayt eklemez) |
+| Çıkış | Sırayla: ses kartı (ALSA/`aplay`) → anakart bipçisi → sessizlik |
+| Donanım | Çekirdeğe HDA, AC'97, USB ses ve PC hoparlörü desteği eklendi |
+| Kapatma | **Ayarlar → Ses efektleri** (ve kurulum sihirbazının "Özellikler" sayfasında) |
+| Kapalıyken | Hiçbir ses aygıtı aranmaz, hiçbir örnekleme hesaplanmaz |
+
+> [!NOTE]
+> Ayarlar satırının sağında **hangi çıkışın** kullanıldığı yazar
+> ("ses kartı", "anakart bipçisi", "ses aygıtı YOK"). "Ses açık ama
+> duyulmuyor" sorusunun cevabı çoğu zaman budur — tıpkı fare ayarlarında
+> bulunan aygıtların listelenmesi gibi.
+>
+> HDA kodeklerinin çoğu açılışta **kapalı (muted)** gelir; MCOS ilk sesten
+> önce `amixer` ile Master kanalını bir kez açar.
+
+---
+
 ### Arayüzü kendiniz görün (donanım gerekmez)
 
 ```bash
@@ -184,13 +241,15 @@ Tuş atamaları önceki sürümle **aynıdır**; kas hafızası bozulmaz.
 | `↑` `↓` / `k` `j` | Gezin |
 | `Enter` / `→` / `l` | Seç, aç, başlat/durdur |
 | `Esc` / `←` / `h` | Geri |
-| `Tab` | Kenar çubuğu ↔ içerik |
+| `Tab` | Kenar çubuğu ↔ içerik · *sihirbazda:* zorunlu olmayan sayfayı **atla** |
 | `n` | Yeni sunucu |
 | `s` / `x` / `r` | Başlat / durdur / yenile |
 | `s` *(Paylaşım ekranında)* | Ağı tara |
 | `i` *(Paylaşım ekranında)* | Elle IP gir |
 | `t` | Turbo |
 | `g` | Güç menüsü (uyku, yeniden başlat, kapat) |
+| **`F9`** | Sesi aç/kapat (sessize alınmadan önceki seviye hatırlanır) |
+| **`F10`** / **`F11`** | Sesi azalt / artır (%5 adım) |
 | `q` | Çıkış |
 | **`F12`** | Eski panele dön (sorun çıkarsa kaçış yolu) |
 
@@ -434,6 +493,45 @@ ssh root@192.168.1.20
 
 ---
 
+## 🖵 Ekran Paylaşımı (VNC / RealVNC)
+
+Panelin **aynısını** başka bir bilgisayardan görün ve kullanın.
+
+```
+Ayarlar → Ekran paylaşımı (VNC) → Ekran paylaşımını aç
+```
+
+Ekranda **adres**, **port** ve **8 karakterlik parola** belirir. RealVNC
+Viewer'a (ya da TigerVNC, Remmina, macOS Ekran Paylaşımı) adresi girin,
+parolayı yazın.
+
+| Konu | Nasıl |
+|---|---|
+| Ne görünür | **Çerçeve arabelleğinin kendisi** — açılış animasyonu, sihirbaz, kilit ekranı, kapanış animasyonu |
+| Girdi | Klavye ve fare `uinput` ile sanal bir aygıta yazılır; panel onları yerel klavyeyle **aynı yoldan** alır |
+| Kimlik doğrulama | VNC parolası **zorunlu** — parolasız ("None") bağlantı hiç sunulmaz |
+| Kip | "Yalnızca izleme" ile uzaktaki kullanıcı ekranı görür ama **hiçbir şeye dokunamaz** |
+| Varsayılan | **Kapalı** |
+
+> [!WARNING]
+> **VNC trafiği şifresizdir** — protokolün kendisi şifreleme taşımaz ve
+> parola tek DES bloğuyla korunur. Yerel ağ için uygundur.
+>
+> İnternete açmayın; gerekiyorsa SSH tüneliyle taşıyın:
+> ```bash
+> ssh -L 5900:localhost:5900 root@192.168.1.20
+> ```
+> Sonra VNC istemcisinde `localhost:5900` adresine bağlanın — trafik SSH'ın
+> şifresinden geçer.
+
+> [!NOTE]
+> Sunucu MCOS'un içinde, saf Go ile yazıldı (`internal/vnc`): imaja
+> libvncserver ya da X11 girmiyor. Yalnızca **Raw** kodlaması kullanılır ama
+> ekran 32×32 karoya bölünüp **yalnızca değişen karolar** gönderilir; tipik
+> güncelleme 1080p'de 30–300 KB.
+
+---
+
 ## 🖥️ İkinci PC'yi Düğüm Yapmak (mcos-node)
 
 MCOS kurmak istemediğiniz bir Windows/Linux bilgisayarı ortak dünyaya
@@ -619,6 +717,30 @@ graph BT
 
 ---
 
+## 🔌 Üç Uzaktan Erişim Yolu — Farkları
+
+| | Ne taşır | Şifreleme | Ne için |
+|---|---|---|---|
+| **Uzaktan kontrol** (2223) | Yapılandırılmış veri (JSON-RPC) | **TLS + jeton** | Telefon uygulaması: durum, başlat/durdur, konsol |
+| **SSH** (22) | Kabuk | **SSH** | Panelin yapamadığı işler; dosyaya elle bakmak |
+| **Ekran paylaşımı** (5900) | **Ekranın kendisi** + klavye/fare | **yok** (SSH tüneli önerilir) | Paneli uzaktan kullanmak; birine ekranı göstermek |
+
+Üçü de **varsayılan kapalıdır** ve Ayarlar'dan tek tek açılır. Üçü de
+yeniden başlatmayı atlatır: uzaktan açtığınız erişim, makineyi yeniden
+başlattığınızda kapanmaz.
+
+> [!TIP]
+> Uzaktan kontrol açıkken SSH anahtarınızı **panele dokunmadan** kurabilir
+> ve SSH'ı açabilirsiniz:
+> ```bash
+> curl -k -X POST https://<ip>:2223/rpc -H "Authorization: Bearer <jeton>" \
+>   -d '{"jsonrpc":"2.0","id":1,"method":"ssh.addKey","params":{"key":"ssh-ed25519 AAAA..."}}'
+> curl -k -X POST https://<ip>:2223/rpc -H "Authorization: Bearer <jeton>" \
+>   -d '{"jsonrpc":"2.0","id":2,"method":"ssh.enable"}'
+> ```
+
+---
+
 ## 📊 Durum ve Yol Haritası
 
 > Bu bölüm **dürüst** tutulur: çalışan ile devam eden ayrı yazılır.
@@ -728,6 +850,59 @@ make qemu             # üretilen ISO'yu QEMU'da boot eder
 > ```bash
 > make iso BR_OUTPUT=$HOME/mcos-output
 > ```
+
+> [!NOTE]
+> `make offline-bundle` artık **elle çalıştırmak zorunda değilsiniz**: `make os`
+> paket yoksa kendisi indirir. playit ajanı bu paketten geldiği için, indirme
+> başarısız olursa derleme durmaz ama **playit imaja girmez** ve build çıktısı
+> bunu açıkça yazar.
+
+### 3) QEMU donanım hızlandırması (WSL2)
+
+**Belirti:** QEMU çok yavaş, GRUB menüsünde bile takılıyor.
+
+**Sebep:** `/dev/kvm` aygıtı var ama kullanıcı `kvm` grubunda değil, bu yüzden
+QEMU yazılım öykünmesine (TCG) düşüyor. TCG'de 1920×1080×32 bir GRUB menüsünü
+yazılımla çizmek her tuşta milyonlarca pikselin öykünmüş komutlarla
+kopyalanması demektir.
+
+```bash
+sudo usermod -aG kvm $USER
+```
+
+Sonra **Windows tarafında PowerShell'de**:
+
+```powershell
+wsl --shutdown
+```
+
+WSL'i yeniden açın (grup değişikliği ancak yeni oturumda geçerli olur) ve
+doğrulayın:
+
+```bash
+id | grep -o kvm && ls -la /dev/kvm && qemu-system-x86_64 -accel help
+```
+
+**Tek komut** (izni kendisi düzeltir, WSL'i kapatmanız gerekmez):
+
+```bash
+sh start-qemu.sh
+```
+
+`sudo setfacl` ile bu oturuma ANINDA izin verir, `usermod` ile de kalıcı yapar —
+ikisi tek sudo isteminde, yani bir daha sorulmaz. KVM'in gerçekten çalıştığını
+(yalnızca aygıtın açılabildiğini değil) kısa bir sınamayla doğrular.
+
+`make qemu-run` aynı şeyi yapar ve **derleme tetiklemez**; `make qemu` ise ISO'yu
+da üretir. Hedefler ayrıca `-cpu host`,
+`-smp 4` ve WSLg'nin PulseAudio sunucusu üzerinden **ses** ile çalışır — yani
+MCOS'un ses efektleri sanal makinede de duyulur.
+
+| Değişken | Varsayılan | Ne işe yarar |
+|---|---|---|
+| `QEMU_MEM` | `2048` | Sanal makine belleği (MB) |
+| `QEMU_SMP` | `4` | Sanal çekirdek sayısı |
+| `QEMU_AUDIO` | PulseAudio + Intel HDA | Sesi kapatmak için `QEMU_AUDIO=` bırakın |
 
 ---
 

@@ -100,6 +100,13 @@ type Device struct {
 
 	// Kanal kaydırmaları, vinf bitfield'lerinden çözülür.
 	rShift, gShift, bShift uint
+
+	// format, hizli yazma yolunun hangi bicimde calisabilecegi (bkz.
+	// fastpath_linux.go). Acilista BIR KEZ belirlenir: her karede yeniden
+	// sinamak, kazanilan zamanin bir kismini geri verirdi.
+	format fbFormat
+	// dmg, onceki kareyi tutar; yalnizca DEGISEN satirlar yazilir.
+	dmg damage
 }
 
 // Open maps a framebuffer device. Boş yol "/dev/fb0" anlamına gelir.
@@ -149,6 +156,7 @@ func Open(path string) (*Device, error) {
 		return nil, fmt.Errorf("fbdev: mmap (%d bayt): %w", size, err)
 	}
 	d.mem = mem
+	d.format = detectFormat(d.bpp, d.rShift, d.gShift, d.bShift)
 	return d, nil
 }
 
@@ -200,6 +208,31 @@ func (d *Device) Flip(img *image.RGBA) error {
 	}
 	if h > sh {
 		h = sh
+	}
+
+	// ── HASAR TAKIBI ────────────────────────────────────────────────────
+	//
+	// Panel bosta dururken bile eskiden TUM ekran yeniden yaziliyordu.
+	// Gercek bir panel degisiminde ekranin yalnizca ~%4'u degisiyor; kalani
+	// yazmak bosa giden istir ve olculen maliyetin buyuk kismidir.
+	//
+	// Tarama DAHIL uctan uca kazanc 13,9x; yazma tarafinda 134x.
+	// (Ayrinti ve olcumler: fastpath_linux.go)
+	if d.format != fmtGeneric {
+		fast := true
+		for _, r := range d.dmg.rowsChanged(img, w, h) {
+			if !d.blitRows(img, r[0], r[1], w) {
+				fast = false
+				break
+			}
+		}
+		if fast {
+			return nil
+		}
+		// Hizli yol yarida kaldi: bu karede yavas yolla TAMAMINI bas ve
+		// hasar durumunu sifirla, yoksa eksik yazilan satirlar "degismedi"
+		// sayilip ekranda coz olarak kalirdi.
+		d.dmg.prev = nil
 	}
 
 	for y := 0; y < h; y++ {

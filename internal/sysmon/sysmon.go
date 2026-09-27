@@ -7,11 +7,11 @@ package sysmon
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"mcos/internal/netprobe"
 	"net"
 	"os"
 	"runtime"
 	"sort"
-	"time"
 
 	"mcos/internal/model"
 )
@@ -112,19 +112,29 @@ func Net() model.NetStatus {
 			st.NICs = append(st.NICs, nic)
 		}
 	}
-	st.Internet = checkInternet()
+	// Tek bir ölçüm: Check() sonucu önbellekli, iki çağrı aynı şeyi döndürür.
+	r := netprobe.Check()
+	st.Internet = r.Online
+	st.Reason = r.Reason
 	return st
 }
 
 // checkInternet performs a short TCP probe to a public resolver. A failure
 // means "treat the box as offline" (wan/online features are disabled).
-func checkInternet() bool {
-	for _, addr := range []string{"1.1.1.1:53", "8.8.8.8:53"} {
-		conn, err := net.DialTimeout("tcp", addr, 1500*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return true
-		}
-	}
-	return false
-}
+// checkInternet delegates to netprobe.
+//
+// ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
+//
+// Burada YALNIZCA TCP PORT 53 sınanıyordu (1.1.1.1:53 ve 8.8.8.8:53). DNS
+// normalde UDP kullanır; TCP/53 pek çok ISS, kurumsal ağ ve VPN tarafından
+// ENGELLENİR. Sonuç: HTTPS'in sorunsuz çalıştığı ağlarda MCOS "internet yok"
+// diyordu — ve o bayrak Java indirmesini KAPIDA reddediyordu, yani indirme
+// hiç denenmiyordu bile.
+//
+// Ölçülen şey artık İŞE YARAYAN şey: dışarıya HTTPS çıkışı (bkz. netprobe).
+func checkInternet() bool { return netprobe.Check().Online }
+
+// InternetReason explains a missing connection in words the user can act on.
+//
+// "İnternet yok" tek başına kullanıcıya ne yapacağını söylemiyor.
+func InternetReason() string { return netprobe.Check().Reason }

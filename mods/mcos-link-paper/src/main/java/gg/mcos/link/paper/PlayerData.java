@@ -1,9 +1,11 @@
 package gg.mcos.link.paper;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Server;
 import org.bukkit.World;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -14,7 +16,8 @@ import java.util.UUID;
  *
  * <p><b>Tasarım kararı.</b> Aktarımda oyuncu durumunu ELLE serileştirmiyoruz
  * (her eşya, her efekt, her NBT etiketi). Bunun yerine Minecraft'ın kendi
- * kayıt dosyasını ({@code playerdata/&lt;uuid&gt;.dat}) olduğu gibi taşıyoruz.
+ * kayıt dosyasını ({@code playerdata/&lt;uuid&gt;.dat}; 26.1 ve sonrasında
+ * {@code players/data/&lt;uuid&gt;.dat}) olduğu gibi taşıyoruz.
  *
  * <p>Nedenleri:
  * <ul>
@@ -26,41 +29,57 @@ import java.util.UUID;
  *   <li><b>Basitlik.</b> Bu sınıf 60 satır; elle serileştirici 600 olurdu.</li>
  * </ul>
  *
- * <h2>PAPER PORTU: TEK GERÇEK DEĞİŞİKLİK</h2>
+ * <h2>PAPER PORTU: KAYIT KLASÖRÜ NEREDE — İKİ AYRI DÜZEN</h2>
  *
- * <p>Fabric {@code server.getSavePath(WorldSavePath.PLAYERDATA)} çağırıyordu.
- * Bukkit karşılığı {@code World#getWorldPath()}'tir:
+ * <p>Fabric {@code server.getSavePath(WorldSavePath.PLAYERDATA)} çağırıyordu,
+ * yani yolu oyunun KENDİSİNE soruyordu. Bukkit'te bunun karşılığı yok; yol
+ * burada kuruluyor ve Minecraft 26.1 ile yol DEĞİŞTİ. Tek jar 1.20.5'ten
+ * 26.3'e kadar yüklendiği için ikisini de bilmek zorunda.
  *
+ * <p>Gerçek sunucularda ölçülen düzen (düz dünya, ilk açılış, hiç oyuncu
+ * girmeden — klasörü sunucu açılışta KENDİSİ oluşturuyor):
  * <pre>
- *   Path playerdata = Bukkit.getWorlds().get(0).getWorldPath().resolve("playerdata");
+ *   1.20.5 .. 1.21.11   world/playerdata/              (ana dünya klasörü = seviye klasörü)
+ *                       world_nether/DIM-1, world_the_end/DIM1
+ *   26.1.1 .. 26.3      world/players/data/            (seviye klasörü)
+ *                       world/dimensions/minecraft/overworld   (= World#getWorldPath)
  * </pre>
+ * 26.1.2 sunucu jar'ında {@code LevelResource.PLAYER_DATA_DIR} sabiti
+ * {@code "players/data"}'dır (javap ile bakıldı).
  *
- * <p><b>{@code Server#getLevelDirectory()} DİYE BİR METOT YOK.</b> Bu dosya
- * bir zamanlar onu çağırıyordu ve derleme şu hatayla kırılıyordu:
+ * <p><b>Yakalanan gerçek hata:</b> bu dosya eskiden
+ * {@code getWorlds().get(0).getWorldPath().resolve("playerdata")}
+ * kullanıyordu. 26.1.2'de gelen bir aktarım
+ * {@code world/dimensions/minecraft/overworld/playerdata/<uuid>.dat}
+ * dosyasına yazıldı — sunucunun HİÇ okumadığı bir klasöre. Eş "ok" alıyor,
+ * istemciyi aktarıyor ve oyuncu hedefte BOŞ envanterle doğuyordu; giden
+ * yönde de {@code saveData()} sonrası dosya bulunamıyor ve her aktarım
+ * "oyuncu kaydı bulunamadı" ile iptal oluyordu.
  *
- * <pre>
- *   symbol:   method getLevelDirectory()
- *   location: interface Server
- * </pre>
+ * <p>1.21.11'de açılmış bir dünyayı 26.1.2 ile açınca sunucu
+ * {@code world/playerdata/*.dat} dosyalarını {@code world/players/data/}
+ * altına TAŞIYOR ve eski klasör kalmıyor (ölçüldü). Yani yükseltilmiş bir
+ * dünyada da doğru yer yeni düzendir.
  *
- * <p>{@code paper-api-1.21.11-R0.1-SNAPSHOT.jar} üzerinde {@code javap} ile
- * bakıldığında {@code org.bukkit.Server}'ın dizin döndüren metotları
- * yalnızca şunlardır: {@code getPluginsFolder()}, {@code getUpdateFolderFile()}
- * ve {@code getWorldContainer()}. {@code org.bukkit.World} ise
- * {@code getWorldFolder()} (File) ve {@code getWorldPath()} (Path) sunar.
- * Kullanılan {@code getWorldPath()}'tir — tip dönüşümü gerektirmeyen tek
- * seçenek.
+ * <h3>Seviye klasörü nasıl bulunuyor</h3>
+ *
+ * <p>{@code Server#getLevelDirectory()} 26.1 ile GELDİ: 1.20.6 ve 1.21.11
+ * paper-api'de YOK, 26.1.2 ve 26.3 paper-api'de VAR (javap). Eklenti 1.20.6
+ * API'siyle derlendiği için bu metot yansımayla (reflection) aranıyor;
+ * yoksa ana dünyanın {@code getWorldFolder()}'ı kullanılıyor — 26.1
+ * öncesinde ana dünyanın klasörü seviye klasörünün TA KENDİSİDİR.
+ *
+ * <p>{@code World#getWorldPath()} KULLANILMAZ: 1.21.6 paper-api'de YOK
+ * (1.21.8'de var), yani 1.20.5–1.21.6 sunucularında
+ * {@code NoSuchMethodError} verirdi; 26.x'te ise seviye klasörünü değil
+ * boyut klasörünü döndürür — yukarıdaki hatanın kaynağı tam olarak buydu.
+ * {@code getWorldFolder()} ise ölçülen her sürümde vardır.
  *
  * <p><b>{@code Server#getWorldContainer()} KULLANILMAZ.</b> O metot
  * {@code @ApiStatus.Obsolete} işaretlidir ve seviye klasörünün EBEVEYNİNİ
  * döndürür — yani bir dizin YUKARIDA. Sonuç sinsidir: klasör vardır ama
  * içinde .dat yoktur, {@link #read} null döner ve her aktarım "oyuncu kaydı
  * bulunamadı" ile iptal olur. Ağ hatası gibi görünen bir YOL hatası.
- *
- * <p>Bukkit boyutları kardeş klasörlere ayırır (world, world_nether,
- * world_the_end) ama {@code playerdata/} YALNIZCA ana seviye klasörünün
- * altındadır; bu eklentinin dilimlemesi zaten tek dünyada X ekseni üzerinden
- * olduğu için bunun bir etkisi yok.
  *
  * <h2>KARIŞIK KÜME (Fabric + Paper) UYARISI — SESSİZCE GEÇİLMEDİ</h2>
  *
@@ -104,18 +123,37 @@ public final class PlayerData {
     }
 
     /**
-     * {@code <dünya>/playerdata} klasörü.
+     * {@code Server#getLevelDirectory()} — yalnızca 26.1 ve sonrasında var,
+     * yoksa null. Bkz. sınıf açıklaması.
+     *
+     * <p>Sınıf yüklenirken BİR KEZ aranır: aktarım başına yansıma araması
+     * hem gereksiz hem de her seferinde aynı cevabı verir.
+     */
+    private static final Method LEVEL_DIRECTORY = findLevelDirectory();
+
+    private static Method findLevelDirectory() {
+        try {
+            Method m = Server.class.getMethod("getLevelDirectory");
+            // Dönüş tipi de denetleniyor: aynı adla başka tipte bir metot
+            // gelirse aşağıdaki (Path) dönüşümü aktarım anında patlardı.
+            return Path.class.isAssignableFrom(m.getReturnType()) ? m : null;
+        } catch (NoSuchMethodException e) {
+            return null; // 1.20.5 .. 1.21.11: beklenen durum
+        }
+    }
+
+    /**
+     * Seviye klasörü ({@code level.dat}'ın bulunduğu klasör).
      *
      * <p>Fabric sürümü {@code MinecraftServer}'ı parametre olarak alıyordu;
      * Bukkit'te sunucu zaten küresel olarak erişilebilir ({@code Bukkit}),
      * bu yüzden parametreye gerek yok.
      *
-     * <p><b>Neden {@code getWorlds().get(0)}?</b> Bukkit boyutları kardeş
-     * klasörlere ayırır (world, world_nether, world_the_end) ama
-     * {@code playerdata/} YALNIZCA ana seviye klasörünün altındadır. Ana
-     * dünya, sunucunun ilk yüklediği dünyadır ve liste yükleme sırasını
-     * korur; ayrıca bu eklentinin dilimlemesi zaten tek dünyada X ekseni
-     * üzerinden yapıldığı için başka bir boyut söz konusu değil.
+     * <p><b>26.1 öncesinde neden {@code getWorlds().get(0)}?</b> Bukkit
+     * boyutları kardeş klasörlere ayırır (world, world_nether,
+     * world_the_end) ve {@code playerdata/} YALNIZCA ana seviye klasörünün
+     * altındadır. Ana dünya, sunucunun ilk yüklediği dünyadır ve liste
+     * yükleme sırasını korur.
      *
      * @throws IllegalStateException dünya listesi boşsa. Bu, yalnızca
      *     eklenti dünyalar yüklenmeden çalıştırılırsa olur
@@ -124,13 +162,50 @@ public final class PlayerData {
      *     durmak doğrudur: yanlış yol, her aktarımın "oyuncu kaydı
      *     bulunamadı" ile iptal olması demektir ve sebebi görünmez.
      */
-    public static Path directory() {
+    static Path levelDirectory() {
+        if (LEVEL_DIRECTORY != null) {
+            try {
+                return (Path) LEVEL_DIRECTORY.invoke(Bukkit.getServer());
+            } catch (ReflectiveOperationException | ClassCastException e) {
+                throw new IllegalStateException(
+                        "seviye klasörü sunucudan alınamadı: " + e, e);
+            }
+        }
         List<World> worlds = Bukkit.getWorlds();
         if (worlds.isEmpty()) {
             throw new IllegalStateException(
                     "dünya henüz yüklenmedi; oyuncu verisi klasörü belirlenemiyor");
         }
-        return worlds.get(0).getWorldPath().resolve("playerdata");
+        return worlds.get(0).getWorldFolder().toPath();
+    }
+
+    /**
+     * Oyuncu kayıt klasörü: 26.1+ {@code players/data}, öncesi
+     * {@code playerdata}.
+     *
+     * <p><b>Önce DİSKE bakılır, sürüme değil.</b> İki klasörü de sunucu
+     * açılışta kendisi oluşturur (ölçüldü: hiç oyuncu girmeden ikisi de
+     * yerinde). Yani var olan klasör, sunucunun GERÇEKTEN okuduğu
+     * klasördür. Yeni düzen önce denenir: yükseltmede sunucu eski klasörü
+     * zaten kaldırıyor, ama bir yedekten geri kopyalanmış eski bir
+     * {@code playerdata/} yanlış yere yazmamıza yol açmamalı.
+     *
+     * <p>İkisi de yoksa (biri çalışırken silmişse) API'ye göre karar verilir:
+     * {@code getLevelDirectory()} varsa sunucu 26.1+ düzenindedir.
+     * {@code HandoffService}/{@code LinkServer} gerekirse klasörü
+     * oluşturur.
+     */
+    public static Path directory() {
+        Path level = levelDirectory();
+        Path modern = level.resolve("players").resolve("data");
+        if (Files.isDirectory(modern)) {
+            return modern;
+        }
+        Path legacy = level.resolve("playerdata");
+        if (Files.isDirectory(legacy)) {
+            return legacy;
+        }
+        return LEVEL_DIRECTORY != null ? modern : legacy;
     }
 
     /** Bir oyuncunun kayıt dosyası. */

@@ -17,7 +17,11 @@ type taskExecutor struct{ d *Daemon }
 func (e taskExecutor) Execute(t model.Task) (string, error) {
 	switch t.Kind {
 	case model.TaskBackup:
-		b, err := e.d.backup.Create(t.ServerID, t.Params["name"], "cluster auto-backup", false)
+		desc := "cluster auto-backup"
+		if t.Params["type"] == "auto" {
+			desc = "otomatik yedek"
+		}
+		b, err := e.d.backup.CreateTyped(t.ServerID, t.Params["name"], desc, false, t.Params["type"])
 		if err != nil {
 			return "", err
 		}

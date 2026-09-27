@@ -66,7 +66,19 @@ func (m *Manager) List(serverID string) ([]model.Backup, error) {
 // Create archives the server's data directory (or only worlds) into a new ZIP
 // backup. If the server is running, a best-effort "save-all" is issued first.
 func (m *Manager) Create(serverID, name, description string, worldOnly bool) (model.Backup, error) {
+	return m.CreateTyped(serverID, name, description, worldOnly, "manual")
+}
+
+// CreateTyped is Create with an explicit backup type (manual | auto |
+// restore-point).
+//
+// Otomatik yedekler eskiden "manual" diye damgalanıyordu: panelin yedek
+// listesi zamanlayıcının aldığı her yedeğe "manuel" rozeti takıyordu.
+func (m *Manager) CreateTyped(serverID, name, description string, worldOnly bool, typ string) (model.Backup, error) {
 	var zero model.Backup
+	if typ == "" {
+		typ = "manual"
+	}
 	if name == "" {
 		name = time.Now().Format("2006-01-02_15-04-05")
 	}
@@ -139,7 +151,7 @@ func (m *Manager) Create(serverID, name, description string, worldOnly bool) (mo
 		Description: description,
 		CreatedAt:   time.Now(),
 		SizeBytes:   totalSize,
-		Type:        "manual",
+		Type:        typ,
 		WorldOnly:   worldOnly,
 	}
 

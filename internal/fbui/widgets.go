@@ -21,6 +21,11 @@ type UI struct {
 	Pal Palette
 	M   Metrics
 	dst *image.RGBA
+
+	// bd, ışıklı arka planın; gl, onun buzlu cam hâlinin önbelleği
+	// (bkz. backdrop.go).
+	bd, gl *image.RGBA
+	bdKey  backdropKey
 }
 
 // NewUI binds a canvas, a font and a palette together.
@@ -185,8 +190,9 @@ func maxI(a, b int) int {
 func (u *UI) Panel(r image.Rectangle, title string, focused bool) image.Rectangle {
 	rc := fbdraw.R(float64(r.Min.X), float64(r.Min.Y), float64(r.Dx()), float64(r.Dy()))
 
-	// Yüzey dolgusu, sonra tek parça çerçeve.
-	u.P.FillRoundRect(rc, u.M.Radius, u.Pal.Surface)
+	// Yüzey dolgusu (yarı saydam cam: arkadaki ışık sızsın), sonra tek parça
+	// çerçeve.
+	u.P.FillRoundRectImage(rc, u.M.Radius, u.GlassLayer())
 
 	stroke, col := u.M.Stroke, u.Pal.Border
 	if focused {
@@ -231,16 +237,39 @@ const (
 // Button draws a real button and returns the rectangle it occupied.
 //
 // Metin ile buton arasındaki fark artık tartışmasız: buton dolu/çerçeveli bir
-// yüzeydir, metin değildir. Odaklı buton ayrıca dış hâle alır.
+// yüzeydir, metin değildir.
+//
+// ── Seçili buton neden RENK DEĞİŞTİRİYOR ────────────────────────────────────
+//
+// Kullanıcının şikâyeti: "mavi buton seçilince çevresi beyaz, beyaz seçilince
+// mavi olsun."
+//
+// Sebebi ölçülebilir bir kusurdu: odak yalnızca butonun DIŞINA çizilen
+// Accent@%55 bir hâleydi. Vurgu (Primary) butonun dolgusu da Accent olduğu
+// için hâle kendi dolgusunun üzerine düşüyor ve PRATİKTE GÖRÜNMÜYORDU —
+// "Seç Enter" butonunda seçili ile seçili olmayan hâl neredeyse aynı
+// görünüyordu. Yani panelin en sık kullanılan butonunda odak göstergesi yoktu.
+//
+// Yeni kural (tek cümle): SEÇİLİ buton mavi dolgu + beyaz halka alır.
+//
+//	Primary   seçili değil -> mavi dolgu, halka yok
+//	Primary   seçili       -> mavi dolgu + BEYAZ halka
+//	Secondary seçili değil -> nötr dolgu + soluk çerçeve
+//	Secondary seçili       -> MAVİ dolgu + beyaz halka   (beyaz -> mavi)
+//	Danger    seçili       -> kırmızı dolgu + BEYAZ halka
+//
+// Danger bilerek maviye DÖNMÜYOR: "diski sil" butonunun seçilince öbür
+// butonlarla aynı renge gelmesi, yıkıcı eylemi sıradanlaştırırdı.
+//
+// Halka butonun dışında ve arada bir piksellik boşluk var: bitişik çizilen bir
+// çerçeve butonun kendi kenarlığı sanılıyor, ayrık duran bir halka "bu seçili"
+// diye okunuyor.
 func (u *UI) Button(x, y int, label, key string, style ButtonStyle, focused bool) image.Rectangle {
 	text := label
 	if key != "" {
 		text += "  " + key
 	}
-	w := u.TextWidth(text) + u.M.PadX*2
-	if w < u.M.ButtonMinW {
-		w = u.M.ButtonMinW
-	}
+	w := u.ButtonWidth(label, key)
 	h := u.M.ButtonH
 	rc := fbdraw.R(float64(x), float64(y), float64(w), float64(h))
 
@@ -254,17 +283,22 @@ func (u *UI) Button(x, y int, label, key string, style ButtonStyle, focused bool
 		fill, border, fg = u.Pal.Raised, u.Pal.Border, u.Pal.Text
 	}
 
-	// Odak hâlesi: butonun dışına soluk bir çerçeve. Renk körlüğünde de
-	// görünür olsun diye kalınlık da artar.
+	// Seçili nötr buton maviye döner. Danger'a dokunulmaz (yukarıdaki gerekçe).
+	if focused && style == ButtonSecondary {
+		fill, border, fg = u.Pal.Accent, u.Pal.Accent, u.Pal.TextOn
+	}
+
+	// Odak halkası: butonun DIŞINDA, bir piksel boşluk bırakarak, beyaz.
 	if focused {
-		halo := fbdraw.R(rc.X-u.M.StrokeFocus, rc.Y-u.M.StrokeFocus,
-			rc.W+2*u.M.StrokeFocus, rc.H+2*u.M.StrokeFocus)
-		u.P.StrokeRoundRect(halo, u.M.RadiusSmall+u.M.StrokeFocus,
-			u.M.StrokeFocus, fbdraw.Alpha(u.Pal.Accent, 0.55))
+		gap := u.M.Stroke
+		off := gap + u.M.StrokeFocus
+		halo := fbdraw.R(rc.X-off, rc.Y-off, rc.W+2*off, rc.H+2*off)
+		u.P.StrokeRoundRect(halo, u.M.RadiusSmall+off, u.M.StrokeFocus,
+			fbdraw.Alpha(u.Pal.Text, 0.92))
 	}
 
 	u.P.FillRoundRect(rc, u.M.RadiusSmall, fill)
-	if style == ButtonSecondary {
+	if style == ButtonSecondary && !focused {
 		u.P.StrokeRoundRect(rc, u.M.RadiusSmall, u.M.Stroke, border)
 	}
 
@@ -274,18 +308,43 @@ func (u *UI) Button(x, y int, label, key string, style ButtonStyle, focused bool
 	return image.Rect(x, y, x+w, y+h)
 }
 
+// ButtonWidth is how wide Button will draw this label+key pair.
+//
+// Sağa yaslanmış bir düğme (sihirbazdaki "Atla") çizilmeden önce genişliğini
+// bilmek zorunda. Hesabı Button ile PAYLAŞIYOR: iki ayrı formül, bir gün
+// birinin PadX'i değişince düğmenin gövdeden taşması demekti.
+func (u *UI) ButtonWidth(label, key string) int {
+	text := label
+	if key != "" {
+		text += "  " + key
+	}
+	w := u.TextWidth(text) + u.M.PadX*2
+	if w < u.M.ButtonMinW {
+		w = u.M.ButtonMinW
+	}
+	return w
+}
+
 // ButtonRow lays buttons left to right and returns each button's rectangle.
 //
 // DİKDÖRTGENLERİ DÖNDÜRÜR çünkü fare desteği bunu ister: tıklanabilir alan,
 // çizilen alanla AYNI olmak zorundadır. İkisini ayrı hesaplamak, düzen
 // değiştiğinde sessizce kayan tıklama alanları demektir.
+// Butonlar arası boşluk M.ButtonGap'ten gelir (M.Gap'ten DEĞİL): Gap onlarca
+// yerde kullanılıyor (metin-ikon aralığı, rozet aralığı, alt çubuk kapakları)
+// ve onu büyütmek tüm düzeni kaydırırdı. Kullanıcı yalnızca BUTONLARIN çok
+// yakın olduğunu söyledi.
+//
+// Boşluğun alt sınırı keyfi değil: seçili butonun halkası butonun dışına
+// Stroke+StrokeFocus kadar taşar (1080p'de ~4,4 px). İki buton 2×4,4 px'ten
+// yakın olursa halkalar birbirine değer ve tek bir çerçeve gibi okunur.
 func (u *UI) ButtonRow(x, y int, btns []Btn, focusIdx int) []image.Rectangle {
 	out := make([]image.Rectangle, 0, len(btns))
 	cur := x
 	for i, b := range btns {
 		r := u.Button(cur, y, b.Label, b.Key, b.Style, i == focusIdx)
 		out = append(out, r)
-		cur = r.Max.X + u.M.Gap*2
+		cur = r.Max.X + u.M.ButtonGap
 	}
 	return out
 }
@@ -366,6 +425,21 @@ func (u *UI) Row(r image.Rectangle, selected bool) int {
 			fbdraw.R(float64(r.Min.X), float64(r.Min.Y)+2, u.M.StrokeFocus*1.5, float64(r.Dy())-4),
 			u.M.StrokeFocus*0.75, u.Pal.Accent)
 	}
+	return r.Min.X + u.M.PadX
+}
+
+// RowSelectedAt draws a selected row whose accent stripe sits at stripe.
+//
+// Seçim satırdan satıra geçerken şerit KAYARAK gider (fbpanel animasyonu);
+// dolgu ise hedef satırda anında belirir. Dolguyu kaydırmak, satırlar sırayla
+// çizildiği için üstteki satırın metninin üstüne binerdi; şerit metnin
+// olmadığı sol kenarda duruyor ve hiçbir şeyi örtmüyor.
+func (u *UI) RowSelectedAt(r, stripe image.Rectangle) int {
+	rc := fbdraw.R(float64(r.Min.X), float64(r.Min.Y), float64(r.Dx()), float64(r.Dy()))
+	u.P.FillRoundRect(rc, u.M.RadiusSmall, u.Pal.Raised)
+	u.P.FillRoundRect(
+		fbdraw.R(float64(stripe.Min.X), float64(stripe.Min.Y)+2, u.M.StrokeFocus*1.5, float64(stripe.Dy())-4),
+		u.M.StrokeFocus*0.75, u.Pal.Accent)
 	return r.Min.X + u.M.PadX
 }
 

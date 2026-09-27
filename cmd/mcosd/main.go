@@ -71,6 +71,9 @@ func main() {
 	)
 	flag.Parse()
 
+	// Sunucular bu sınırı devralır (bkz. rlimit_linux.go).
+	raiseFileLimit()
+
 	if *cfgPath == "" {
 		*cfgPath = defaultConfigPath(*dataRoot)
 	}
@@ -86,6 +89,16 @@ func main() {
 
 	lg := mlog.New(outWriter, parseLevel(*logLevel), 2048)
 	lg.Infof("mcosd %s starting (data-root=%s config=%s listen=%s)", daemon.Version, *dataRoot, *cfgPath, *listen)
+
+	// TEK ÖRNEK: aynı veri kökünde ikinci bir daemon, aynı Minecraft
+	// sunucusunu iki kez başlatıp dünyayı bozabilir (bkz. singleton.go).
+	lock, err := lockDataRoot(*dataRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mcosd: %v\n", err)
+		lg.Errorf("mcosd: %v", err)
+		os.Exit(1)
+	}
+	defer lock.Close()
 
 	d, err := daemon.New(*cfgPath, *dataRoot, lg)
 	if err != nil {

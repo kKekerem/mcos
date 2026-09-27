@@ -35,8 +35,15 @@ import (
 //
 //	3. AJAN (playit.start) — gizli anahtar kaydedildikten sonra ajan
 //	   başlatılır ve playit bulutundan tünel yapılandırmasını KENDİSİ çeker.
-//	   Kullanıcı siteden istediği kadar tünel açar; ajan yeniden
-//	   başlatılmadan görür.
+//
+//	4. TÜNEL (otomatik; playit.tunnel ile elle yenilenir) — ajan SELF-MANAGED
+//	   kaydedildiği için playit bulutu ona kendiliğinden tünel açmaz. Eskiden
+//	   ekranda "playit.gg sitesinden tünel oluşturun" yazıp bırakıyorduk;
+//	   kullanıcı "tünel kendiliğinden açılsın" dedi. Artık aynı anahtarla
+//	   API'den Minecraft Java tünelini BİZ açıyoruz, adres gelene kadar arka
+//	   planda rundata okuyup panele ve sunucunun WAN.Hostname alanına
+//	   yazıyoruz (bkz. handlers_playit_tunnel.go). Sitede elle açılan tüneller
+//	   de yerel portlarından tanınır; ikinci bir tünel açılmaz.
 //
 // ── Neden 3. adımda yapılandırma dosyası yok? ───────────────────────────────
 // playit 1.0 ajanının yapılandırması YALNIZCA gizli anahtarı tutar. Tüneller
@@ -54,6 +61,8 @@ type playitState struct {
 	// claimErr, arka planda biten bir bağlama denemesinin sonucudur.
 	claimErr error
 	claimOK  bool
+	// tun, API üzerinden tünel açan arka plan eşitleyicisinin durumu.
+	tun playitTunnels
 }
 
 // playit returns the lazily-created playit state.
@@ -83,6 +92,7 @@ func (d *Daemon) playitStop() {
 		st.claim.Cancel()
 		st.claim = nil
 	}
+	st.tun.shutdown()
 	if st.agent != nil {
 		_ = st.agent.Stop()
 	}
@@ -105,6 +115,18 @@ type playitStatusResult struct {
 	Log []string `json:"log,omitempty"`
 	// Note is a human-readable explanation of the current step.
 	Note string `json:"note,omitempty"`
+
+	// Tunnels: playit hesabındaki tüneller (API'den), MCOS sunucusuyla
+	// eşlenmiş; oluşturulmakta olanlar ve açılamayanlar da burada.
+	Tunnels []ipc.PlayitTunnel `json:"tunnels,omitempty"`
+	// Syncing: arka planda rundata okunuyor ya da tünel adres bekliyor.
+	Syncing bool `json:"syncing,omitempty"`
+	// TunnelError: son eşitleme turunun Türkçe hatası.
+	TunnelError string `json:"tunnelError,omitempty"`
+	// Notices: misafir/doğrulanmamış hesap ve playit'in kritik duyuruları.
+	Notices []string `json:"notices,omitempty"`
+	// KeyInvalid: kayıtlı anahtar reddedildi; hesap YENİDEN bağlanmalı.
+	KeyInvalid bool `json:"keyInvalid,omitempty"`
 }
 
 func (d *Daemon) handlePlayitStatus(_ context.Context, _ json.RawMessage) (any, error) {
@@ -126,15 +148,28 @@ func (d *Daemon) handlePlayitStatus(_ context.Context, _ json.RawMessage) (any, 
 	claimErr := st.claimErr
 	st.mu.Unlock()
 
+	logAddr := ""
 	if agent != nil {
 		running, addr, lg := agent.Status()
 		res.Running = running
-		res.Address = addr
+		logAddr = addr
+		res.KeyInvalid = agent.KeyRejected()
 		// Günlüğün tamamını göndermek paneli boğar; son 12 satır yeter.
 		if n := len(lg); n > 12 {
 			lg = lg[n-12:]
 		}
 		res.Log = lg
+	}
+
+	// API'den okunan tüneller. Adres ÖNCE buradan: günlük ayrıştırması
+	// (parsePlayitAddr) yalnızca yedek — playitd 1.0.10 adresi günlüğe her
+	// zaman yazmıyor.
+	d.fillPlayitTunnels(&res)
+	if res.Address == "" {
+		res.Address = logAddr
+	}
+	if res.Running && res.Claimed {
+		d.kickPlayitSyncIfTargetsChanged()
 	}
 
 	switch {
@@ -146,10 +181,14 @@ func (d *Daemon) handlePlayitStatus(_ context.Context, _ json.RawMessage) (any, 
 		res.Note = "Hesap bağlama başarısız: " + claimErr.Error()
 	case !res.Claimed:
 		res.Note = "Hesap bağlı değil. 'Hesabı bağla' ile başlayın."
+	case res.KeyInvalid:
+		res.Note = "playit anahtarı geçersiz; 'Hesabı bağla' ile yeniden bağlayın."
 	case !res.Running:
 		res.Note = "Hesap bağlı. Ajanı başlatın."
+	case res.TunnelError != "" && res.Address == "":
+		res.Note = "Tünel açılamadı: " + res.TunnelError
 	case res.Address == "":
-		res.Note = "Ajan çalışıyor; playit.gg sitesinden tünel oluşturun."
+		res.Note = "Tünel hazırlanıyor — playit adres atıyor…"
 	default:
 		res.Note = "Tünel açık: " + res.Address
 	}
@@ -254,7 +293,14 @@ func (d *Daemon) handlePlayitPoll(_ context.Context, _ json.RawMessage) (any, er
 	}
 
 	d.log.Infof("playit: hesap bağlandı, ajan başlatılıyor")
-	if err := d.startPlayitAgent(); err != nil {
+	d.playitEnableAutostart()
+	// Yeni anahtar: eski turun "anahtar geçersiz" hatası ve beklemesi silinir.
+	st.mu.Lock()
+	st.tun.resetErrors()
+	st.mu.Unlock()
+	// YENİDEN başlat: hesap yeniden bağlandıysa playitd hâlâ eski (reddedilmiş)
+	// anahtarla bekliyordur ve anahtarı yalnızca açılışta okur.
+	if err := d.restartPlayitAgent(); err != nil {
 		return map[string]any{"pending": false, "claimed": true,
 			"error": err.Error()}, nil
 	}
@@ -288,6 +334,25 @@ func (d *Daemon) handlePlayitStop(_ context.Context, _ json.RawMessage) (any, er
 	return map[string]any{"running": false, "message": "playit ajanı durduruldu."}, nil
 }
 
+// restartPlayitAgent (re)starts playitd so it reads a new secret.
+//
+// Adres beklemesi YOK: Stop en kötü 7 sn sürebilir ve panel 10 sn'de zaman
+// aşımına uğrar; adresi arka plan eşitleyicisi getirir.
+func (d *Daemon) restartPlayitAgent() error {
+	st := d.playit()
+	st.mu.Lock()
+	agent := st.agent
+	st.mu.Unlock()
+	if agent == nil {
+		return errors.New("playit ajanı hazırlanmadı")
+	}
+	if err := agent.Restart(); err != nil {
+		return err
+	}
+	d.kickPlayitSync()
+	return nil
+}
+
 // startPlayitAgent launches playitd and waits briefly for a first address.
 func (d *Daemon) startPlayitAgent() error {
 	st := d.playit()
@@ -300,6 +365,9 @@ func (d *Daemon) startPlayitAgent() error {
 	if err := agent.Start(); err != nil {
 		return err
 	}
+	// Tüneli API'den açan eşitleyici: ajan her başladığında (hesap bağlama
+	// sonrası, açılışta, elle) sunucuların tüneli olduğundan emin olur.
+	d.kickPlayitSync()
 
 	// Adresin görünmesi birkaç saniye sürer. Kısa bir süre bekleyip
 	// yakalayabilirsek panel ilk yanıtta adresi gösterir; yakalayamazsak
@@ -314,6 +382,28 @@ func (d *Daemon) startPlayitAgent() error {
 		time.Sleep(200 * time.Millisecond)
 	}
 	return nil
+}
+
+// playitEnableAutostart turns on cfg.WAN.Autostart after a successful link.
+//
+// Hesabı bağlamak playit'i kullanma kararının kendisidir. Otomatik başlatma
+// yalnızca sihirbazdaki "playit tünel servisi" anahtarına bakıyordu
+// (DefaultConfig'te KAPALI); sihirbazda kapatıp sonradan hesabını bağlayan
+// kullanıcının tüneli her yeniden başlatmada kapalı kalıyordu
+// (TestPlayitClaimEnablesAutostart). Kaydedilemezse bağlama yine başarılıdır:
+// yalnızca bir sonraki açılışta ajan elle başlatılır.
+func (d *Daemon) playitEnableAutostart() {
+	cfg := d.Config()
+	if cfg == nil || cfg.WAN.Autostart {
+		return
+	}
+	cp := *cfg
+	cp.WAN.Autostart = true
+	if err := d.saveConfigCopy(&cp); err != nil {
+		d.log.Warnf("playit: otomatik başlatma kaydedilemedi: %v", err)
+		return
+	}
+	d.log.Infof("playit: hesap bağlandı; ajan açılışta kendiliğinden başlayacak")
 }
 
 // autostartPlayit brings the agent up at boot when an account is bound.

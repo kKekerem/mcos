@@ -28,6 +28,8 @@ type Supervisor struct {
 	log     *log.Logger
 	mu      sync.Mutex
 	entries map[string]*entry
+	// turbo, SetTurbo ile ayarlanır; her başlatma bunu sorar (bkz. turbo.go).
+	turbo turboState
 }
 
 // New creates an empty supervisor.
@@ -49,6 +51,9 @@ func (s *Supervisor) Add(name string, spec Spec, policy RestartPolicy) *Process 
 		}
 		s.handleExit(name, code, err)
 	}
+	// Turbo kancası: her Start (çökme sonrası yeniden başlatma dahil) o anki
+	// turbo durumunu sorar; tanım eklendiği andaki durum donmuş kalmaz.
+	spec.turbo = s.turboNow
 	p := NewProcess(spec)
 	s.entries[name] = &entry{proc: p, policy: policy}
 	return p

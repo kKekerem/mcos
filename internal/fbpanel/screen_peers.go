@@ -3,12 +3,15 @@ package fbpanel
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"strings"
 
 	"mcos/internal/fbdraw"
+	"mcos/internal/fbfont"
 	"mcos/internal/fbui"
 	"mcos/internal/ipcclient"
 	"mcos/internal/model"
+	"time"
 )
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -45,6 +48,10 @@ const (
 	peerRowManual
 	peerRowSharedWorld
 	peerRowShowKey
+	// peerRowEnable: PC paylaşımı KAPALIYKEN tek satır. Eskiden kapalıyken
+	// de "Ağı tara" görünüyordu; basınca "kapalı — Ayarlar'dan açın" hatası
+	// geliyor ve kullanıcı ekranı terk etmek zorunda kalıyordu.
+	peerRowEnable
 )
 
 // peersRow is one selectable line.
@@ -59,6 +66,9 @@ type peersRow struct {
 // "Ağı tara"nın üzerinde olmalıdır — kullanıcı Enter'a basıp işe
 // başlayabilsin diye.
 func (a *App) peersRows() []peersRow {
+	if !a.sharingEnabled() {
+		return []peersRow{{kind: peerRowEnable}}
+	}
 	rows := []peersRow{
 		{kind: peerRowScan},
 		{kind: peerRowManual},
@@ -139,6 +149,7 @@ func (a *App) drawPeers(r image.Rectangle) {
 				u.Text(in.Min.X, y, "BULUNAN CİHAZLAR", u.Pal.TextFaint)
 				y += u.F.CellH + u.M.PadY/2
 			case peerRowSharedWorld:
+				y = a.drawPeerProblem(in, y, rows, cur, peers)
 				y += u.M.PadY
 				u.Divider(in.Min.X, in.Max.X, y)
 				y += u.M.PadY * 2
@@ -173,17 +184,21 @@ func (a *App) drawPeers(r image.Rectangle) {
 			} else if p.State == model.PeerAvailable {
 				dot = u.Pal.Warn
 			}
+			label, lc := peerBadge(p, u.Pal.TextFaint, u.Pal.OK, u.Pal.Warn)
+			if p.Problem != "" {
+				dot = u.Pal.Warn
+			}
 			u.StatusDot(cx, ty, dot)
 			x := u.Text(cx+u.F.CellW+u.M.Gap, ty, p.Name, col)
-			u.Text(x+u.M.Gap*2, ty,
-				fmt.Sprintf("%s · %d çekirdek · %d MB", p.IP, p.Cores, p.RAMMB),
-				u.Pal.TextFaint)
-
-			label, lc := "eşleşmemiş", u.Pal.TextFaint
-			if p.Paired {
-				label, lc = "EŞLEŞTİ", u.Pal.OK
-			}
 			bw := u.TextWidth(label) + u.F.CellW*2
+			// Sorun varsa AYRINTININ YERİNE nedeni yaz: "EŞLEŞTİ" deyip
+			// hiçbir şey olmayan bir satır, kullanıcıya hiçbir şey söylemez.
+			detail, dc := peerDetail(p), u.Pal.TextFaint
+			if p.Problem != "" {
+				detail, dc = p.Problem, u.Pal.Warn
+			}
+			room := (in.Max.X - u.M.PadX - bw - u.M.Gap*3 - x) / max(u.F.CellW, 1)
+			u.Text(x+u.M.Gap*2, ty, fitText(u.F, detail, room), dc)
 			u.Badge(in.Max.X-u.M.PadX-bw, ty-u.F.CellH/6, label, lc)
 
 		case peerRowSharedWorld:
@@ -197,8 +212,23 @@ func (a *App) drawPeers(r image.Rectangle) {
 
 		case peerRowShowKey:
 			u.Text(cx, ty, "Eşleştirme anahtarını göster", col)
+			u.TextRight(in.Max.X-u.M.PadX, ty, "mcos-node için", u.Pal.TextFaint)
+
+		case peerRowEnable:
+			u.Text(cx, ty, "PC paylaşımını aç", col)
+			bw := u.TextWidth("KAPALI") + u.F.CellW*2
+			u.Badge(in.Max.X-u.M.PadX-bw, ty-u.F.CellH/6, "KAPALI", u.Pal.Warn)
 		}
 		y += u.M.RowH
+	}
+
+	if !a.sharingEnabled() {
+		y += u.M.PadY
+		a.hint(in, y,
+			"PC paylaşımı kapalı: bu MCOS eşleştirme isteklerini (port 2222) dinlemiyor.",
+			"Açınca bir eşleştirme anahtarı üretilir. İkinci PC'de mcos-node'u açıp",
+			"bu anahtarı girin; sonra burada 'Ağı tara' ya da 'IP adresi gir…'.")
+		return
 	}
 
 	// ── 3. Ortak dünya özeti ────────────────────────────────────────────
@@ -207,6 +237,16 @@ func (a *App) drawPeers(r image.Rectangle) {
 			y += u.M.PadY
 			u.Divider(in.Min.X, in.Max.X, y)
 			y += u.M.PadY * 2
+			// Ortak dünya AÇIK ama dilim yok (eş çevrimdışı: "en az iki
+			// eşleşmiş cihaz gerekir"): NEDEN burada da söylenmeli. Eskiden bu
+			// dal yalnızca genel ipucunu çiziyordu; sürümü 1.20.1'e çevrilip
+			// modu kaldırılan bir ortak dünyada satır "AÇIK" diyor, ekranın
+			// hiçbir yerinde mod sorunu görünmüyordu (ölçüldü: neden verilince
+			// uyarı rengi piksel sayısı hiç değişmiyordu; bkz.
+			// TestPeersModProblemShownWithoutTerritories).
+			if link.Mode == model.LinkSharedWorld && a.drawLinkWarning(in, y, link) != y {
+				return
+			}
 			a.hint(in, y,
 				"Eşleşmiş cihazlar ağır işleri (yedekleme, günlük analizi) paylaşır.",
 				"Ortak dünya açılırsa dünyanın bir yarısı bu cihazda, diğer yarısı",
@@ -224,20 +264,176 @@ func (a *App) drawPeers(r image.Rectangle) {
 
 	u.Text(in.Min.X, y, "ORTAK DÜNYA", u.Pal.TextFaint)
 	y += u.F.CellH + u.M.PadY/2
-	y = a.kvList(in, y, 18, [][3]any{
+	// Uyarı: mod yoksa ya da koordinatör bir not düştüyse ("en az iki
+	// eşleşmiş cihaz gerekir"). Not eskiden hiç gösterilmiyordu: eş
+	// çevrimdışıyken ortak dünya kendini kapatıyor, ekran ise "AÇIK"
+	// demeye devam ediyordu.
+	//
+	// Uyarı ÖZETİN ÜSTÜNDE ve en fazla iki satır: 800x600'de özetin altına
+	// konan iki satırlık neden panelin alt kenarından taşıyordu (PNG'de
+	// görüldü). Ortak dünyanın neden çalışmadığı, aktarım sayısından önemli.
+	y = a.drawLinkWarning(in, y, link)
+	summary := [][3]any{
 		{"Sunucu", link.ServerName, u.Pal.Text},
 		{"Zorluk", model.DifficultyLabel(link.Difficulty), u.Pal.Text},
 		{"Aktarım", fmt.Sprintf("%d oyuncu geçişi", link.Handoffs), u.Pal.Text},
-	})
-	if !link.ModInstalled {
-		u.WarnTriangle(in.Min.X, y, u.Pal.Warn)
-		u.Text(in.Min.X+u.F.CellW+u.M.Gap, y,
-			"mcos-link modu kurulu değil — ortak dünya çalışmaz", u.Pal.Warn)
-		y += u.F.CellH + u.M.PadY/2
+	}
+	// Sığmayan özet satırı ÇİZİLMEZ (kvList sınır denetlemiyor).
+	fit := 0
+	for ry := y; fit < len(summary) && ry+u.F.CellH <= in.Max.Y; ry += u.F.CellH + u.M.PadY/2 {
+		fit++
+	}
+	y = a.kvList(in, y, 18, summary[:fit])
+	// Katılımcılar: hangi makine açık, kaç oyuncu. Dilim çubuğu KİMİN
+	// neresi olduğunu söyler; bu satır o makinenin ŞU AN çalışıp
+	// çalışmadığını söyler.
+	if len(link.Nodes) > 0 && y+u.F.CellH*3 < in.Max.Y {
+		x := in.Min.X
+		for _, n := range link.Nodes {
+			c := u.Pal.OK
+			if !n.Online {
+				c = u.Pal.Warn
+			}
+			label := n.Name
+			if n.Self {
+				label += " (bu MCOS)"
+			}
+			switch {
+			case !n.Online:
+				label += " — çevrimdışı"
+			case n.ModReady != nil && !*n.ModReady:
+				// Eşleştirme portu yanıt veriyor ama sunucudaki mod vermiyor:
+				// aktarım çalışmaz (bkz. model.LinkNode.ModReady).
+				c = u.Pal.Warn
+				label += " — mod yanıt vermiyor"
+			default:
+				label += fmt.Sprintf(" — %d oyuncu", n.Players)
+			}
+			u.StatusDot(x, y, c)
+			x = u.Text(x+u.F.CellW+u.M.Gap, y, label, u.Pal.Text) + u.F.CellW*2
+		}
+		y += u.F.CellH + u.M.PadY
 	}
 	if y+u.F.CellH*2 < in.Max.Y {
 		a.drawTerritories(in, y, link.Territories)
 	}
+}
+
+// linkModWarning is the line shown when the shared-world mod is missing.
+//
+// Kullanıcının gerçek raporu: "ortak dünyayı açınca 'mcos link kurulu değil'
+// diyor." Ekran yalnızca "mcos-link modu kurulu değil" yazıyordu; asıl neden
+// (sunucu 26.3'tü, mod yalnızca 1.21.11 için vardı) yalnızca günlükteydi.
+// Artık daemon'un verdiği NEDEN (link.status ModProblem) gösterilir.
+func linkModWarning(link model.LinkStatus) string {
+	if p := strings.TrimSpace(link.ModProblem); p != "" {
+		return p + " — ortak dünya çalışmaz"
+	}
+	return "ortak dünya modu kurulu değil — ortak dünya çalışmaz"
+}
+
+// drawLinkWarning writes why the shared world does not work: the mod reason
+// (ModProblem) or the coordinator's note. En fazla iki satır, sığdırılarak;
+// dönüş yeni y (söylenecek bir şey yoksa aynı y).
+func (a *App) drawLinkWarning(in image.Rectangle, y int, link model.LinkStatus) int {
+	u := a.ui
+	warn := link.Note
+	if !link.ModInstalled {
+		warn = linkModWarning(link)
+	}
+	if warn == "" {
+		return y
+	}
+	room := (in.Dx() - u.F.CellW*2) / max(u.F.CellW, 1)
+	lines := fitLines(u.F, warn, room, min(2, (in.Max.Y-y)/max(u.F.CellH, 1)))
+	if len(lines) == 0 {
+		return y
+	}
+	u.WarnTriangle(in.Min.X, y, u.Pal.Warn)
+	for _, l := range lines {
+		u.Text(in.Min.X+u.F.CellW+u.M.Gap, y, l, u.Pal.Warn)
+		y += u.F.CellH
+	}
+	return y + u.M.PadY/2
+}
+
+// fitLines wraps s into at most maxLines lines of cols cells each.
+//
+// Neden uzun metin: "Fabric 1.20.1 için ortak dünya modu yok (desteklenen:
+// 1.20.5–26.3) — ortak dünya çalışmaz" 800 piksellik ekranda tek satıra
+// sığmıyor ve kırpılınca tam da DESTEKLENEN aralık kayboluyordu. Son satır
+// yine taşarsa "…" ile kırpılır: metin asla ekranın dışına çıkmaz.
+func fitLines(f *fbfont.Face, s string, cols, maxLines int) []string {
+	if cols <= 0 || maxLines <= 0 {
+		return nil
+	}
+	lines := wrapWords(s, cols)
+	if len(lines) > maxLines {
+		lines = append(lines[:maxLines-1], strings.Join(lines[maxLines-1:], " "))
+	}
+	for i, l := range lines {
+		lines[i] = fitText(f, l, cols)
+	}
+	return lines
+}
+
+// sharedWorldFailureLines explains why link.enable refused.
+//
+// Bildirim çubuğu uzun nedeni kırpıyor (bkz. pairFailureLines); neden ve
+// YAPILACAK ŞEY ayrı pencerede tam gösterilir.
+func sharedWorldFailureLines(err error) []string {
+	msg := err.Error()
+	lines := wrapWords(msg, 58)
+	low := strings.ToLower(msg)
+	var todo []string
+	switch {
+	case strings.Contains(low, "desteklenen"):
+		todo = []string{"Sunucuyu desteklenen bir Minecraft sürümüyle kurun,",
+			"sonra ortak dünyayı yeniden açın."}
+	case strings.Contains(low, "desteklemiyor"):
+		todo = []string{"Ortak dünya için bir Fabric ya da Paper/Purpur sunucusu seçin."}
+	case strings.Contains(low, "fabric-api"):
+		todo = []string{"İnternete bağlanıp yeniden deneyin: fabric-api o zaman",
+			"Modrinth'ten indirilir."}
+	case strings.Contains(low, "bulunamadı") || strings.Contains(low, "kayıtlı ama"):
+		todo = []string{"Bu MCOS'ta ortak dünya dosyaları eksik; MCOS'u güncelleyin."}
+	}
+	if len(todo) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, todo...)
+	}
+	return lines
+}
+
+// drawPeerProblem writes the FULL reason under the list for the selected row.
+//
+// Satırda neden kırpılıyor: "ortak dünya kurulamadı: anahtar yanlış — o
+// cihaza bu MCOS'un eşleştirme…" — asıl YAPILACAK ŞEY tam da kesilen
+// kısımda. İmleç sorunlu bir cihazın üzerindeyken cümlenin tamamı burada,
+// satırlara bölünmüş olarak görünür.
+func (a *App) drawPeerProblem(in image.Rectangle, y int, rows []peersRow, cur int,
+	peers []model.Peer) int {
+	u := a.ui
+	if cur < 0 || cur >= len(rows) || rows[cur].kind != peerRowDevice ||
+		rows[cur].idx >= len(peers) {
+		return y
+	}
+	p := peers[rows[cur].idx]
+	if p.Problem == "" {
+		return y
+	}
+	room := (in.Dx() - u.F.CellW*3) / max(u.F.CellW, 1)
+	lines := wrapWords(p.Name+": "+p.Problem, room)
+	if len(lines) > 3 {
+		lines = lines[:3]
+	}
+	y += u.M.PadY / 2
+	u.WarnTriangle(in.Min.X, y, u.Pal.Warn)
+	for _, l := range lines {
+		u.Text(in.Min.X+u.F.CellW+u.M.Gap, y, l, u.Pal.Warn)
+		y += u.F.CellH
+	}
+	return y
 }
 
 // drawTerritories renders the world split as a labelled bar.
@@ -324,46 +520,173 @@ func (a *App) peersActivate(idx int) {
 		a.openSharedWorld()
 	case peerRowShowKey:
 		a.showPairingKey()
+	case peerRowEnable:
+		a.toggleSharing()
+		// Anahtar ve adres, daemon eşleştirme sunucusunu açtıktan SONRA
+		// dolar; ekranı kısa bir gecikmeyle tazele.
+		go func() {
+			time.Sleep(1500 * time.Millisecond)
+			a.loadSection()
+		}()
 	}
 }
 
-// startPeerScan runs an active LAN scan with the radar animation.
+// sharingEnabled reports whether PC pairing is switched on.
+func (a *App) sharingEnabled() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.cfg != nil && a.cfg.Cluster.Enabled
+}
+
+// peerBadge picks the right-hand badge for a device row.
+func peerBadge(p model.Peer, faint, ok, warn color.RGBA) (string, color.RGBA) {
+	switch {
+	case !p.Paired:
+		return "eşleşmemiş", faint
+	case p.Problem != "":
+		return "SORUN", warn
+	case p.State != model.PeerAvailable:
+		return "ÇEVRİMDIŞI", warn
+	}
+	return "EŞLEŞTİ", ok
+}
+
+// peerDetail is the grey detail text for a healthy device row.
+func peerDetail(p model.Peer) string {
+	d := fmt.Sprintf("%s · %d çekirdek · %d MB", p.IP, p.Cores, p.RAMMB)
+	if p.Version != "" {
+		d += " · " + p.Version
+	}
+	return d
+}
+
+// startPeerScan opens the live scan dialog and probes the LAN behind it.
+//
+// ── Neden kablosuz taramasıyla AYNI pencere ─────────────────────────────────
+//
+// Kullanıcının isteği iki liste için de aynıydı: "ağda tararken dönen
+// animasyon listelenecek, listeye seçenek gelince animasyon; aynıları wifi
+// veya bir şey listelenirken de olacak."
+//
+// Eskiden burada farklı bir davranış vardı: arka plandaki ekranda bir radar
+// dönüyor, cihazlar ancak tarama BİTİNCE (25 saniyeye kadar) listeye
+// düşüyordu. Artık pencere hemen açılıyor ve her bulunan cihaz satır satır
+// geliyor — kablosuz taramasının aynısı (bkz. modal_scan.go).
 func (a *App) startPeerScan() {
 	if a.offline() {
 		return
 	}
-	if a.scanning() {
-		return // zaten sürüyor; ikinci tarama ağı boşuna yorar
-	}
+
+	m := NewScanModal("MCOS Cihazları", "Ağdaki MCOS cihazları aranıyor…",
+		func(app *App, _ int, it ListItem) bool {
+			p, ok := it.Value.(model.Peer)
+			if !ok {
+				return false
+			}
+			// Tarama bir GÜVEN işlemi değildir: bulunan cihaz otomatik
+			// eşleşmez, kullanıcı onaylar.
+			app.confirmPairPeer(p)
+			return true
+		}).
+		WithEmpty("Ağda MCOS cihazı bulunamadı — 'i' ile IP girin.").
+		WithRescan(func(app *App, sm *ScanModal) { app.runPeerScan(sm) })
+
+	a.OpenModal(m)
+	a.runPeerScan(m)
+}
+
+// runPeerScan drives one scan session into the dialog.
+func (a *App) runPeerScan(m *ScanModal) {
+	m.SetScanning(true)
 	a.setScanning(true)
 	a.setScanNote("Ağdaki MCOS cihazları aranıyor…")
 	a.Emit(fbui.EventBusy, "Ağ taranıyor…")
+	a.Invalidate()
 
 	go func() {
-		peers, err := a.cl.ClusterScan()
-		a.setScanning(false)
-		a.setScanNote("")
+		defer func() {
+			a.setScanning(false)
+			a.setScanNote("")
+			a.Invalidate()
+		}()
+
+		st, err := a.cl.ClusterScanStart()
 		if err != nil {
+			m.SetError("Tarama başlatılamadı: " + err.Error())
 			a.Fail("tarama başarısız", err)
 			// Tarama çalışmadıysa elle girişi ÖNER: kullanıcı çıkmaz
 			// sokakta kalmamalı.
 			a.Emit(fbui.EventInfo, "IP adresi girerek elle eşleştirebilirsiniz")
 			return
 		}
-		a.mu.Lock()
-		a.peers = peers
-		a.dirty = true
-		a.mu.Unlock()
-		// Kullanıcının isteği: "listeye seçenek gelince animasyon".
-		// Radar ekranından listeye geçiş soluklaşarak olur.
-		a.beginTransition(transFade)
-		if len(peers) == 0 {
-			a.Emit(fbui.EventWarn,
-				"Ağda MCOS cihazı bulunamadı — IP adresi girerek deneyin")
-			return
+		gen := st.Gen
+		m.Replace(peerItems(st.Peers))
+
+		for {
+			if m.Closed() {
+				return
+			}
+			time.Sleep(wifiPollInterval)
+
+			st, err = a.cl.ClusterScanStatus()
+			if err != nil {
+				m.SetError("Tarama durumu alınamadı: " + err.Error())
+				return
+			}
+			if st.Gen != gen {
+				m.SetScanning(false)
+				return
+			}
+			m.Replace(peerItems(st.Peers))
+			// Bulunanları ana ekrana da yaz: pencere kapanınca liste orada
+			// durmalı.
+			a.mu.Lock()
+			a.peers = st.Peers
+			a.dirty = true
+			a.mu.Unlock()
+
+			if !st.Scanning {
+				m.SetScanning(false)
+				if st.Error != "" {
+					m.SetError(st.Error)
+					a.Emit(fbui.EventWarn, "Tarama: "+st.Error)
+					return
+				}
+				if len(st.Peers) == 0 {
+					a.Emit(fbui.EventWarn,
+						"Ağda MCOS cihazı bulunamadı — IP adresi girerek deneyin")
+				} else {
+					a.Emit(fbui.EventOK,
+						fmt.Sprintf("%d cihaz bulundu", len(st.Peers)))
+				}
+				return
+			}
 		}
-		a.Emit(fbui.EventOK, fmt.Sprintf("%d cihaz bulundu", len(peers)))
 	}()
+}
+
+// peerItems converts peers to dialog rows.
+func peerItems(peers []model.Peer) []ListItem {
+	items := make([]ListItem, 0, len(peers))
+	for _, p := range peers {
+		badge, kind := "eşleşmemiş", fbui.EventInfo
+		if p.Paired {
+			badge, kind = "EŞLEŞTİ", fbui.EventOK
+		}
+		detail := peerDetail(p)
+		if p.Problem != "" {
+			badge, kind, detail = "SORUN", fbui.EventWarn, p.Problem
+		}
+		items = append(items, ListItem{
+			Label:     p.Name,
+			Detail:    detail,
+			Badge:     badge,
+			BadgeKind: kind,
+			Current:   p.Paired,
+			Value:     p,
+		})
+	}
+	return items
 }
 
 // openManualPair asks for an address and pairs with it.
@@ -372,11 +695,11 @@ func (a *App) openManualPair() {
 		return
 	}
 	a.OpenModal(NewTextModal("Elle eşleştir",
-		"Öbür MCOS cihazının IP adresini girin.",
+		"Öbür MCOS cihazının ya da mcos-node çalışan PC'nin IP adresini girin.",
 		func(app *App, addr string) { app.doManualPair(addr) }).
 		WithPlaceholder("192.168.1.50").
 		WithOK("Eşleştir").
-		WithHint("Adresi öbür cihazın MCOS Paylaşım ekranında görebilirsiniz.").
+		WithHint("Adres, mcos-node penceresinde ya da öbür MCOS'un bu ekranında yazar.").
 		WithValidate(validatePeerAddress))
 }
 
@@ -415,14 +738,86 @@ func validatePeerAddress(s string) string {
 func (a *App) doManualPair(addr string) {
 	a.Emit(fbui.EventBusy, addr+" adresine bağlanılıyor…")
 	go func() {
-		_, msg, err := a.cl.ClusterPairManual(addr)
+		peer, msg, needsCode, err := a.cl.ClusterPairManualCode(addr)
+		if err == nil && needsCode {
+			// Anahtarsız düğüm: anahtarı elle kopyalatmak yerine iki
+			// ekranda aynı kodla eşleştir (bkz. startCodePairing).
+			a.mu.Lock()
+			a.clearBusyLocked()
+			a.mu.Unlock()
+			a.startCodePairing(peer)
+			return
+		}
 		if err != nil {
 			a.Fail("eşleştirilemedi", err)
+			// Bildirim çubuğu uzun nedeni kırpar; NEDENİ ve ne yapılacağını
+			// ayrı bir pencerede tam göster. "Eşleşme başarısız" tek başına
+			// kullanıcıya hiçbir şey söylemez.
+			a.OpenModal(NewInfoModal("Eşleşme kurulamadı", pairFailureLines(addr, err)))
 			return
 		}
 		a.Emit(fbui.EventOK, msg)
 		a.loadSection()
 	}()
+}
+
+// pairFailureLines explains a failed manual pairing.
+//
+// Daemon zaten nedeni Türkçe veriyor (cluster.describeNetErr / helloProblem);
+// burada o nedene göre YAPILACAK ŞEYİ ekliyoruz.
+func pairFailureLines(addr string, err error) []string {
+	msg := err.Error()
+	// ipc hatası "kod: mesaj" biçiminde gelebilir; kullanıcı kodu görmesin.
+	if i := strings.Index(msg, ": "); i > 0 && i < 12 && !strings.ContainsAny(msg[:i], " ") {
+		msg = msg[i+2:]
+	}
+	lines := []string{addr, ""}
+	lines = append(lines, wrapWords(msg, 58)...)
+	lines = append(lines, "")
+	low := strings.ToLower(msg)
+	switch {
+	case strings.Contains(low, "güvenlik duvarı"):
+		// "kur.bat" yazıyordu: böyle bir dosya HİÇ YOKTU. Gerçek yol:
+		// mcos-node ilk açılışta izni kendisi ister; atlandıysa --kur.
+		lines = append(lines,
+			"Windows'ta: mcos-node.exe'ye bir kez çift tıklayın — ilk açılışta",
+			"güvenlik duvarı izni ister. İzin verilmediyse: mcos-node.exe --kur",
+			"Linux'ta: güvenlik duvarında TCP 2222 ve 25565-25600'ü açın.")
+	case strings.Contains(low, "anahtar"):
+		lines = append(lines,
+			"'Eşleştirme anahtarını göster' ile anahtarı görün ve o PC'de",
+			"çalıştırın:  mcos-node --key <anahtar>  (çalışan düğüm yeniden başlar)")
+	case strings.Contains(low, "sürüm"):
+		lines = append(lines, "İki tarafı da aynı MCOS sürümüne güncelleyin.")
+	case strings.Contains(low, "reddedildi"):
+		lines = append(lines,
+			"O bilgisayarda mcos-node açık mı? Açıksa penceresindeki",
+			"adresi ve portu (ör. 192.168.1.50:2222) aynen yazın.")
+	default:
+		lines = append(lines, "İki cihazın aynı ağa bağlı olduğunu denetleyin.")
+	}
+	return lines
+}
+
+// wrapWords breaks s into lines of at most n runes, on spaces.
+func wrapWords(s string, n int) []string {
+	var out []string
+	line := ""
+	for _, w := range strings.Fields(s) {
+		if line != "" && len([]rune(line))+1+len([]rune(w)) > n {
+			out = append(out, line)
+			line = w
+			continue
+		}
+		if line != "" {
+			line += " "
+		}
+		line += w
+	}
+	if line != "" {
+		out = append(out, line)
+	}
+	return out
 }
 
 // showPairingKey displays the shared secret so it can be copied by hand.
@@ -436,15 +831,15 @@ func (a *App) showPairingKey() {
 		key = "(anahtar henüz üretilmedi — PC paylaşımını açın)"
 	}
 	a.OpenModal(NewInfoModal("Eşleştirme anahtarı", []string{
-		"Bu anahtar İKİ makinede de AYNI olmalıdır.",
+		"İkinci PC'de mcos-node ilk açılışta bu anahtarı sorar:",
 		"",
 		"  " + key,
 		"",
 		"Adres: " + id.Address,
 		"Düğüm: " + id.NodeName,
 		"",
-		"Anahtar eşleşmezse eşleştirme kurulur ama görevler ve",
-		"ortak dünya kurulumu karşı tarafça reddedilir.",
+		"Anahtar yanlışsa eşleşme ANINDA reddedilir ve bu ekranda",
+		"cihazın yanında 'anahtar yanlış' yazar.",
 	}))
 }
 
@@ -467,7 +862,7 @@ func (a *App) openSharedWorld() {
 		a.OpenModal(NewConfirmModal("Ortak dünyayı kapat?",
 			[]string{
 				link.ServerName + " artık tek makinede çalışacak.",
-				"Eşlerdeki kopyalar durdurulmaz; dünya verisi silinmez.",
+				"Eşlerdeki yarılar durdurulur; hiçbir dünya verisi silinmez.",
 				"Oyuncular yalnızca bu makinenin dilimini görür.",
 			},
 			"Kapat", false,
@@ -503,7 +898,9 @@ func (a *App) openSharedWorld() {
 	}
 
 	_, servers, _ := a.Snapshot()
-	// YALNIZCA mod yükleyen sürümler: ortak dünya bir moda dayanır.
+	// Fabric (mcos-link modu) ya da Paper/Purpur (mcos-link-paper
+	// eklentisi). Eskiden burada SupportsMods vardı: Paper'ı kapatıyor,
+	// Fabric modunu yükleyemeyen Forge'u ise açık gösteriyordu.
 	items := make([]ListItem, 0, len(servers))
 	for _, s := range servers {
 		it := ListItem{
@@ -511,9 +908,9 @@ func (a *App) openSharedWorld() {
 			Detail: string(s.Software) + " " + s.MCVersion,
 			Value:  s.ID,
 		}
-		if !s.Software.SupportsMods() {
+		if s.Software != model.SoftwareFabric && !s.Software.SupportsPlugins() {
 			it.Disabled = true
-			it.Badge = "mod yok"
+			it.Badge = "desteklenmiyor"
 			it.BadgeKind = fbui.EventWarn
 		}
 		items = append(items, it)
@@ -523,7 +920,7 @@ func (a *App) openSharedWorld() {
 		func(app *App, _ int, it ListItem) bool {
 			app.chooseDifficulty(it.Value.(string))
 			return true
-		}).WithEmpty("Önce bir Fabric sunucusu oluşturun."))
+		}).WithEmpty("Önce bir Fabric ya da Paper sunucusu oluşturun."))
 }
 
 // chooseDifficulty asks for the world difficulty before enabling.
@@ -565,7 +962,8 @@ func (a *App) confirmSharedWorld(serverID string, diff model.LinkDifficulty) {
 			"Dünya, eşleşmiş cihazlar arasında bölünecek.",
 			"Cihazlar: " + strings.Join(names, ", "),
 			"Zorluk: " + model.DifficultyLabel(diff),
-			"Her cihazda aynı sunucu kurulacak ve mcos-link modu yüklenecek.",
+			"Her cihazda aynı sunucu kurulur ve başlatılır; bu sunucudaki",
+			"mod/eklentiler de kopyalanır (sonradan eklenenler dahil).",
 		},
 		"Aç", false,
 		func(app *App) {
@@ -574,6 +972,11 @@ func (a *App) confirmSharedWorld(serverID string, diff model.LinkDifficulty) {
 				msg, seed, err := app.cl.LinkEnable(serverID, diff, 0, "")
 				if err != nil {
 					app.Fail("ortak dünya açılamadı", err)
+					// Neden (ör. "Fabric 1.20.1 için ortak dünya modu yok
+					// (desteklenen: 1.20.5–26.3)") bildirim çubuğunda
+					// kırpılıyor: tamamı ve yapılacak şey pencerede.
+					app.OpenModal(NewInfoModal("Ortak dünya açılamadı",
+						sharedWorldFailureLines(err)))
 					return
 				}
 				app.Emit(fbui.EventOK, msg)
@@ -581,6 +984,13 @@ func (a *App) confirmSharedWorld(serverID string, diff model.LinkDifficulty) {
 				app.loadSection()
 			}()
 		}))
+}
+
+// scanNoteText returns what the scan banner says (empty = no scan running).
+func (a *App) scanNoteText() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.scanNote
 }
 
 // setScanNote records what the scan banner should say.

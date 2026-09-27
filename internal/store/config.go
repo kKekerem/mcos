@@ -1,6 +1,11 @@
 package store
 
 import (
+	"fmt"
+	"log"
+	"os"
+	"time"
+
 	"mcos/internal/model"
 	"mcos/internal/sysmon"
 )
@@ -44,7 +49,34 @@ func LoadConfig(path string) (*model.Config, error) {
 		if err == ErrNotFound {
 			return model.DefaultConfig(), nil
 		}
-		return nil, err
+		// ── Düzeltilen gerçek hata: BOZUK AYAR DOSYASI SİSTEMİ AÇILMAZ
+		//    YAPIYORDU ────────────────────────────────────────────────────
+		//
+		// Kullanıcının VMware'de aldığı ekran birebir şuydu:
+		//
+		//	mcosd: init failed: store: decode /data/config.json:
+		//	       unexpected end of JSON input
+		//	Hata: mcosd soketi hazırlanamadı: /run/mcos/mcosd.sock
+		//
+		// Yani /data/config.json SIFIR BAYT (ya da yarım) kalmış, mcosd
+		// açılmayı REDDETMİŞ, soket hiç oluşmamış ve panel de açılamamış.
+		// Makine tamamen kullanılamaz hâle geldi — hem de kaybedilen şey
+		// yalnızca TERCİHLERDİ.
+		//
+		// Yazma yolu zaten atomik (geçici dosya + fsync + rename + dizin
+		// fsync, bkz. writeJSON). Ama atomiklik dosyanın BAŞKA yollarla
+		// bozulmasını engellemez:
+		//
+		//   - Sanal diskin yazma önbelleği yalan söyler; sanal makine
+		//     "sıfırla" ile kesilince günlük yarım kalır.
+		//   - Dosya bir kurulum/kurtarma adımında `touch` ile yaratılır.
+		//   - Disk dolar ve yazma yarıda kesilir.
+		//
+		// Bir ev aletinde doğru tepki ASLA açılmamak olamaz. Bozuk dosya
+		// KENARA ALINIR (kanıt olarak durur), varsayılanlarla devam edilir
+		// ve kullanıcı kurulum sihirbazına düşer — kara ekrana değil.
+		quarantineCorrupt(path, err)
+		return model.DefaultConfig(), nil
 	}
 	// Elle düzenlenmiş ya da eski bir dosyadan gelen aralık dışı değerler
 	// (ör. pointerSpeed: 0) burada bir kez düzeltilir; her okuyanın ayrıca
@@ -52,6 +84,24 @@ func LoadConfig(path string) (*model.Config, error) {
 	cfg.UI = cfg.UI.Normalize()
 	checkHardwareChange(cfg)
 	return cfg, nil
+}
+
+// quarantineCorrupt moves an unreadable config aside so boot can continue.
+//
+// Dosya SİLİNMEZ: kullanıcının Wi-Fi parolası, teması ve düğüm kimliği orada
+// olabilir ve bir insan onu kurtarabilir. Yeni ad zaman damgalı, böylece
+// tekrarlanan bozulmalar birbirini ezmez.
+//
+// Taşıma başarısız olursa bile açılış SÜRER: buradaki hiçbir hata, sistemin
+// açılmamasına gerekçe değildir — düzeltmeye çalıştığımız şey tam olarak buydu.
+func quarantineCorrupt(path string, cause error) {
+	bad := fmt.Sprintf("%s.bozuk-%s", path, time.Now().Format("20060102-150405"))
+	if err := os.Rename(path, bad); err != nil {
+		log.Printf("store: bozuk ayar dosyası kenara alınamadı (%s): %v", path, err)
+		return
+	}
+	log.Printf("store: %s okunamadı (%v) — %s olarak saklandı, "+
+		"varsayılan ayarlarla devam ediliyor", path, cause, bad)
 }
 
 // checkHardwareChange forces the first-boot wizard to re-run when the MCOS

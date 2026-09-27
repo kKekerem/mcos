@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +51,12 @@ type Manager struct {
 
 	mu       sync.Mutex
 	runtimes map[string]*runtime
+
+	// ExtraEnv, daemon'un bir sunucu sürecine eklemek istediği ortam
+	// değişkenleridir (ör. kardeş kopyanın MCOS_LINK_SELF'i). Alan olarak
+	// duruyor çünkü düğüm adı cluster paketinde; server paketi onu ithal
+	// ederse cluster ↔ server döngüsü oluşurdu. nil = ek yok.
+	ExtraEnv func(srv *model.Server) []string
 }
 
 // NewManager constructs a server manager sharing the daemon's store, Java
@@ -135,6 +142,16 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 
 	r.setState(model.StateStarting)
 
+	// Eski eşlemeyle (26.x -> Java 21) kaydedilmiş sunucular: kurulum ve
+	// başlatma doğru Java ile yapılsın (bkz. java.RaiseToRequired).
+	if java.RaiseToRequired(srv) {
+		m.logf("server: %q için Java %d'e yükseltildi (Minecraft %s bunu istiyor)",
+			srv.Name, srv.JavaMajor, srv.MCVersion)
+		if err := m.store.SaveServer(srv); err != nil {
+			m.logf("server: %q kaydedilemedi: %v", srv.Name, err)
+		}
+	}
+
 	if err := m.EnsureInstalled(ctx, srv); err != nil {
 		return failStart(startErr(StageInstall,
 			fmt.Sprintf("%s %s sunucu yazılımı indirilemedi veya kurulamadı. "+
@@ -168,6 +185,14 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 	}
 
 	dataDir := m.store.Paths.ServerData(srv.ID)
+	// Ortak dünya: tohum/zorluk kurulumdan SONRA değişmiş olabilir (ortak
+	// dünya sonradan açıldı ya da kurucu yeni kurulum gönderdi). Her
+	// açılışta yeniden yazılmazsa iki makine farklı dünya üretir
+	// (bkz. WriteLinkProperties).
+	if err := WriteLinkProperties(dataDir, srv); err != nil {
+		return failStart(startErr(StageLaunch,
+			"server.properties yazılamadı; disk dolu ya da salt okunur olabilir.", err))
+	}
 	r.setState(model.StateStarting)
 	r.mu.Lock()
 	r.players = 0
@@ -186,6 +211,21 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 		Nice:        niceForServer(srv),
 		CPUAffinity: srv.CPUAffinity,
 
+		// ── Düzeltilen gerçek hata: ORTAM HİÇ AYARLANMIYORDU ────────────
+		//
+		// supervisor.Spec'in Env alanı vardı ve süreç onu kullanıyordu, ama
+		// kod tabanında HİÇBİR YER doldurmuyordu (grep "Env:" -> 0 sonuç).
+		//
+		// Sonuç: mcos-link modu MCOS_LINK_PORT'u hiç görmüyor ve HER sunucu
+		// aynı sabit portu (27893) dinlemeye çalışıyordu. Aynı makinede
+		// ikinci bir sunucu açıldığında bind BAŞARISIZ oluyor, mod bunu
+		// ölümcül saymayıp yalnızca uyarı basıyor ve ortak dünya o sunucuda
+		// SESSİZCE çalışmıyordu.
+		//
+		// Tek makinede birden çok sunucu tam olarak kullanıcının istediği
+		// şey olduğu için bu, özelliğin ön koşulu.
+		Env: append(linkEnv(srv), m.extraEnv(srv)...),
+
 		// ISLETIM SISTEMI duzeyinde kaynak tavani. Eskiden CPUQuota yalnizca
 		// saklaniyordu ve HICBIR YERDE uygulanmiyordu; artik cgroup v2 ile
 		// gercekten uygulaniyor.
@@ -193,6 +233,12 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 		Limits: limitsForServer(srv),
 		OnLimits: func(desc string) {
 			m.logf("server: %q kaynak sinirlari uygulandi: %s", srv.Name, desc)
+		},
+		// Yığını HER başlatmada o anki boş belleğe sığdır (bkz. memfit.go):
+		// bellek yetmediği için öldürülen bir sunucu otomatik yeniden
+		// başlatmada küçülmüş yığınla açılır, aynı boyutla yine ölmez.
+		BeforeStart: func(sp *supervisor.Spec) []string {
+			return m.fitMemory(srv, li, sp)
 		},
 	}
 	policy := supervisor.RestartPolicy{OnCrash: srv.RestartOnCrash, MaxRestarts: 10, Backoff: 5 * time.Second}
@@ -267,6 +313,34 @@ func niceForServer(srv *model.Server) int {
 	return n
 }
 
+// fitMemory recomputes the JVM heap, args and limits for the memory that is
+// free right now. Süreç kilidi altında çağrılır (supervisor.Spec.BeforeStart).
+func (m *Manager) fitMemory(srv *model.Server, li *launchInfo, sp *supervisor.Spec) []string {
+	plan := planMemory(srv.RAMMB, memAvailableMB())
+	eff := *srv
+	eff.RAMMB = plan.HeapMB
+	jvm := java.JVMArgs(srv.JVMFlags, plan.HeapMB, srv.JavaMajor)
+	if !plan.PreTouch {
+		jvm = dropPreTouch(jvm)
+	}
+	if args, err := buildLaunchArgs(jvm, li); err == nil {
+		sp.Args = args
+	}
+	if !srv.FullPerf {
+		sp.Limits = limitsForServer(&eff)
+	}
+	m.logf("server: %q bellek plani: istenen %d MB, bos %d MB -> yigin %d MB (on dokunma %v)",
+		srv.Name, plan.WantMB, plan.AvailMB, plan.HeapMB, plan.PreTouch)
+	if !plan.Reduced {
+		return nil
+	}
+	return []string{fmt.Sprintf("[MCOS UYARI] Bu sunucuya %d MB RAM ayrılmıştı ama sistemde şu an "+
+		"yalnızca %d MB boş bellek var (MCOS'un kendisi de RAM'de çalışır). Bellek yetmediği için "+
+		"çekirdeğin sunucuyu öldürmemesi (OOM, \"signal: killed\") için %d MB ile başlatılıyor. "+
+		"Kalıcı çözüm: sunucunun RAM ayarını düşürün, diğer sunucuları kapatın ya da makineye RAM ekleyin.",
+		plan.WantMB, plan.AvailMB, plan.HeapMB)}
+}
+
 // limitsForServer maps a server's configured caps to OS-level limits.
 //
 // ── Neden var ───────────────────────────────────────────────────────────────
@@ -284,15 +358,17 @@ func limitsForServer(srv *model.Server) supervisor.Limits {
 	}
 	lim := supervisor.Limits{CPUPercent: srv.CPUQuota}
 
-	// Bellek tavani yigindan (-Xmx) %25 fazla verilir.
+	// Bellek tavanı KONMAZ.
 	//
-	// NEDEN FAZLA: JVM yigin disinda da bellek kullanir - metaspace, kod
-	// onbellegi, dogrudan arabellekler, is parcacigi yiginlari. Tavani tam
-	// -Xmx'e esitlemek, sunucuyu yigin dolmadan cekirdek tarafindan
-	// oldurtur (OOM) ve kullanici sebebini anlayamaz.
-	if srv.RAMMB > 0 {
-		lim.MemoryMB = srv.RAMMB + srv.RAMMB/4 + 256
-	}
+	// ── Yakalanan gerçek hata: "The server has not responded for 10 seconds"
+	// Eskiden yığın*1,25+256 MB'lık memory.max ve onun %90'ı memory.high
+	// konuyordu. cgroup v2 sunucunun okuyup yazdığı DÜNYA DOSYALARININ sayfa
+	// önbelleğini de o gruba sayar: dünya büyüdükçe grup memory.high'a
+	// dayanıyor, çekirdek her bellek isteğinde sunucuyu uyutup önbelleği geri
+	// almaya zorluyordu. Oyun döngüsü saniyelerce duruyor, Paper'ın bekçisi
+	// "10 saniyedir yanıt yok" yazıyordu (yavaş SD kartta en kötüsü).
+	// Yığın zaten -Xmx ile sınırlı; sistem geneli OOM'a karşı yığın her
+	// başlatmada boş belleğe sığdırılıyor (memfit.go).
 
 	// Dusuk oncelikli sunucular disk bant genisliginde de geri cekilsin.
 	switch srv.Priority {
@@ -317,6 +393,22 @@ func (m *Manager) EnsureInstalled(ctx context.Context, srv *model.Server) error 
 	if m.IsInstalled(srv) {
 		return nil
 	}
+	return m.Install(ctx, srv)
+}
+
+// InstallExclusive (re)installs the software under the same per-server lock
+// as EnsureInstalled.
+//
+// Yakalanan hata (uçtan uca eşleştirme sınamasında günlükten okundu):
+// server.create arka planda EnsureInstalled başlatıyor, hemen ardından gelen
+// server.install ise Install'u KİLİTSİZ çağırıyordu. "paper … indiriliyor"
+// satırı 2 ms arayla iki kez yazıldı: iki kurulumcu aynı klasöre aynı jar'ı
+// aynı anda yazıyordu (yarım/bozuk jar riski). Açık kurulum yine yapılır
+// (kullanıcı "yeniden kur" demiş olabilir), yalnızca sıraya girer.
+func (m *Manager) InstallExclusive(ctx context.Context, srv *model.Server) error {
+	r := m.rt(srv.ID)
+	r.installMu.Lock()
+	defer r.installMu.Unlock()
 	return m.Install(ctx, srv)
 }
 
@@ -469,4 +561,54 @@ func (m *Manager) onExit(id string, code int, err error) {
 		r.setState(model.StateError)
 		m.onConsoleLine(id, fmt.Sprintf("[MCOS HATA] Sunucu süreci beklenmeyen bir şekilde durdu (Çıkış kodu: %d, Hata: %v)", code, err))
 	}
+}
+
+// linkEnv builds the environment for a Minecraft process.
+//
+// ── Neden os.Environ() de ekleniyor ─────────────────────────────────────────
+//
+// supervisor, Env doluysa süreç ortamını TAMAMEN onunla değiştiriyor
+// (process.go: cmd.Env = p.spec.Env). Yalnızca MCOS_LINK_PORT verseydik JVM
+// PATH, HOME ve TZ olmadan başlardı — Java bunları kullanıyor ve eksikliği
+// "çalışıyor ama saat yanlış / geçici dosya yazamıyor" gibi anlaşılmaz
+// belirtiler üretir.
+func linkEnv(srv *model.Server) []string {
+	port := srv.Link.LinkPort
+	if port <= 0 {
+		port = model.DefaultLinkPort
+	}
+	env := append([]string{}, os.Environ()...)
+	env = append(env,
+		fmt.Sprintf("MCOS_LINK_PORT=%d", port),
+		// ŞEMA ŞART ("http://"). Burada eskiden "127.0.0.1:27892" yazıyordu;
+		// eklentinin Coordinator'ı bunu olduğu gibi taban URL sayıyor ve
+		// URI.create("127.0.0.1:27892/link/topology") Java'da
+		// "Illegal character in scheme name at index 0" fırlatıyor. Sonuç:
+		// mod koordinatöre HİÇ bağlanamıyor, topolojiyi "kapalı" sayıyor ve
+		// ortak dünya her sunucuda sessizce devre dışı kalıyordu.
+		linkCoordinatorURL(),
+		// Sunucunun kendi kimliği: mod, topolojide hangi düğüm olduğunu
+		// bundan biliyor. Eskiden adrese göre tahmin ediliyordu ve aynı
+		// makinedeki iki sunucu AYNI adrese sahip olduğu için ayırt
+		// edilemiyordu.
+		"MCOS_SERVER_ID="+srv.ID,
+	)
+	return env
+}
+
+// Note writes an MCOS line into a server's console (kullanıcı nedenini
+// panelde görsün; günlük dosyası panelden okunmuyor).
+func (m *Manager) Note(id, line string) { m.onConsoleLine(id, line) }
+
+// extraEnv returns the daemon-supplied variables for srv (bkz. ExtraEnv).
+func (m *Manager) extraEnv(srv *model.Server) []string {
+	if m.ExtraEnv == nil {
+		return nil
+	}
+	return m.ExtraEnv(srv)
+}
+
+// linkCoordinatorURL is the base URL the mod uses to reach this daemon.
+func linkCoordinatorURL() string {
+	return fmt.Sprintf("MCOS_LINK_COORDINATOR=http://127.0.0.1:%d", model.CoordinatorPort)
 }

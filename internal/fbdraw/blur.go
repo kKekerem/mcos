@@ -60,14 +60,19 @@ func Blur(dst *image.RGBA, r image.Rectangle, radius int) {
 		return
 	}
 
-	sw, sh := w/scale, h/scale
 	// Küçültme ve büyütme TAM ÇÖZÜNÜRLÜKTE gezinir (2 milyon piksel okuma +
 	// 2 milyon yazma); asıl bulanıklık ise küçük arabellekte kalır. Yani
 	// maliyetin neredeyse tamamı bu iki geçiştedir ve ikisi de satır satır
 	// ayrıktır — bantlara bölünebilir.
-	small := downsample(dst, r, scale, sw, sh)
-	blurBuf(small, sw, sh, radius/scale)
-	upsample(dst, r, small, sw, sh)
+	//
+	// Büyütme artık Small.Compose'dan geçiyor (bkz. frost.go): satır başına
+	// iki kaynak satırı önbelleğe alınıyor, piksel başına sınır denetimi
+	// yok. Ölçüldü (BenchmarkOlcum 1080p, pprof): eski upsampleBand pencere
+	// açılış karesinin %24'üydü.
+	var small Small
+	small.Downscale(dst, r, scale)
+	small.Blur(radius / scale)
+	small.Compose(dst, r, ComposeOpts{})
 }
 
 // rowBands splits h rows across the cores, returning the band count.
@@ -150,116 +155,13 @@ func writeRegion(dst *image.RGBA, r image.Rectangle, buf []uint8) {
 	}
 }
 
-// downsample box-averages scale×scale blocks into a small buffer.
-//
-// Ortalama alınır, örnek seçilmez: örnek seçmek (nearest) takma ad (aliasing)
-// üretir ve bulanıklık sonrası titrek kenarlar olarak görünür.
-func downsample(dst *image.RGBA, r image.Rectangle, scale, sw, sh int) []uint8 {
-	out := make([]uint8, sw*sh*4)
-	n := scale * scale
-	forEachBand(sh, 32, func(ya, yz int) {
-		downsampleBand(out, dst, r, scale, sw, n, ya, yz)
-	})
-	return out
-}
-
-func downsampleBand(out []uint8, dst *image.RGBA, r image.Rectangle,
-	scale, sw, n, ya, yz int) {
-
-	for y := ya; y < yz; y++ {
-		for x := 0; x < sw; x++ {
-			var sum [4]int
-			for by := 0; by < scale; by++ {
-				p := dst.PixOffset(r.Min.X+x*scale, r.Min.Y+y*scale+by)
-				for bx := 0; bx < scale; bx++ {
-					sum[0] += int(dst.Pix[p])
-					sum[1] += int(dst.Pix[p+1])
-					sum[2] += int(dst.Pix[p+2])
-					sum[3] += int(dst.Pix[p+3])
-					p += 4
-				}
-			}
-			o := (y*sw + x) * 4
-			out[o] = uint8(sum[0] / n)
-			out[o+1] = uint8(sum[1] / n)
-			out[o+2] = uint8(sum[2] / n)
-			out[o+3] = uint8(sum[3] / n)
-		}
-	}
-}
-
-// upsample writes the small buffer back with bilinear interpolation.
-//
-// En yakın komşu ile büyütmek blok blok görünürdü; doğrusal ara değerleme
-// bulanık görüntüyü pürüzsüz tutar.
-func upsample(dst *image.RGBA, r image.Rectangle, src []uint8, sw, sh int) {
-	w, h := r.Dx(), r.Dy()
-	// 16.16 sabit noktalı adım: kayan noktadan hızlı, piksel başına aynı sonuç.
-	stepX := (sw << 16) / w
-	stepY := (sh << 16) / h
-
-	forEachBand(h, 64, func(ya, yz int) {
-		upsampleBand(dst, r, src, sw, sh, w, stepX, stepY, ya, yz)
-	})
-}
-
-func upsampleBand(dst *image.RGBA, r image.Rectangle, src []uint8,
-	sw, sh, w, stepX, stepY, ya, yz int) {
-
-	for y := ya; y < yz; y++ {
-		fy := y * stepY
-		y0 := fy >> 16
-		if y0 >= sh-1 {
-			y0 = sh - 2
-			if y0 < 0 {
-				y0 = 0
-			}
-		}
-		wy := fy & 0xFFFF
-		y1 := y0 + 1
-		if y1 > sh-1 {
-			y1 = sh - 1
-		}
-
-		p := dst.PixOffset(r.Min.X, r.Min.Y+y)
-		fx := 0
-		for x := 0; x < w; x++ {
-			x0 := fx >> 16
-			if x0 >= sw-1 {
-				x0 = sw - 2
-				if x0 < 0 {
-					x0 = 0
-				}
-			}
-			wx := fx & 0xFFFF
-			x1 := x0 + 1
-			if x1 > sw-1 {
-				x1 = sw - 1
-			}
-
-			i00 := (y0*sw + x0) * 4
-			i01 := (y0*sw + x1) * 4
-			i10 := (y1*sw + x0) * 4
-			i11 := (y1*sw + x1) * 4
-
-			for c := 0; c < 4; c++ {
-				top := int(src[i00+c])<<16 + (int(src[i01+c])-int(src[i00+c]))*wx
-				bot := int(src[i10+c])<<16 + (int(src[i11+c])-int(src[i10+c]))*wx
-				v := (top>>16)<<16 + ((bot>>16)-(top>>16))*wy
-				dst.Pix[p+c] = uint8(v >> 16)
-			}
-			p += 4
-			fx += stepX
-		}
-	}
-}
-
 // boxBlurH blurs src into out horizontally with a sliding window.
 //
 // Kenarlarda piksel değeri KENETLENİR (en dıştaki piksel tekrarlanır), böylece
 // pencere genişliği her zaman 2*radius+1 kalır ve kenarlar kararmaz.
 func boxBlurH(src, out []uint8, w, h, radius int) {
 	win := 2*radius + 1
+	m, sh := magicDiv(win) // bölme yerine çarpma+kaydırma (bkz. magicDiv)
 	for y := 0; y < h; y++ {
 		row := y * w * 4
 		var sum [4]int
@@ -274,10 +176,10 @@ func boxBlurH(src, out []uint8, w, h, radius int) {
 		}
 		for x := 0; x < w; x++ {
 			o := row + x*4
-			out[o] = uint8(sum[0] / win)
-			out[o+1] = uint8(sum[1] / win)
-			out[o+2] = uint8(sum[2] / win)
-			out[o+3] = uint8(sum[3] / win)
+			out[o] = uint8((uint32(sum[0]) * m) >> sh)
+			out[o+1] = uint8((uint32(sum[1]) * m) >> sh)
+			out[o+2] = uint8((uint32(sum[2]) * m) >> sh)
+			out[o+3] = uint8((uint32(sum[3]) * m) >> sh)
 
 			// Pencereyi bir piksel kaydır: soldakini çıkar, sağdakini ekle.
 			lo := row + clampInt(x-radius, 0, w-1)*4
@@ -290,35 +192,63 @@ func boxBlurH(src, out []uint8, w, h, radius int) {
 	}
 }
 
-// boxBlurV is boxBlurH transposed.
+// boxBlurV blurs vertically, walking the image ROW BY ROW.
+//
+// ── Düzeltilen gerçek darboğaz ──────────────────────────────────────────────
+//
+// Burada döngü SÜTUN SÜTUN geziyordu: art arda iki okuma w*4 bayt uzaktaydı
+// (1920 genişlikte 7680 bayt). Yani her piksel için yeni bir önbellek satırı
+// çekiliyor ve okunan 64 baytın yalnızca 4'ü kullanılıyordu.
+//
+// Artık pencere toplamları BİR SATIR BOYU dizide tutuluyor ve görüntü satır
+// satır taranıyor: bellek erişimi tamamen ardışık.
+//
+// Çıktı DEĞİŞMİYOR — testler bunu bayt bayt doğruluyor.
 func boxBlurV(src, out []uint8, w, h, radius int) {
 	win := 2*radius + 1
-	for x := 0; x < w; x++ {
-		col := x * 4
-		var sum [4]int
-		for i := -radius; i <= radius; i++ {
-			yi := clampInt(i, 0, h-1)
-			p := yi*w*4 + col
-			sum[0] += int(src[p])
-			sum[1] += int(src[p+1])
-			sum[2] += int(src[p+2])
-			sum[3] += int(src[p+3])
-		}
-		for y := 0; y < h; y++ {
-			o := y*w*4 + col
-			out[o] = uint8(sum[0] / win)
-			out[o+1] = uint8(sum[1] / win)
-			out[o+2] = uint8(sum[2] / win)
-			out[o+3] = uint8(sum[3] / win)
+	m, sh := magicDiv(win)
+	n := w * 4
 
-			lo := clampInt(y-radius, 0, h-1)*w*4 + col
-			hi := clampInt(y+radius+1, 0, h-1)*w*4 + col
-			sum[0] += int(src[hi]) - int(src[lo])
-			sum[1] += int(src[hi+1]) - int(src[lo+1])
-			sum[2] += int(src[hi+2]) - int(src[lo+2])
-			sum[3] += int(src[hi+3]) - int(src[lo+3])
+	// İlk satır için pencereyi kur.
+	sum := make([]uint32, n)
+	for i := -radius; i <= radius; i++ {
+		yi := clampInt(i, 0, h-1) * n
+		row := src[yi : yi+n]
+		for j := 0; j < n; j++ {
+			sum[j] += uint32(row[j])
 		}
 	}
+
+	for y := 0; y < h; y++ {
+		o := out[y*n : y*n+n]
+		for j := 0; j < n; j++ {
+			o[j] = uint8((sum[j] * m) >> sh)
+		}
+		lo := clampInt(y-radius, 0, h-1) * n
+		hi := clampInt(y+radius+1, 0, h-1) * n
+		l := src[lo : lo+n]
+		hh := src[hi : hi+n]
+		for j := 0; j < n; j++ {
+			sum[j] += uint32(hh[j]) - uint32(l[j])
+		}
+	}
+}
+
+// magicDiv returns (m, s) such that (v*m)>>s == v/win for every reachable v.
+//
+// ── Neden bölme kaldırıldı ──────────────────────────────────────────────────
+//
+// Kutu bulanıklığı piksel başına DÖRT tamsayı bölmesi yapıyordu. Bu işlemcide
+// tamsayı bölmesi ~20-26 çevrim; çarpma ve kaydırma 1-3 çevrim. 960x540'lık
+// bir perdede bu, kare başına 2 milyondan fazla bölme demekti.
+//
+// Sihirli çarpan, bölmenin tam karşılığıdır — YAKLAŞIK DEĞİL. Pencere
+// genişliği 1..81 (yarıçap 0..40) aralığında, ulaşılabilecek TÜM toplamlar
+// için kaba kuvvetle doğrulandı ve testte de duruyor.
+func magicDiv(win int) (m, s uint32) {
+	s = 24
+	m = uint32((1<<s)/uint32(win)) + 1
+	return
 }
 
 func clampInt(v, lo, hi int) int {

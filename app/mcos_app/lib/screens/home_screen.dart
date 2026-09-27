@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../models/connection.dart';
 import '../models/server.dart';
 import '../models/system_status.dart';
+import '../services/errors.dart';
 import '../services/rpc_client.dart';
 import '../services/store.dart';
 import '../theme/palette.dart';
@@ -108,7 +109,8 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e is RpcException ? e.message : e.toString();
+        _error = friendlyError(e,
+            host: widget.connection.host, port: widget.connection.port,);
         _firstLoadDone = true;
       });
     } finally {
@@ -127,7 +129,10 @@ class _HomeScreenState extends State<HomeScreen> {
       if (okMessage != null) _toast(okMessage, Palette.ok);
       await _refresh();
     } catch (e) {
-      _toast(e is RpcException ? e.message : e.toString(), Palette.error);
+      _toast(
+          friendlyError(e,
+              host: widget.connection.host, port: widget.connection.port,),
+          Palette.error,);
     }
   }
 

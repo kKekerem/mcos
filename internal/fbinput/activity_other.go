@@ -74,3 +74,5 @@ func (a *Activity) Wake() <-chan struct{}        { return a.wake }
 func (*Activity) Idle() time.Duration            { return 0 }
 func (*Activity) Touch()                         {}
 func (*Activity) Close() error                   { return nil }
+func (*Activity) MediaKeys() <-chan string       { return nil }
+func (*Activity) OnNewDevice(func(string, Kind)) {}

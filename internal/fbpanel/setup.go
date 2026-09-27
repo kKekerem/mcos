@@ -1,7 +1,7 @@
 package fbpanel
 
 import (
-	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +76,18 @@ const (
 	stepFeatures // PC paylaşımı, playit, fare, animasyon
 	stepSecurity // isteğe bağlı parola
 	stepSummary
+	// stepPersist: USB'yi kalıcı yapmak İSTEĞE BAĞLI bir seçimdir.
+	//
+	// ── Yakalanan gerçek hata ─────────────────────────────────────────────
+	// Kalıcılık eskiden setupSave'in İÇİNDEYDİ: "Ayarları kaydet" diyen her
+	// kullanıcının USB'sine sormadan bölüm ekleniyordu (Ventoy'da 4 GB'lik
+	// dosya sıfırla dolduruluyordu). Kullanıcı (gerçek PC): "en sonda
+	// kalıcılık zorunlu değil isteğe bağlı olmalı". Üstelik iş bitene kadar
+	// (USB 2'de dakikalar) s.saving açık kalıyor ve setupKey HER tuşu
+	// yutuyordu — "son aşamada iptal edince klavye çalışmıyor" şikâyetinin
+	// ölçülen sebebi buydu (setup_klavye_test.go). Artık ayrı bir sayfa, açık
+	// bir seçim ve arka plan işi.
+	stepPersist
 	stepInstall // diske kalıcı kurulum (isteğe bağlı)
 	setupStepCount
 )
@@ -91,6 +103,7 @@ var setupTitles = [setupStepCount]string{
 	stepFeatures: "Özellikler",
 	stepSecurity: "Güvenlik",
 	stepSummary:  "Özet",
+	stepPersist:  "Kalıcılık",
 	stepInstall:  "Diske kur",
 }
 
@@ -140,11 +153,15 @@ type Setup struct {
 	mouse        bool
 	touchpad     bool
 	animations   bool
+	sounds       bool
 	playitNote   string
 	playitOK     bool
 	javaNote     string
 	javaOK       bool
 	javaChecking bool
+	// javaBuiltin: gereken Java (21) imajla GÖMÜLÜ geldi; kurulum adımı
+	// yapacak iş olmadığını söyler ve internet istemez.
+	javaBuiltin bool
 
 	// Güvenlik
 	password string
@@ -160,13 +177,20 @@ type Setup struct {
 	hadPassword bool
 
 	// Kurulum
-	disks         []ipc.DiskTarget
-	diskIdx       int
-	disksLoading  bool
-	installing    bool
-	installDone   bool
-	installMsg    string
+	disks        []ipc.DiskTarget
+	diskIdx      int
+	disksLoading bool
+	installing   bool
+	installDone  bool
+	installMsg   string
+	// installErr: son başarısız kurulumun betikten ayıklanan satırları
+	// (Hata/Neden/Ne yapmalı/Tam günlük). Yeni kurulum başlayınca silinir.
+	installErr    []string
 	rebootCounter int
+
+	// Kalıcılık (isteğe bağlı; bkz. stepPersist)
+	persist    persistDurum
+	persistMsg string
 
 	saving bool
 	// saveDone, kaydetme goroutine'inin bittiğini ANA DÖNGÜYE bildirir.
@@ -174,6 +198,25 @@ type Setup struct {
 	saveDone bool
 	err      string
 }
+
+// persistDurum is where the optional "make this USB persistent" choice stands.
+type persistDurum int
+
+const (
+	// persistSorulmadi: kullanıcı henüz seçmedi; sayfa iki seçeneği sunar.
+	persistSorulmadi persistDurum = iota
+	// persistSuruyor: mcos-persist arka plan işi olarak çalışıyor.
+	persistSuruyor
+	// persistTamam: USB kalıcı yapıldı.
+	persistTamam
+	// persistGecersiz: canlı DVD/ISO — bu ortamda yapılamaz (arıza değil).
+	persistGecersiz
+	// persistHata: gerçek hata; sayfa sebebi ve "Yeniden dene"yi gösterir.
+	persistHata
+	// persistZatenVar: /data zaten kalıcı bir aygıttan bağlı (kalıcı USB ya
+	// da diske kurulu sistem); sorulacak bir şey yok.
+	persistZatenVar
+)
 
 // NewSetup builds the wizard with sensible defaults.
 func NewSetup(cfg *model.Config, st *model.SystemStatus) *Setup {
@@ -187,6 +230,7 @@ func NewSetup(cfg *model.Config, st *model.SystemStatus) *Setup {
 		mouse:      true,
 		touchpad:   true,
 		animations: true,
+		sounds:     true,
 		// playit kurulumu VARSAYILAN AÇIK: ikili zaten imajda, yalnızca
 		// doğrulanıyor. Kullanıcı hesap bağlamaya zorlanmıyor — o adım
 		// Tünel ekranında, istendiğinde yapılır.
@@ -210,6 +254,7 @@ func NewSetup(cfg *model.Config, st *model.SystemStatus) *Setup {
 		ui := cfg.UI.Normalize()
 		s.mouse, s.touchpad = ui.Mouse, ui.Touchpad
 		s.animations = ui.Animations
+		s.sounds = ui.Sounds
 		s.hadPassword = cfg.Security.PasswordSet()
 	}
 	if st != nil && st.SystemName != "" && cfg != nil && cfg.Hostname == "" {
@@ -292,6 +337,7 @@ type setupRowKind int
 const (
 	rowContinue setupRowKind = iota
 	rowBack
+	rowSkip   // zorunlu olmayan sayfayı atlar (sağ üstteki düğme / Tab)
 	rowText   // metin girişi açar
 	rowPick   // liste penceresi açar
 	rowToggle // yerinde açar/kapatır
@@ -308,6 +354,21 @@ type setupRow struct {
 	on    bool
 	// hint, satırın altında soluk yazılır.
 	hint string
+	// autoNext: bu satırdan bir SEÇİM yapılınca sayfa kendiliğinden ilerler.
+	//
+	// ── Neden ──────────────────────────────────────────────────────────────
+	// Kullanıcının isteği: "seçenek seçmek zorunluysa bir seçenek seçince
+	// devama basmak gerekmesin; birden fazlaysa seçip basalım."
+	//
+	// Yani kural sayfanın İÇERİĞİNE bağlı: sayfada verilecek TEK bir karar
+	// varsa (şablon seç, sunucu yazılımı seç) seçim zaten "devam" demektir;
+	// ikinci bir tuş istemek gereksiz bir adımdır. Sayfada birden çok alan
+	// varsa (sürüm + elle sürüm + ViaVersion) otomatik ilerlemek YANLIŞ
+	// olurdu: kullanıcı öbür alanları göremeden sayfa değişirdi.
+	//
+	// Bu yüzden bayrak SATIRDA duruyor, genel bir ayar değil: hangi sayfanın
+	// tek kararlı olduğunu o sayfanın satırlarını kuran kod bilir.
+	autoNext bool
 }
 
 // rows builds the selectable rows for the current page.
@@ -321,7 +382,47 @@ func (s *Setup) rows(a *App) []setupRow {
 }
 
 // rowsLocked builds the rows. Çağıran a.mu'yu TUTUYOR olmalıdır.
+// setupSkippable reports whether a wizard page may be skipped outright.
+//
+// ── Kural ───────────────────────────────────────────────────────────────────
+//
+// Kullanıcının isteği: "eğer zorunlu bir soru değilse atla butonu olsun sağda,
+// tab ile atlayabilelim."
+//
+// Bir sayfa ancak HER alanının kullanılabilir bir varsayılanı varsa
+// atlanabilir. Aşağıdaki liste bu ölçüte göre kurulu:
+//
+//	Hoş geldiniz / Bu bilgisayar : atlanacak bir SORU yok (yalnızca "Devam")
+//	Ad ve ağ                     : ad varsayılan, ağ kablolu olabilir      -> ATLANIR
+//	Java                         : sonradan Yazılım ekranından kurulabilir -> ATLANIR
+//	Görünüm                      : tema ve saat dilimi varsayılanlı        -> ATLANIR
+//	Kaynak sınırı                : varsayılan "sınırsız"                   -> ATLANIR
+//	Özellikler                   : hepsi varsayılan değerinde              -> ATLANIR
+//	Güvenlik                     : parola ZATEN isteğe bağlı               -> ATLANIR
+//	Özet                         : ayarların yazıldığı yer                 -> ATLANMAZ
+//	Diske kur                    : zaten "Kurulum yapma, panele geç" var   -> ATLANMAZ
+//
+// Atlamak, o sayfada YAPILMIŞ değişiklikleri geri almaz: durum zaten Setup
+// içinde tutuluyor ve atlamak yalnızca "bu sayfada işim bitti" demektir.
+// Geri alma davranışı sürpriz olurdu — kullanıcı temayı seçip Atla'ya
+// bastığında seçtiği tema kaybolmamalı.
+func setupSkippable(step setupStep) bool {
+	switch step {
+	case stepIdentity, stepJava, stepLook, stepBudget, stepFeatures, stepSecurity:
+		return true
+	}
+	return false
+}
+
 func (s *Setup) rowsLocked() []setupRow {
+	rows := s.pageRowsLocked()
+	if setupSkippable(s.step) {
+		rows = append(rows, setupRow{kind: rowSkip, label: "Atla", key: "skip"})
+	}
+	return rows
+}
+
+func (s *Setup) pageRowsLocked() []setupRow {
 	switch s.step {
 	case stepWelcome:
 		return []setupRow{
@@ -350,11 +451,19 @@ func (s *Setup) rowsLocked() []setupRow {
 		}
 
 	case stepJava:
+		// Satır SAYISI gömülü durumda da aynı kalır: denetim arka planda
+		// bitip satırlar değiştiğinde imleç başka bir satıra kaymasın.
+		install := setupRow{kind: rowAction, key: "java-install", label: "Gerekli Java'yı kur",
+			hint: "İnternet gerekir."}
+		if s.javaBuiltin {
+			install.label = "Java 21 hazır"
+			install.value = "gömülü"
+			install.hint = "Kurulum gerekmez. Eski sürümler (Java 8/17) Yazılım ekranından kurulur."
+		}
 		return []setupRow{
 			{kind: rowAction, key: "java-check", label: "Java'yı denetle",
 				value: s.javaNote},
-			{kind: rowAction, key: "java-install", label: "Gerekli Java'yı kur",
-				hint: "İnternet gerekir; çevrimdışı pakette de gelir."},
+			install,
 			{kind: rowContinue, label: "Devam"},
 			{kind: rowBack, label: "Geri"},
 		}
@@ -393,6 +502,9 @@ func (s *Setup) rowsLocked() []setupRow {
 			{kind: rowToggle, key: "anim", label: "Animasyonlar",
 				on:   s.animations,
 				hint: "Ekran geçişleri ve açılış animasyonu."},
+			{kind: rowToggle, key: "sounds", label: "Ses efektleri",
+				on:   s.sounds,
+				hint: "Geçişlerde kısa ses. Hoparlör yoksa kendiliğinden sessiz."},
 			{kind: rowContinue, label: "Devam"},
 			{kind: rowBack, label: "Geri"},
 		}
@@ -409,9 +521,15 @@ func (s *Setup) rowsLocked() []setupRow {
 
 	case stepSummary:
 		return []setupRow{
-			{kind: rowContinue, label: "Ayarları kaydet ve bitir"},
+			// "ve bitir" DEĞİL: kaydetmeden sonra iki isteğe bağlı sayfa
+			// (Kalıcılık, Diske kur) daha geliyor; "bitir" deyip yeni bir
+			// sayfa göstermek kullanıcıyı şaşırtırdı.
+			{kind: rowContinue, label: "Ayarları kaydet"},
 			{kind: rowBack, label: "Geri"},
 		}
+
+	case stepPersist:
+		return s.persistRowsLocked()
 
 	case stepInstall:
 		if s.installDone {
@@ -453,7 +571,7 @@ func (s *Setup) rowsLocked() []setupRow {
 				kind:  rowAction,
 				key:   "disk:" + strconv.Itoa(i),
 				label: d.Device,
-				value: fmt.Sprintf("%s · %s", bytesShort(d.SizeBytes), d.Model),
+				value: diskDetail(d),
 			})
 		}
 		rows = append(rows,
@@ -462,6 +580,39 @@ func (s *Setup) rowsLocked() []setupRow {
 		return rows
 	}
 	return nil
+}
+
+// persistRowsLocked builds the Kalıcılık page. Çağıran a.mu'yu TUTUYOR olmalıdır.
+//
+// İki seçenek de AÇIKÇA yazılır ve ne anlama geldikleri sayfa gövdesinde,
+// satırların ÜSTÜNDE durur: kullanıcı "Şimdilik geç"in ayarları yeniden
+// başlatınca kaybettirdiğini seçmeden ÖNCE görmeli.
+func (s *Setup) persistRowsLocked() []setupRow {
+	// Düğme satırlarına (rowContinue) ipucu KONMAZ: drawFlow ipucunu satırın
+	// altına yazar ama düğme bir satırdan yüksektir ve metin düğmenin
+	// üstüne biniyordu (ekran görüntüsünde ölçüldü). Seçeneklerin anlamı
+	// sayfa gövdesinde yazar (setup_draw.go, drawPersist).
+	gec := setupRow{kind: rowContinue, label: "Şimdilik geç"}
+	switch s.persist {
+	case persistSuruyor:
+		// "Devam" iş sürerken de çalışır: iş arka planda (runJobKind) sürer
+		// ve alt çubukta görünür. Sayfada beklemeye zorlamak, eski hatanın
+		// (dakikalarca tuş yutan sihirbaz) aynısı olurdu.
+		return []setupRow{{kind: rowContinue, label: "Devam"}}
+	case persistTamam, persistGecersiz, persistZatenVar:
+		return []setupRow{{kind: rowContinue, label: "Devam"}}
+	case persistHata:
+		return []setupRow{
+			{kind: rowAction, key: "persist", label: "Yeniden dene"},
+			gec,
+		}
+	}
+	return []setupRow{
+		{kind: rowAction, key: "persist", label: "Bu USB'ye kalıcı kaydet",
+			hint: "USB'nin boş alanına MCOS-DATA bölümü eklenir (Ventoy'da " +
+				"/mcos/mcos-data.dat, 4 GB). Var olan verilere dokunulmaz."},
+		gec,
+	}
 }
 
 // passwordStateLocked describes what will be WRITTEN, not what was typed.
@@ -524,18 +675,26 @@ type setupView struct {
 	mouse       bool
 	touchpad    bool
 	animations  bool
+	sounds      bool
 	password    string
 
 	javaNote     string
 	javaOK       bool
 	javaChecking bool
+	// javaBuiltin: gereken Java (21) imajla GÖMÜLÜ geldi; kurulum adımı
+	// yapacak iş olmadığını söyler ve internet istemez.
+	javaBuiltin bool
 
 	diskCount    int
 	disksLoading bool
 	installing   bool
 	installDone  bool
 	installMsg   string
+	installErr   []string
 	saving       bool
+
+	persist    persistDurum
+	persistMsg string
 }
 
 // setupSnapshot copies every field the renderer touches under ONE lock.
@@ -561,18 +720,24 @@ func (a *App) setupSnapshot(s *Setup) setupView {
 		mouse:       s.mouse,
 		touchpad:    s.touchpad,
 		animations:  s.animations,
+		sounds:      s.sounds,
 		password:    s.passwordStateLocked(),
 
 		javaNote:     s.javaNote,
 		javaOK:       s.javaOK,
 		javaChecking: s.javaChecking,
+		javaBuiltin:  s.javaBuiltin,
 
 		diskCount:    len(s.disks),
 		disksLoading: s.disksLoading,
 		installing:   s.installing,
 		installDone:  s.installDone,
 		installMsg:   s.installMsg,
+		installErr:   append([]string(nil), s.installErr...),
 		saving:       s.saving,
+
+		persist:    s.persist,
+		persistMsg: s.persistMsg,
 	}
 }
 
@@ -607,7 +772,12 @@ func (a *App) setupKey(key string) Action {
 	//
 	// Artık adım değişimini yalnızca ANA DÖNGÜ yapar (bkz. setupTick) ve iş
 	// sürerken gezinme tuşları yok sayılır.
+	//
+	// Yok saymak SESSİZ olmamalı: tuşa basıp hiçbir şeyin değişmediğini
+	// gören kullanıcı klavyenin bozulduğunu sanıyor (gerçek PC şikâyeti).
+	// Her basış, neyin beklendiğini alt çubukta söyler.
 	if a.setupBusy(s) {
+		a.setupBusyNote(s)
 		return ActNone
 	}
 
@@ -615,8 +785,25 @@ func (a *App) setupKey(key string) Action {
 	case "up", "k":
 		a.setupMoveCursor(s, -1)
 		return ActNone
-	case "down", "j", "tab":
+	case "down", "j":
 		a.setupMoveCursor(s, 1)
+		return ActNone
+	case "tab":
+		// Tab, ATLANABİLİR bir sayfada sayfayı atlar; değilse eskisi gibi
+		// imleci indirir.
+		//
+		// Kullanıcının isteği: "tab ile atlayabilelim". Tab'ı koşulsuz
+		// atlamaya bağlamak, zorunlu sayfalarda (Özet, Diske kur) hiçbir işe
+		// yaramayan ölü bir tuş bırakırdı — orada imleç hareketi doğru
+		// davranış.
+		a.mu.Lock()
+		skippable := setupSkippable(s.step)
+		a.mu.Unlock()
+		if skippable {
+			a.setupNext(s)
+		} else {
+			a.setupMoveCursor(s, 1)
+		}
 		return ActNone
 	case "esc":
 		// Geri: ilk sayfada hiçbir şey yapmaz. Sihirbazdan ÇIKIŞ YOK —
@@ -641,6 +828,25 @@ func (a *App) setupKey(key string) Action {
 		return ActNone
 	}
 	return ActNone
+}
+
+// setupBusyNote tells the user why a keystroke had no effect.
+//
+// Aynı metin arka arkaya yazılmaz: tuşa on kez basan kullanıcının olay
+// geçmişi on satır aynı mesajla dolmasın.
+func (a *App) setupBusyNote(s *Setup) {
+	a.mu.Lock()
+	installing := s.installing
+	a.mu.Unlock()
+	msg := "Ayarlar kaydediliyor — birkaç saniye bekleyin"
+	if installing {
+		msg = "Kurulum sürüyor ve yarıda bırakılamaz — bitince sonuç bu sayfada görünür"
+	}
+	if e := a.LastEvent(); e != nil && e.Text == msg {
+		a.Invalidate()
+		return
+	}
+	a.Emit(fbui.EventInfo, msg)
 }
 
 // setupMoveCursor wraps the row cursor around the current page.
@@ -713,6 +919,8 @@ func (a *App) setupToggle(s *Setup, key string) {
 		s.touchpad = !s.touchpad
 	case "anim":
 		s.animations = !s.animations
+	case "sounds":
+		s.sounds = !s.sounds
 	}
 	a.dirty = true
 	a.mu.Unlock()
@@ -730,6 +938,12 @@ func (a *App) setupActivate(s *Setup, r setupRow) Action {
 		return ActNone
 	case rowBack:
 		a.setupBack(s)
+		return ActNone
+	case rowSkip:
+		// "Atla" ile "Devam" AYNI şeyi yapar: sonraki sayfaya geçer.
+		// Farkları görseldir ve bilerek öyle: kullanıcı "bu sayfayı
+		// doldurmak zorunda değilim" bilgisini düğmenin varlığından alır.
+		a.setupNext(s)
 		return ActNone
 	case rowToggle:
 		a.setupToggle(s, r.key)
@@ -804,6 +1018,8 @@ func (a *App) setupEnter(s *Setup) {
 		if playit {
 			a.checkPlayit(s)
 		}
+	case stepPersist:
+		a.checkDataPersistent(s)
 	case stepInstall:
 		a.loadDisks(s)
 	}
@@ -953,11 +1169,19 @@ func (a *App) setupAction(s *Setup, key string) Action {
 			s.clearPassword = true
 		})
 		a.Emit(fbui.EventInfo, "Parola kullanılmayacak")
+	case "persist":
+		a.setupPersist(s)
 	case "disks-refresh":
 		a.loadDisks(s)
 	case "finish":
 		a.FinishSetup()
 	case "reboot":
+		// Kalıcılık arka planda sürerken yeniden başlatmak, USB'de yarım bir
+		// bölüm ya da yarım dolmuş bir Ventoy dosyası bırakırdı.
+		if a.runningJobs()[persistJobID] {
+			a.Emit(fbui.EventWarn, "Kalıcılık hâlâ hazırlanıyor — bitmesini bekleyin, sonra yeniden başlatın")
+			return ActNone
+		}
 		return ActReboot
 	default:
 		if strings.HasPrefix(key, "disk:") {
@@ -970,104 +1194,75 @@ func (a *App) setupAction(s *Setup, key string) Action {
 	return ActNone
 }
 
-// setupWiFi scans and shows the network picker with the radar animation.
+// setupWiFi opens the live scan dialog on the wizard's "Ad ve ağ" page.
+//
+// ── Neden panelle AYNI pencere ──────────────────────────────────────────────
+//
+// Burada da eski akış vardı: tarama bitene kadar (4-12 sn) hiçbir pencere
+// açılmıyor, sonra liste birden beliriyordu. Üstelik o sırada kullanıcı
+// sihirbazda başka bir satıra girip yazmaya başlayabildiği için "liste
+// istenmiş miydi" diye üç koşullu bir denetim (wifiPickerWanted) gerekiyordu.
+//
+// Pencere baştan açık olunca o yarış ortadan kalkıyor: sihirbaz pencere
+// açıkken zaten tuş almıyor, yani kullanıcı "başka bir yere geçmiş" olamaz.
+// Aynı ScanModal iki yerde de kullanıldığı için tarama deneyimi de aynı —
+// kullanıcının istediği buydu.
 func (a *App) setupWiFi(s *Setup) {
 	if a.offline() {
 		return
 	}
-	if a.scanning() {
-		return
-	}
-	a.setScanning(true)
-	a.setScanNote("Kablosuz ağlar aranıyor…")
 
+	a.mu.Lock()
+	cur := s.ssid
+	a.mu.Unlock()
+
+	m := NewScanModal("Kablosuz ağ seç", "Kablosuz ağlar aranıyor…",
+		func(app *App, _ int, it ListItem) bool {
+			net, ok := it.Value.(ipc.WiFiNetwork)
+			if !ok {
+				return false
+			}
+			app.setupUpdate(s, func(s *Setup) {
+				s.ssid = net.SSID
+				s.wifiSecured = net.Secured
+				if !net.Secured {
+					s.wifiPass = ""
+				}
+			})
+			if net.Secured {
+				app.OpenModal(NewPasswordModal(net.SSID,
+					func(app2 *App, pass string) {
+						app2.setupUpdate(s, func(s *Setup) {
+							s.wifiPass = pass
+						})
+						app2.setupApplyWiFi(s)
+					}))
+				return false // parola penceresi zaten açıldı
+			}
+			app.setupApplyWiFi(s)
+			return true
+		}).
+		WithEmpty("Ağ bulunamadı. Kablolu bağlantıyı deneyin.").
+		WithRescan(func(app *App, sm *ScanModal) { app.startWiFiScanFor(sm, cur) })
+
+	a.OpenModal(m)
+	a.startWiFiScanFor(m, cur)
+
+	// Sihirbazın kendi "ağ listesi" satırı da dolsun: tarama bitince
+	// s.networks güncellenir, böylece sayfa "n ağ bulundu" diyebilir.
 	go func() {
-		nets, err := a.cl.WiFiScan()
-		a.setScanning(false)
-		a.setScanNote("")
+		for !m.Closed() && m.Scanning() {
+			time.Sleep(wifiPollInterval)
+		}
+		st, err := a.cl.WiFiScanStatus()
 		if err != nil {
-			a.Fail("tarama yapılamadı", err)
 			a.setupUpdate(s, func(s *Setup) {
 				s.netNote = "Tarama başarısız — kablolu bağlantıyı deneyin."
 			})
 			return
 		}
-
-		a.mu.Lock()
-		s.networks = nets
-		cur := s.ssid
-		a.dirty = true
-		a.mu.Unlock()
-
-		items := make([]ListItem, 0, len(nets))
-		for _, n := range nets {
-			badge, kind := "açık", fbui.EventInfo
-			if n.Secured {
-				badge, kind = "korumalı", fbui.EventWarn
-			}
-			items = append(items, ListItem{
-				Label:     n.SSID,
-				Detail:    fmt.Sprintf("%%%d", n.Signal),
-				Badge:     badge,
-				BadgeKind: kind,
-				Current:   n.SSID == cur,
-				Value:     n,
-			})
-		}
-
-		// -- Yakalanan gerçek hata ---------------------------------------
-		// Tarama arka planda sürerken sihirbaz KULLANILABİLİR kalır — öyle
-		// olmalı da. Ama sonuç geldiğinde OpenModal koşulsuz çağrılıyordu ve
-		// OpenModal a.modal'ı denetlemeden EZİYOR (app.go).
-		//
-		// Kullanıcının gördüğü: "Ad ve ağ" sayfasında "Kablosuz ağ"a basıp
-		// radarı başlatmak, sonra bir satır yukarı çıkıp "Bilgisayar adı"na
-		// girip yazmaya başlamak. nmcli birkaç saniye sonra dönünce metin
-		// penceresi yazılanlarla birlikte yok oluyor, sonraki harfler ağ
-		// listesine gidiyordu. Sihirbaz bitmişse (a.setup değişmişse) liste
-		// büsbütün ilgisiz bir ekranın üstüne açılıyordu.
-		if !a.wifiPickerWanted(s) {
-			a.Emit(fbui.EventInfo, fmt.Sprintf(
-				"%d ağ bulundu — 'Kablosuz ağ' satırından seçebilirsiniz",
-				len(nets)))
-			return
-		}
-
-		a.OpenModal(NewListModal("Kablosuz ağ seç",
-			fmt.Sprintf("%d ağ bulundu.", len(nets)), items,
-			func(app *App, _ int, it ListItem) bool {
-				net := it.Value.(ipc.WiFiNetwork)
-				app.setupUpdate(s, func(s *Setup) {
-					s.ssid = net.SSID
-					s.wifiSecured = net.Secured
-					if !net.Secured {
-						s.wifiPass = ""
-					}
-				})
-				if net.Secured {
-					app.OpenModal(NewPasswordModal(net.SSID,
-						func(app2 *App, pass string) {
-							app2.setupUpdate(s, func(s *Setup) {
-								s.wifiPass = pass
-							})
-							app2.setupApplyWiFi(s)
-						}))
-					return false // parola penceresi zaten açıldı
-				}
-				app.setupApplyWiFi(s)
-				return true
-			}).WithEmpty("Ağ bulunamadı. Kablolu bağlantıyı deneyin."))
+		a.setupUpdate(s, func(s *Setup) { s.networks = st.Networks })
 	}()
-}
-
-// wifiPickerWanted reports whether the network list may still be shown.
-//
-// ÜÇ koşul birden: sihirbaz hâlâ AYNI sihirbaz olmalı, kullanıcı hâlâ ağ
-// sayfasında olmalı ve o arada başka bir pencere AÇMAMIŞ olmalı.
-func (a *App) wifiPickerWanted(s *Setup) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.setup == s && a.modal == nil && s.step == stepIdentity
 }
 
 // setupApplyWiFi connects right away so the Java step can download.
@@ -1116,20 +1311,61 @@ func (a *App) checkJava(s *Setup) {
 				s.javaNote = "denetlenemedi: " + err.Error()
 			case len(rt) == 0:
 				s.javaOK = false
+				s.javaBuiltin = false
 				s.javaNote = "kurulu değil"
 			default:
-				var vs []string
-				for _, r := range rt {
-					vs = append(vs, strconv.Itoa(r.Major))
-				}
 				s.javaOK = true
-				s.javaNote = "kurulu: " + strings.Join(vs, ", ")
+				s.javaBuiltin, s.javaNote = javaSetupNote(rt)
 			}
 		})
 	}()
 }
 
+// javaSetupNote, sihirbazın Java satırında gösterilecek notu ve sihirbazın
+// istediği Java 21'in imajla gömülü gelip gelmediğini verir.
+//
+// Gömülü olan AYRICA söylenir: kullanıcı "kurulu: 21" görünce onu kendisinin
+// kurması gerektiğini ya da bir şeyin indirildiğini sanmasın.
+func javaSetupNote(rt []model.JavaRuntime) (builtin21 bool, note string) {
+	var gomulu, diger []string
+	for _, r := range rt {
+		if r.Builtin {
+			gomulu = append(gomulu, strconv.Itoa(r.Major))
+			if r.Major == setupJavaMajor {
+				builtin21 = true
+			}
+			continue
+		}
+		diger = append(diger, strconv.Itoa(r.Major))
+	}
+	var parts []string
+	if len(gomulu) > 0 {
+		parts = append(parts, "Java "+strings.Join(gomulu, ", ")+" gömülü, kurulu")
+	}
+	if len(diger) > 0 {
+		parts = append(parts, "kurulu: "+strings.Join(diger, ", "))
+	}
+	return builtin21, strings.Join(parts, " · ")
+}
+
+// setupJavaMajor, sihirbazın kurduğu (ya da gömülü bulduğu) Java sürümüdür.
+// 21, Minecraft 1.20.5+ için gereken sürümdür; sihirbazda tek seçenek
+// sunmak kullanıcıyı "hangisi?" sorusundan kurtarır.
+const setupJavaMajor = 21
+
 func (a *App) setupInstallJava(s *Setup) {
+	// Gömülü Java 21 varsa yapılacak İŞ YOK: indirme de, internet denetimi de
+	// yok. Eskiden bu adım koşulsuz "İnternet yok — önce ağ adımına dönüp
+	// bağlanın" diyordu; Java imajla gelirken bu, kullanıcıyı gereksiz yere
+	// ağ adımına geri gönderirdi. (Daemon bağlantısından ÖNCE bakılır:
+	// javaBuiltin'i zaten daemon'dan gelen son denetim doldurdu.)
+	a.mu.Lock()
+	builtin := s.javaBuiltin
+	a.mu.Unlock()
+	if builtin {
+		a.Emit(fbui.EventOK, "Java 21 sistemle gömülü geldi — kurulum gerekmez")
+		return
+	}
 	if a.offline() {
 		return
 	}
@@ -1139,9 +1375,7 @@ func (a *App) setupInstallJava(s *Setup) {
 			"İnternet yok — önce ağ adımına dönüp bağlanın")
 		return
 	}
-	// 21, Minecraft 1.20.5+ için gereken sürümdür; sihirbazda tek seçenek
-	// sunmak kullanıcıyı "hangisi?" sorusundan kurtarır.
-	const major = 21
+	const major = setupJavaMajor
 	a.Emit(fbui.EventBusy, "Java 21 indiriliyor…")
 	go func() {
 		rt, err := a.cl.JavaInstall(major)
@@ -1152,6 +1386,7 @@ func (a *App) setupInstallJava(s *Setup) {
 		}
 		a.setupUpdate(s, func(s *Setup) {
 			s.javaOK = true
+			s.javaBuiltin = rt.Builtin
 			s.javaNote = "kuruldu: " + rt.Version
 		})
 		a.Emit(fbui.EventOK, "Java "+strconv.Itoa(rt.Major)+" kuruldu")
@@ -1234,7 +1469,7 @@ func (a *App) setupPassword(s *Setup) {
 
 // ── Kaydetme ────────────────────────────────────────────────────────────────
 
-// setupSave writes every collected setting, then moves to the install page.
+// setupSave writes every collected setting, then moves to the Kalıcılık page.
 //
 // SIRA KRİTİK: önce kaydet, sonra kur. Eski sihirbazda kurulum önce
 // çalışıyordu ve doSetupSave hiç çağrılmıyordu — kullanıcının girdiği her
@@ -1264,6 +1499,7 @@ func (a *App) setupSave(s *Setup) {
 	themeIdx, tzIdx, ramIdx, cpuIdx := s.themeIdx, s.tzIdx, s.ramIdx, s.cpuIdx
 	sharing, playit := s.sharing, s.playitSetup
 	mouse, touchpad, animations := s.mouse, s.touchpad, s.animations
+	sounds := s.sounds
 	ssid, wifiPass := s.ssid, s.wifiPass
 	password, clearPassword := s.password, s.clearPassword
 	a.dirty = true
@@ -1309,6 +1545,7 @@ func (a *App) setupSave(s *Setup) {
 	ui.Touchpad = touchpad
 	ui.Animations = animations
 	ui.BootAnimation = animations
+	ui.Sounds = sounds
 	if ui.PointerSpeed <= 0 {
 		ui.PointerSpeed = model.DefaultUI().PointerSpeed
 	}
@@ -1353,11 +1590,11 @@ func (a *App) setupSave(s *Setup) {
 			return
 		}
 		a.SetConfig(next)
-		// USB'yi kalıcı yap: ayarların yeniden başlatmayı atlatması için
-		// şart. Başarısızlığı ölümcül değil (diske kurulum zaten ayrı).
-		if _, err := a.cl.Persist(""); err != nil {
-			a.Emit(fbui.EventWarn, "USB kalıcı yapılamadı: "+err.Error())
-		}
+		// Kalıcılık BURADA YAPILMAZ (bkz. stepPersist): eskiden bu noktada
+		// sormadan a.cl.Persist("") çağrılıyordu ve Ventoy'da dakikalar süren
+		// o çağrı boyunca s.saving açık kaldığı için sihirbaz HER tuşu
+		// yutuyordu. Kaydetme artık yalnızca yapılandırmayı yazar (saniyeden
+		// kısa); kalıcılık bir sonraki sayfada kullanıcının seçimidir.
 		a.Emit(fbui.EventOK, "Ayarlar kaydedildi")
 
 		// -- Yakalanan gerçek hata ------------------------------------------
@@ -1383,15 +1620,115 @@ func (a *App) setupSave(s *Setup) {
 	}()
 }
 
-// finishSetupSave moves the wizard to the install page. ANA DÖNGÜDE çalışır.
+// finishSetupSave moves the wizard to the Kalıcılık page. ANA DÖNGÜDE çalışır.
 func (a *App) finishSetupSave(s *Setup) {
 	a.beginTransition(transSlideDown)
 	a.setupUpdate(s, func(s *Setup) {
-		s.step = stepInstall
+		s.step = stepPersist
 		s.cursor = 0
 		s.err = ""
 	})
 	a.setupEnter(s)
+}
+
+// ── Kalıcılık (isteğe bağlı) ────────────────────────────────────────────────
+
+// procMounts, /data'nın nereden bağlı olduğunun okunduğu dosya (sınamada
+// değiştirilir).
+var procMounts = "/proc/mounts"
+
+// dataPersistentFrom reports whether /data is mounted from a real block
+// device (kalıcı USB bölümü, Ventoy dosyasının loop aygıtı ya da diske
+// kurulu sistem). Son bağlama kazanır: /data üstüne bağlanan kalıcı bölüm
+// initramfs'teki eski dizini örter.
+func dataPersistentFrom(mounts string) (bool, string) {
+	dev := ""
+	for _, l := range strings.Split(mounts, "\n") {
+		// tmpfs/ramfs'in kaynağı "tmpfs"tir, /dev/ ile başlamaz: ayrıca
+		// denetlemeye gerek yok.
+		if f := strings.Fields(l); len(f) >= 2 && f[1] == "/data" {
+			dev = f[0]
+		}
+	}
+	return strings.HasPrefix(dev, "/dev/"), dev
+}
+
+// checkDataPersistent skips the question when /data is already persistent.
+//
+// Sihirbaz Ayarlar'dan kalıcı bir USB'de ya da diske kurulu bir sistemde
+// yeniden çalıştırılabilir; orada "Bu USB'ye kalıcı kaydet" sormak anlamsız
+// ve yanıltıcıdır.
+func (a *App) checkDataPersistent(s *Setup) {
+	b, err := os.ReadFile(procMounts)
+	if err != nil {
+		return
+	}
+	ok, dev := dataPersistentFrom(string(b))
+	if !ok {
+		return
+	}
+	a.setupUpdate(s, func(s *Setup) {
+		if s.persist == persistSorulmadi {
+			s.persist = persistZatenVar
+			s.persistMsg = "/data kalıcı aygıttan bağlı: " + dev
+		}
+	})
+}
+
+// setupPersist asks once, then makes the USB persistent in the background.
+//
+// Onay penceresi Ayarlar'daki "USB'yi kalıcı yap" ile AYNI metni gösterir
+// (persistConfirmLines): iki yerde farklı söz vermek güveni zedelerdi.
+func (a *App) setupPersist(s *Setup) {
+	if a.offline() {
+		a.setupUpdate(s, func(s *Setup) {
+			s.err = "daemon bağlantısı yok — kalıcılık hazırlanamaz"
+		})
+		return
+	}
+	a.OpenModal(NewConfirmModal("USB'yi kalıcı yap?", persistConfirmLines(),
+		"Kalıcı yap", false,
+		func(app *App) { app.runSetupPersist(s) }))
+}
+
+// runSetupPersist starts the job and mirrors its outcome on the page.
+func (a *App) runSetupPersist(s *Setup) {
+	// "Sürüyor" iş BAŞLAMADAN yazılır: Persist anında dönerse (canlı DVD'de
+	// öyle) sonuç geri çağrısı bu satırdan önce çalışıp sonucu ezilirdi.
+	a.mu.Lock()
+	if s.persist == persistSuruyor {
+		a.mu.Unlock()
+		return
+	}
+	onceki, oncekiMsg := s.persist, s.persistMsg
+	s.persist = persistSuruyor
+	s.persistMsg = ""
+	s.err = ""
+	a.dirty = true
+	a.mu.Unlock()
+	started := a.startPersist(func(kind fbui.EventKind, msg string, err error) {
+		a.setupUpdate(s, func(s *Setup) {
+			switch {
+			case err != nil:
+				s.persist = persistHata
+				s.persistMsg = err.Error()
+			case kind == fbui.EventInfo:
+				s.persist = persistGecersiz
+				s.persistMsg = msg
+			default:
+				s.persist = persistTamam
+				s.persistMsg = msg
+			}
+		})
+	})
+	if !started {
+		// Aynı iş başka yerden (Ayarlar) zaten sürüyor; runJobKind bunu
+		// söyledi ve sonucu o iş bildirecek. Sayfa eski durumuna döner.
+		a.setupUpdate(s, func(s *Setup) {
+			s.persist = onceki
+			s.persistMsg = oncekiMsg
+		})
+	}
 }
 
 // ── Diske kurulum ───────────────────────────────────────────────────────────
@@ -1429,14 +1766,41 @@ func (a *App) confirmDiskInstall(s *Setup, idx int) {
 	a.mu.Unlock()
 
 	a.OpenModal(NewConfirmModal("MCOS'u diske kur?",
-		[]string{
-			d.Device + " üzerindeki TÜM VERİ SİLİNECEK.",
-			fmt.Sprintf("%s · %s", bytesShort(d.SizeBytes), d.Model),
-			"Kurulumdan sonra sistem diskten açılır ve RAM'de değil,",
-			"diskte kalıcı olarak çalışır.",
-		},
+		confirmInstallLines(d),
 		"Kur", true,
 		func(app *App) { app.runDiskInstall(s, d) }))
+}
+
+// confirmInstallLines, kurulum onay penceresinin metni.
+//
+// Diskte bir MCOS kalıcı bölümü (MCOS-DATA) varsa ve o bölüm şu an /data
+// olarak kullanılıyorsa mcos-install diski YERİNDE yeniler: sunucular
+// korunur. Kullanıcıya "tüm veri silinecek" deyip veriyi korumak da,
+// tersi de yanıltıcı olurdu; iki durum da açıkça yazılır.
+func confirmInstallLines(d ipc.DiskTarget) []string {
+	lines := []string{
+		d.Device + " üzerindeki TÜM VERİ SİLİNECEK.",
+		diskDetail(d),
+		"Kurulumdan sonra sistem diskten açılır ve RAM'de değil,",
+		"diskte kalıcı olarak çalışır.",
+	}
+	if d.HasPersist {
+		lines = append(lines,
+			"Diskte önceki bir MCOS var: kalıcı bölümü şu an /data olarak",
+			"kullanılıyorsa sunucular ve ayarlar KORUNUR, yalnızca sistem yenilenir.")
+	}
+	return lines
+}
+
+// diskDetail is "32.0 GB · SanDisk Ultra"; model bilinmiyorsa yalnızca boyut.
+//
+// QEMU'nun virtio diski model bildirmiyor ve satır "4.0 GB ·" diye sarkık bir
+// ayraçla bitiyordu (ekran görüntüsünde görüldü).
+func diskDetail(d ipc.DiskTarget) string {
+	if strings.TrimSpace(d.Model) == "" {
+		return bytesShort(d.SizeBytes)
+	}
+	return bytesShort(d.SizeBytes) + " · " + d.Model
 }
 
 // runDiskInstall launches the installer helper.
@@ -1461,38 +1825,70 @@ func (a *App) runDiskInstall(s *Setup, d ipc.DiskTarget) {
 	}
 	s.installing = true
 	s.installMsg = "Kurulum başladı…"
+	s.installErr = nil
 	a.dirty = true
 	a.mu.Unlock()
 
-	a.Emit(fbui.EventBusy, d.Device+" diskine kuruluyor…")
-
-	go func() {
-		out, err := runHelper("mcos-install", "--device", d.Device, "--yes")
-		if err != nil {
-			a.setupUpdate(s, func(s *Setup) {
-				s.installing = false
-				s.installMsg = "Kurulum başarısız: " + lastLine(out)
-			})
-			a.Fail("kurulum başarısız", err)
-			return
-		}
-		msg := lastLine(out)
-		if msg == "" {
-			msg = "Kurulum tamamlandı."
-		}
-		// İmleç BURADA sıfırlanmaz. s.cursor'ı kilit ALMADAN yazan bir yol
-		// var (tıklama: pointer.go, dispatchClick) ve o ana döngüde çalışır;
-		// arka plandan da yazmak, kilitli/kilitsiz karışık bir erişim — yani
-		// gerçek bir veri yarışı — olurdu. Satır kümesi değiştiği için imleci
-		// aralığa çekme işini ana döngü üstlenir (setupTick).
+	// Arka plan işi (setup_install.go, startDiskInstall): Ayarlar'daki
+	// "Diske / USB'ye kur" ile AYNI kod ve AYNI iş kimliği, yani iki yoldan
+	// aynı anda ikinci bir mcos-install başlatılamaz. Sonuç bu sayfaya
+	// yazılır; sayfa (sihirbaz) o sırada kapandıysa pencerede açılır.
+	started := a.startDiskInstall(d,
+		func(m string) {
+			a.setupUpdate(s, func(s *Setup) { s.installMsg = m })
+		},
+		func(ok bool, msg string, lines []string) bool {
+			// İmleç BURADA sıfırlanmaz. s.cursor'ı kilit ALMADAN yazan bir
+			// yol var (tıklama: pointer.go, dispatchClick) ve o ana döngüde
+			// çalışır; arka plandan da yazmak gerçek bir veri yarışı olurdu.
+			// Satır kümesi değiştiği için imleci aralığa çekme işini ana
+			// döngü üstlenir (setupTick).
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			s.installing = false
+			if ok {
+				s.installDone = true
+				s.installMsg = msg
+			} else {
+				// Yalnızca "exit status 1" DEĞİL: betiğin söylediği gerçek
+				// sebep, ne yapılacağı ve tam günlüğün yolu.
+				s.installMsg = ""
+				s.installErr = lines
+			}
+			a.dirty = true
+			return a.setup == s
+		})
+	if !started {
+		// Aynı iş Ayarlar'dan zaten sürüyor (runJobKind bunu söyledi).
 		a.setupUpdate(s, func(s *Setup) {
 			s.installing = false
-			s.installDone = true
-			s.installMsg = msg
+			s.installMsg = ""
 		})
-		a.Emit(fbui.EventOK, "Kurulum tamamlandı — yeniden başlatabilirsiniz")
-	}()
+	}
 }
+
+// installArgs builds the argument list for the mcos-install helper.
+//
+// ── Yakalanan gerçek hata: KURULUM HİÇ BAŞLAMIYORDU ─────────────────────────
+//
+// Burada şu yazıyordu:
+//
+//	runHelper("mcos-install", "--device", d.Device, "--yes")
+//
+// Ama mcos-install hedefi KONUMSAL alıyor (betiğin ilk satırlarında
+// `TARGET="${1:-}"`). Yani hedef aygıt "--device" oluyordu:
+//
+//	$ mcos-install --device /dev/sda --yes
+//	mcos-install: HATA: geçersiz blok aygıtı: --device
+//	çıkış kodu: 1
+//
+// Ölçüldü, yukarıdaki çıktı gerçek koşunun kendisidir. Disk hiç
+// bölümlenmiyordu; kullanıcının gördüğü tek şey "hata kodu 1" idi.
+//
+// Argümanlar ARTIK TEK YERDE: sınama da bu işlevi çağırıp betiği gerçekten
+// çalıştırıyor (setup_install_test.go), böylece panel ile betik bir daha
+// sessizce ayrışamaz.
+func installArgs(device string) []string { return []string{device} }
 
 // lastLine returns the last non-empty line of a helper's output.
 //

@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
+	"mcos/internal/tunnel"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -92,6 +95,10 @@ func (d *Daemon) handleSystemStatus(_ context.Context, _ json.RawMessage) (any, 
 
 	st.ClockSynced = timesync.Synced()
 	st.TurboOn = cfg.Turbo
+	// Turbonun GERÇEKTE ne yaptığı ve çekirdek başına anlık frekans: panel
+	// "Turbo AÇIK" yazıp işlemcinin 400 MHz'de kaldığını gizlemesin.
+	st.Turbo = d.turboStatus()
+	st.CPU.CoreMHz = d.coreMHz()
 
 	// Takılı çıkarılabilir depolama. DetectUSB hiçbir şeyi BAĞLAMAZ (yalnızca
 	// /sys/block + /proc/mounts okur), bu yüzden durum döngüsünde her çağrıda
@@ -193,7 +200,8 @@ func (d *Daemon) handleServerList(_ context.Context, _ json.RawMessage) (any, er
 	for _, srv := range servers {
 		d.servers.FillRuntime(srv)
 	}
-	return ipc.ServerListResult{Servers: servers}, nil
+	// Kardeş kopyalar gizlenir: menüde bölünmüş dünya TEK sunucu görünür.
+	return ipc.ServerListResult{Servers: d.decorateInstances(servers)}, nil
 }
 
 func (d *Daemon) handleServerGet(_ context.Context, raw json.RawMessage) (any, error) {
@@ -202,6 +210,10 @@ func (d *Daemon) handleServerGet(_ context.Context, raw json.RawMessage) (any, e
 		return nil, err
 	}
 	d.servers.FillRuntime(srv)
+	if !srv.IsSibling() && d.instanceCount(srv) > 1 {
+		all, _ := d.store.ListServers()
+		d.decorateInstances(append(siblingsOf(srv.ID, all), srv))
+	}
 	return ipc.ServerResult{Server: srv}, nil
 }
 
@@ -230,6 +242,11 @@ func (d *Daemon) handleServerCreate(_ context.Context, raw json.RawMessage) (any
 	if err := decode(raw, &p); err != nil {
 		return nil, err
 	}
+	return d.createServer(p)
+}
+
+// createServer is the body of server.create (USB'den aktarma da kullanır).
+func (d *Daemon) createServer(p ipc.ServerCreateParams) (any, error) {
 	if err := validateCreate(&p); err != nil {
 		return nil, err
 	}
@@ -325,8 +342,30 @@ func (d *Daemon) handleServerCreate(_ context.Context, raw json.RawMessage) (any
 		ClusterShare:     p.ClusterShare,
 		DataDir:          strings.TrimSpace(p.DataDir),
 	}
+	if p.Instances != nil {
+		srv.Instances = max(0, min(*p.Instances, model.MaxInstances))
+	}
+	if p.InstancesAuto != nil {
+		srv.InstancesAuto = *p.InstancesAuto
+	}
 	if srv.JVMFlags == "" {
 		srv.JVMFlags = "aikar"
+	}
+	if p.ImportFrom != "" {
+		// Aktarılan klasör kurulum BAŞLAMADAN yerine taşınır: kurulum
+		// gorutini veri klasörüne jar yazarken aynı klasöre dünya kopyalamak
+		// iki yazıcıyı yarıştırırdı. Aynı dosya sisteminde (/data) yalnızca
+		// bir yeniden adlandırma.
+		dst := d.store.Paths.ServerData(srv.ID)
+		if srv.DataDir != "" {
+			dst = srv.DataDir
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(p.ImportFrom, dst); err != nil {
+			return nil, fmt.Errorf("aktarılan klasör yerleştirilemedi: %w", err)
+		}
 	}
 	if err := d.store.SaveServer(srv); err != nil {
 		return nil, err
@@ -337,6 +376,7 @@ func (d *Daemon) handleServerCreate(_ context.Context, raw json.RawMessage) (any
 	// start. Runs in the background (downloads can be large); a later Start
 	// will reuse the result, and EnsureInstalled is safe against a concurrent
 	// install triggered by the user pressing Start.
+	perf := p.PerfPack == nil || *p.PerfPack
 	go func(s *model.Server) {
 		if err := d.servers.EnsureInstalled(context.Background(), s); err != nil {
 			d.log.Errorf("daemon: auto-install %q failed: %v", s.Name, err)
@@ -344,6 +384,15 @@ func (d *Daemon) handleServerCreate(_ context.Context, raw json.RawMessage) (any
 		// Ortak dunya eklentisi HER sunucuya kurulur: kullanici onu
 		// sonradan actiginda sunucuyu yeniden kurmak gerekmesin.
 		d.ensureLinkArtifact(s)
+		// Performans paketi (sihirbazda kapatılmadıysa) ortak dünya
+		// modundan SONRA: fabric-api'yi o kurar, paket onu tekrar kurmaz.
+		// İnternet yoksa paket "internet yok, performans paketi atlandı"
+		// yazar; ayarlar yine uygulanır (ağ gerektirmez).
+		if perf {
+			if err := d.runPerfPack(s.ID); err != nil && !errors.Is(err, errPerfPackBusy) {
+				d.log.Errorf("perfpack: %q: %v", s.Name, err)
+			}
+		}
 	}(srv.Clone())
 
 	return ipc.ServerResult{Server: srv}, nil
@@ -392,6 +441,12 @@ func (d *Daemon) handleServerUpdate(_ context.Context, raw json.RawMessage) (any
 	if p.WAN != nil {
 		srv.WAN.Enabled = *p.WAN
 	}
+	if p.Instances != nil {
+		srv.Instances = max(0, min(*p.Instances, model.MaxInstances))
+	}
+	if p.InstancesAuto != nil {
+		srv.InstancesAuto = *p.InstancesAuto
+	}
 
 	if err := d.store.SaveServer(srv); err != nil {
 		return nil, err
@@ -408,6 +463,9 @@ func (d *Daemon) handleServerDelete(_ context.Context, raw json.RawMessage) (any
 	if d.servers.State(p.ID) == model.StateRunning {
 		return nil, &ipc.Error{Code: ipc.CodeConflict, Message: "stop the server before deleting"}
 	}
+	// Ana sunucu silinince kardeş kopyaları da gider (tek sunucu gibi
+	// görünüyordu; gizli kayıtlar sahipsiz kalmamalı).
+	d.deleteSiblings(p.ID)
 	if err := d.store.DeleteServer(p.ID); err == store.ErrNotFound {
 		return nil, &ipc.Error{Code: ipc.CodeNotFound, Message: "server not found"}
 	} else if err != nil {
@@ -421,7 +479,7 @@ func (d *Daemon) handleServerInstall(ctx context.Context, raw json.RawMessage) (
 	if err != nil {
 		return nil, err
 	}
-	if err := d.servers.Install(ctx, srv); err != nil {
+	if err := d.servers.InstallExclusive(ctx, srv); err != nil {
 		return nil, fmt.Errorf("install: %w", err)
 	}
 	return ipc.OKResult{OK: true, Message: "installed"}, nil
@@ -432,6 +490,22 @@ func (d *Daemon) handleServerStart(ctx context.Context, raw json.RawMessage) (an
 	if err != nil {
 		return nil, err
 	}
+	// Kardeş kopyalar ana sunucuyla birlikte açılır (bkz. instances.go).
+	if err := d.startWithInstances(ctx, srv); err != nil {
+		return nil, err
+	}
+	return ipc.OKResult{OK: true, Message: "starting"}, nil
+}
+
+// launchServer applies launch-time policy and starts one server process.
+//
+// handleServerStart'tan ayrıldı: kardeş kopyalar da AYNI kuralla (bütçe,
+// turbo, Java) açılmalı; ayrı bir kopya zamanla ana sunucudan ayrışırdı.
+func (d *Daemon) launchServer(ctx context.Context, srv *model.Server) error {
+	// İlk açılışın oluşturduğu dosyalara bekleyen performans ayarlarını yaz
+	// (bütçe kısıtından ÖNCE: o yalnızca bellekteki kopyayı değiştirir).
+	d.perfPackBeforeStart(srv)
+
 	// Apply the host resource budget at launch (covers servers created before a
 	// budget change). Clamp in-memory only — the manifest keeps the user's value.
 	srv.RAMMB, srv.CPUQuota = d.clampToBudget(srv.RAMMB, srv.CPUQuota)
@@ -448,7 +522,7 @@ func (d *Daemon) handleServerStart(ctx context.Context, raw json.RawMessage) (an
 	if !installed {
 		d.log.Infof("daemon: java %d missing for %s, installing...", srv.JavaMajor, srv.Name)
 		if _, err := d.java.Install(srv.JavaMajor); err != nil {
-			return nil, &ipc.Error{Code: ipc.CodeConflict, Message: fmt.Sprintf("java %d indirme hatası: %v", srv.JavaMajor, err)}
+			return &ipc.Error{Code: ipc.CodeConflict, Message: fmt.Sprintf("java %d indirme hatası: %v", srv.JavaMajor, err)}
 		}
 	}
 	// Turbo mode boosts this launch (in-memory only, not persisted): high
@@ -470,11 +544,19 @@ func (d *Daemon) handleServerStart(ctx context.Context, raw json.RawMessage) (an
 		// Kullanıcıya Türkçe, eyleme dönüştürülebilir mesaj; teknik ayrıntı
 		// günlüğe. Eskiden ham Go hatası panele düşüyordu.
 		d.log.Errorf("daemon: %s başlatılamadı: %v", srv.ID, err)
-		return nil, &ipc.Error{Code: ipc.CodeConflict, Message: server.UserMessage(err)}
+		return &ipc.Error{Code: ipc.CodeConflict, Message: server.UserMessage(err)}
 	}
 
-	// Deep integration: auto-open a Serveo tunnel when the server enables it.
-	if srv.WAN.Enabled {
+	// WAN açık sunucunun genel adresi artık playit'ten gelir: playit arka
+	// plan işçisi WAN açık her çalışan sunucu için tünel açar (bkz.
+	// handlers_playit_tunnel.go). Serveo YALNIZCA imajda playit yoksa yedek.
+	//
+	// ── Düzeltilen hata ──────────────────────────────────────────────────
+	// Panel Serveo'yu çoktan kaldırmıştı ama burada her başlatmada hâlâ
+	// serveo.net'e bir SSH tüneli açılıyordu: sunucunun İKİ genel adresi
+	// oluyordu (biri panelde hiç görünmeyen) ve kullanıcının haberi olmadan
+	// üçüncü taraf bir sunucuya port açılıyordu.
+	if serveoFallback(srv) {
 		go func() {
 			cmd := srv.WAN.Code
 			if cmd == "" {
@@ -483,8 +565,13 @@ func (d *Daemon) handleServerStart(ctx context.Context, raw json.RawMessage) (an
 			d.tunnelMgr.Start(cmd)
 		}()
 	}
+	return nil
+}
 
-	return ipc.OKResult{OK: true, Message: "starting"}, nil
+// serveoFallback: WAN açık sunucuya Serveo tüneli açılmalı mı? Yalnızca
+// imajda playit YOKSA (bkz. handleServerStart'taki düzeltme notu).
+func serveoFallback(srv *model.Server) bool {
+	return srv.WAN.Enabled && !tunnel.PlayitAvailable()
 }
 
 // serveoCommand builds the SSH reverse-tunnel command that exposes a local TCP
@@ -499,6 +586,11 @@ func (d *Daemon) handleServerStop(_ context.Context, raw json.RawMessage) (any, 
 	if err := decode(raw, &p); err != nil {
 		return nil, err
 	}
+	// Kardeşler ana sunucuyla birlikte kapanır: ana kapalıyken dünyanın
+	// yalnızca bazı dilimleri açık kalsaydı oyuncular yarım bir dünyada
+	// kalırdı. ÖNCE kardeşler: ana sunucu çökmüşse Stop hata verir ve
+	// kardeşler açık kalmamalı.
+	d.stopSiblings(p.ID)
 	if err := d.servers.Stop(p.ID); err != nil {
 		return nil, &ipc.Error{Code: ipc.CodeConflict, Message: err.Error()}
 	}
@@ -506,7 +598,7 @@ func (d *Daemon) handleServerStop(_ context.Context, raw json.RawMessage) (any, 
 	// Stop any quick tunnel associated with this server port or code.
 	// Since we don't have the server instance here easily, let's load it to get the port/code.
 	srv, _ := d.store.GetServer(p.ID)
-	if srv != nil && srv.WAN.Enabled {
+	if srv != nil && serveoFallback(srv) {
 		cmd := srv.WAN.Code
 		if cmd == "" {
 			cmd = serveoCommand(srv.Port)
@@ -522,9 +614,26 @@ func (d *Daemon) handleServerRestart(ctx context.Context, raw json.RawMessage) (
 	if err != nil {
 		return nil, err
 	}
-	if err := d.servers.Restart(ctx, srv); err != nil {
-		return nil, &ipc.Error{Code: ipc.CodeConflict, Message: err.Error()}
+	if srv.IsSibling() || !d.hasInstances(srv) {
+		if err := d.servers.Restart(ctx, srv); err != nil {
+			return nil, &ipc.Error{Code: ipc.CodeConflict, Message: err.Error()}
+		}
+		return ipc.OKResult{OK: true, Message: "restarting"}, nil
 	}
+	// Bölünmüş dünya: hepsi kapanır, sonra kopyalar yeniden hazırlanıp
+	// (sayı, mod listesi değişmiş olabilir) birlikte açılır. Arka planda:
+	// kapanış dünyayı diske yazarken RPC'yi bekletmeyelim.
+	go func() {
+		all, _ := d.store.ListServers()
+		for _, s := range append(siblingsOf(srv.ID, all), srv) {
+			if isLive(d.servers.State(s.ID)) {
+				d.stopAndWait(s.ID)
+			}
+		}
+		if err := d.startWithInstances(context.Background(), srv); err != nil {
+			d.log.Errorf("daemon: %s yeniden başlatılamadı: %v", srv.Name, err)
+		}
+	}()
 	return ipc.OKResult{OK: true, Message: "restarting"}, nil
 }
 

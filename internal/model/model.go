@@ -110,7 +110,7 @@ const (
 // BackupPolicy describes automatic backup behavior for a server.
 type BackupPolicy struct {
 	Auto     bool   `json:"auto"`
-	Schedule string `json:"schedule"` // cron expression, empty = disabled
+	Schedule string `json:"schedule"` // "6h", "1d", "2d@04:00" — bkz. backup_schedule.go (cron DEĞİL)
 	Keep     int    `json:"keep"`     // number of backups to retain (0 = unlimited)
 }
 
@@ -166,11 +166,31 @@ type Server struct {
 	// Link holds the shared-world (MCOS Link) setup for this server.
 	Link LinkConfig `json:"link,omitempty"`
 
+	// Instances, bu dünyanın AYNI makinede kaç sunucuya bölüneceğidir
+	// (0/1 = tek sunucu). Panelde tek sunucu görünür; açılışta MCOS kardeş
+	// kopyaları kendisi kurar ve dünyayı PC eşleştirmesiyle aynı dilim
+	// mantığıyla aralarında böler (bkz. instances.go).
+	Instances int `json:"instances,omitempty"`
+	// InstancesAuto: sayıyı oyuncu sınırından MCOS seçsin (bkz.
+	// AutoInstanceCount). Açıkken Instances yok sayılır.
+	InstancesAuto bool `json:"instancesAuto,omitempty"`
+	// ParentID doluysa bu kayıt bir ana sunucunun GİZLİ kardeş kopyasıdır:
+	// listede görünmez, ana sunucuyla birlikte açılır/kapanır/silinir.
+	ParentID string `json:"parentId,omitempty"`
+	// InstanceIndex, kardeşin sırasıdır (2, 3, …). Adından çıkarmıyoruz:
+	// kullanıcı ana sunucunun adını değiştirebilir ama düğüm adı
+	// ("<makine>-2") değişmemeli, yoksa dilim sahipliği kayar.
+	InstanceIndex int `json:"instanceIndex,omitempty"`
+
 	// ClusterShare opts this server's heavy side-work (backups, log analysis)
 	// into LAN work-sharing when a paired helper node is available.
 	ClusterShare bool `json:"clusterShare,omitempty"`
 	// DataDir overrides where the server's data lives (empty = default tree).
 	DataDir string `json:"dataDir,omitempty"`
+	// PerfPack, performans paketinin bu sunucuda son yaptığıdır (nil = hiç
+	// kurulmadı ya da sihirbazda kapatıldı). Paketin koyduğu dosyalar burada
+	// tutulur ki güncellemede kullanıcının kendi modlarına dokunulmasın.
+	PerfPack *PerfPackState `json:"perfPack,omitempty"`
 
 	Autostart       bool `json:"autostart"`
 	RestartOnCrash  bool `json:"restartOnCrash"`
@@ -189,6 +209,9 @@ type Server struct {
 	Players   int         `json:"players,omitempty"`
 	LastLog   string      `json:"lastLog,omitempty"`
 	UptimeSec int64       `json:"uptimeSec,omitempty"`
+	// RunningInstances, listede ana sunucunun satırında "×N sunucu" yazmak
+	// için doldurulur (ana + kardeşler; 0 = bölünmemiş).
+	RunningInstances int `json:"runningInstances,omitempty"`
 }
 
 // Clone returns a deep-ish copy safe to mutate without touching the original's

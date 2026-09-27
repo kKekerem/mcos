@@ -1,0 +1,142 @@
+#!/bin/sh
+# mcos-soundcheck — ses yolunu uçtan uca sınar ve HER adımı yazar.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# NEDEN VAR
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Ses, doğrulanması en zor özelliktir: "açtım, duymuyorum" cümlesinin arkasında
+# birbirinden bağımsız altı ayrı sebep olabilir ve hiçbiri ekrana bir hata
+# basmaz:
+#
+#   1. Çekirdekte ses sürücüsü yok            -> /dev/snd hiç oluşmaz
+#   2. Kodek bağlanmadı                       -> /dev/snd var ama pcm yok
+#   3. aplay imajda yok                       -> panel sessiz arka uca düşer
+#   4. alsa-lib yapılandırması eksik           -> aplay "unknown parameter" der
+#   5. Master kanal KAPALI (mute)             -> her şey çalışır, ses duyulmaz
+#   6. Kart var ama çıkış fişe bağlı değil    -> donanım sorunu
+#
+# Bu betik altısını da ayrı ayrı gösterir. Panelin ses ayarındaki "ÇIKIŞ"
+# satırı kullanıcıya ÖZETİ verir; burası ayrıntıyı.
+#
+# Kullanım:
+#   mcos-soundcheck          # yalnızca rapor
+#   mcos-soundcheck --play   # rapor + 0,5 saniyelik deneme tonu
+#
+# Çekirdek komut satırında rdinit=/usr/bin/mcos-soundcheck ile de
+# çalıştırılabilir: o zaman raporu /dev/kmsg'ye de yazar (seri konsoldan
+# okunabilir) ve ardından normal açılışa devreder.
+
+PLAY=0
+BOOTMODE=0
+[ "${1:-}" = "--play" ] && PLAY=1
+[ "$$" = "1" ] && BOOTMODE=1
+
+say() {
+    echo "$1"
+    [ "$BOOTMODE" = "1" ] && [ -w /dev/kmsg ] && echo "soundcheck: $1" > /dev/kmsg 2>/dev/null
+    return 0
+}
+
+if [ "$BOOTMODE" = "1" ]; then
+    # rdinit olarak çalışıyoruz: hiçbir şey bağlı değil.
+    mount -t proc proc /proc 2>/dev/null
+    mount -t sysfs sysfs /sys 2>/dev/null
+    mount -t devtmpfs devtmpfs /dev 2>/dev/null
+fi
+
+say "=== MCOS ses denetimi ==="
+
+# 1. Çekirdek sürücüsü
+if [ -d /proc/asound ]; then
+    say "1. cekirdek ALSA: VAR"
+    if [ -r /proc/asound/cards ]; then
+        while IFS= read -r line; do
+            say "   kart: $line"
+        done < /proc/asound/cards
+    fi
+else
+    say "1. cekirdek ALSA: YOK (CONFIG_SND kapali mi?)"
+fi
+
+# 2. Aygıt düğümleri
+if [ -d /dev/snd ]; then
+    nodes="$(ls /dev/snd 2>/dev/null | tr '\n' ' ')"
+    say "2. /dev/snd: $nodes"
+    pcm="$(ls /dev/snd/pcmC*D*p 2>/dev/null | head -1)"
+    if [ -n "$pcm" ]; then
+        say "   calma aygiti: $pcm"
+    else
+        say "   UYARI: calma (playback) aygiti YOK"
+    fi
+else
+    say "2. /dev/snd: YOK  (devtmpfs bagli mi? 'mount | grep dev')"
+fi
+
+# 3. Kullanıcı alanı araçları
+for t in aplay amixer; do
+    p="$(command -v $t 2>/dev/null)"
+    if [ -n "$p" ]; then
+        say "3. $t: $p"
+    else
+        say "3. $t: YOK"
+    fi
+done
+
+# 4. alsa-lib yapılandırması
+if [ -r /usr/share/alsa/alsa.conf ]; then
+    say "4. alsa.conf: VAR"
+else
+    say "4. alsa.conf: YOK (aplay calismaz)"
+fi
+
+# 5. Karıştırıcı durumu
+if command -v amixer >/dev/null 2>&1; then
+    for ctl in Master PCM Speaker Headphone; do
+        line="$(amixer sget "$ctl" 2>/dev/null | grep -m1 -o '\[o[nf]*\]')"
+        [ -n "$line" ] && say "5. $ctl: $line"
+    done
+    say "   (kapali ise: amixer -q sset Master 70% unmute)"
+fi
+
+# 6. Gerçek çalma denemesi
+if [ "$PLAY" = "1" ] || [ "$BOOTMODE" = "1" ]; then
+    if command -v aplay >/dev/null 2>&1; then
+        amixer -q sset Master 70% unmute 2>/dev/null
+        amixer -q sset PCM 70% unmute 2>/dev/null
+        # 0,5 sn 440 Hz: kare dalga yerine testere, /dev/urandom'dan daha
+        # tanınabilir ve saf shell ile üretilebilir.
+        # AYGIT SIRASI, panelin ses arka ucuyla AYNI (internal/sound):
+        # "default" alsa-lib'de dmix'tir ve System V semaforu ister; çekirdekte
+        # CONFIG_SYSVIPC kapalıysa "Function not implemented" ile düşer.
+        # plughw/hw dmix'i tamamen atlar.
+        say "6. deneme tonu calliniyor (0,5 sn)..."
+        played=0
+        for dev in default plughw:0,0 hw:0,0; do
+            i=0
+            {
+                while [ $i -lt 22050 ]; do
+                    printf '\125\125'
+                    i=$((i + 1))
+                done
+            } 2>/dev/null | aplay -q -D "$dev" -t raw -f S16_LE -c 1 -r 44100 - 2>/tmp/aplay.err
+            rc=$?
+            if [ "$rc" = "0" ]; then
+                say "   aplay -D $dev: TAMAM"
+                played=1
+                break
+            fi
+            say "   aplay -D $dev HATA (rc=$rc): $(head -c 160 /tmp/aplay.err 2>/dev/null)"
+        done
+        [ "$played" = "0" ] && say "   HICBIR AYGIT CALMADI"
+    else
+        say "6. deneme atlandi (aplay yok)"
+    fi
+fi
+
+say "=== bitti ==="
+
+if [ "$BOOTMODE" = "1" ]; then
+    say "normal acilisa devrediliyor"
+    exec /init
+fi

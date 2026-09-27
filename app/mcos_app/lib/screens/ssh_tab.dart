@@ -6,8 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
 import '../models/connection.dart';
+import '../services/errors.dart';
 import '../services/store.dart';
 import '../theme/palette.dart';
+import '../services/panel_text.dart';
 
 /// MCOS makinesine SSH ile bağlanan gerçek bir terminal.
 ///
@@ -112,7 +114,8 @@ class _SshTabState extends State<SshTab> {
       // UTF-8 çözücüsünü patlatıp bağlantıyı düşürmemeli.
       session.stdout.listen(
         (data) => _terminal.write(utf8.decode(data, allowMalformed: true)),
-        onError: (Object e) => _terminal.write('\r\n[okuma hatası: $e]\r\n'),
+        onError: (Object e) =>
+            _terminal.write('\r\n[okuma hatası: ${friendlyError(e)}]\r\n'),
       );
       session.stderr.listen(
         (data) => _terminal.write(utf8.decode(data, allowMalformed: true)),
@@ -158,17 +161,20 @@ class _SshTabState extends State<SshTab> {
     final s = e.toString();
     if (s.contains('All authentication methods failed') ||
         s.contains('auth')) {
-      return 'Parola kabul edilmedi.\n\nMCOS panelinde Ayarlar → SSH '
+      return 'Parola kabul edilmedi.\n\nMCOS panelinde $panelSettings → $panelSshRow '
           'ekranından bir parola koyduğunuzdan emin olun.';
     }
     if (s.contains('Connection refused')) {
       return 'Bağlantı reddedildi.\n\nMCOS panelinde SSH açık mı? '
-          'Ayarlar → SSH → "SSH sunucusunu aç".';
+          '$panelSettings → $panelSshRow → "$panelSshEnable" (ya da bu '
+          'uygulamada Ayarlar → "SSH sunucusunu aç").';
     }
     if (s.contains('timed out') || s.contains('TimeoutException')) {
       return 'Zaman aşımı. Telefon MCOS ile aynı ağda mı?';
     }
-    return 'Bağlanılamadı: $s';
+    // Tanınmayan hata: ham metni (ör. "SSHStateError: …") değil, genel
+    // eşlemenin cümlesini gösteriyoruz.
+    return friendlyError(e);
   }
 
   void _disconnect() {

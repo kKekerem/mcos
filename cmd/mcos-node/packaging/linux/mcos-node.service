@@ -1,0 +1,32 @@
+# MCOS Düğüm — systemd KULLANICI birimi.
+#
+# Kök hakkı istemez: ~/.config/systemd/user/ altına kurulur ve oturum
+# açıldığında kullanıcının kendi systemd'si başlatır. install.sh kurar.
+#
+# Oturum AÇILMADAN da çalışsın isteniyorsa (ör. ekranı olmayan bir kutu):
+#   loginctl enable-linger $USER
+[Unit]
+Description=MCOS Düğüm (bu PC'yi MCOS'a ikinci makine olarak ekler)
+Documentation=file://%h/.local/lib/mcos-node/README.txt
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/lib/mcos-node/mcos-node --arkaplan
+# Çökmede yeniden başlat; temiz çıkışta ("mcos-node --durdur") BAŞLATMA.
+Restart=on-failure
+RestartSec=15
+# Düğüm SIGTERM alınca Minecraft'a "stop" gönderir ve dünyanın kaydedilmesini
+# bekler. Varsayılan 90 sn büyük bir dünyada yetmeyebilir; yarıda kesilen
+# kayıt, bozuk bölge dosyası demektir.
+TimeoutStopSec=150
+# Birim durunca Java da dahil bütün süreç ağacı sonlanır: sahipsiz bir
+# Minecraft dünyayı kilitli tutar ve bir sonraki açılış "port kullanımda"
+# ile düşerdi.
+KillMode=mixed
+# Kullanıcının masaüstü önce gelsin: sunucu arka plan işidir.
+Nice=5
+
+[Install]
+WantedBy=default.target

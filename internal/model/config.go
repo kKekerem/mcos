@@ -36,6 +36,15 @@ type ClusterConfig struct {
 	Discovery string `json:"discovery"` // "mdns+udp"
 	Port      int    `json:"port"`      // peer protocol TCP port
 	Role      string `json:"role"`      // "auto" | "game-host" | "helper"
+	// Bind, eşleştirme portunun dinleneceği adres (boş: bütün arabirimler).
+	//
+	// Birden çok ağa bağlı bir makinede eşleştirmeyi TEK ağa sınırlamak için;
+	// ayrıca masaüstü düğümün sınamasında 127.0.0.1 verilir: Windows,
+	// bütün arabirimleri dinleyen bir programı ilk kez gördüğünde güvenlik
+	// duvarı penceresi açar ve pencere kapatılırsa KENDİLİĞİNDEN bir
+	// engelleme kuralı yazar. Geri döngü adresi bu pencereyi tetiklemez.
+	// Geri döngüde LAN keşfi (çoklu yayın) da kapalıdır.
+	Bind string `json:"bind,omitempty"`
 
 	// Secret is the pre-shared key that authorises task offloading between
 	// nodes. İlk kullanımda üretilir ve config.json'a yazılır.
@@ -91,6 +100,13 @@ type UIConfig struct {
 	Animations bool `json:"animations"`
 	// BootAnimation shows the animated splash before the panel appears.
 	BootAnimation bool `json:"bootAnimation"`
+	// Sounds plays the short effects that accompany screen transitions.
+	//
+	// Kullanıcının isteği: "bide hoparlörden efekt calsın gecis
+	// animasyonlarinda ama kapatılabilsin". Varsayılan AÇIK; kapalıyken ses
+	// arka ucu hiç aranmaz ve hiçbir örnekleme hesaplanmaz
+	// (bkz. internal/sound).
+	Sounds bool `json:"sounds"`
 }
 
 // DefaultUI returns the interface defaults.
@@ -102,6 +118,7 @@ func DefaultUI() UIConfig {
 		PointerSpeed:  100,
 		Animations:    true,
 		BootAnimation: true,
+		Sounds:        true,
 	}
 }
 
@@ -172,6 +189,8 @@ type Config struct {
 	Remote RemoteConfig `json:"remote,omitempty"`
 	// SSH, kabuk erişimi.
 	SSH SSHConfig `json:"ssh,omitempty"`
+	// VNC, ekran paylaşımı (RealVNC vb. ile bağlanma).
+	VNC VNCConfig `json:"vnc,omitempty"`
 
 	// Turbo is a single global "use everything" switch. When true the daemon
 	// ignores the resource budget, launches servers at high priority across all
@@ -210,6 +229,44 @@ type RemoteConfig struct {
 	// yalnızca kök tarafından okunabilir (0600). Paneldeki "jetonu yenile"
 	// eylemi bunu değiştirir ve eski telefonların erişimini keser.
 	Token string `json:"token,omitempty"`
+}
+
+// VNCConfig controls the RFB screen-sharing server.
+//
+// ── Neden varsayılan KAPALI ─────────────────────────────────────────────────
+//
+// Ekran paylaşımı, panelin TAM DENETİMİNİ ağa açar: uzaktaki kullanıcı
+// klavyeyi ve fareyi kullanabilir. Üstelik RFB trafiği ŞİFRESİZDİR ve VNC
+// kimlik doğrulaması 8 karakterlik bir parolayı tek DES bloğuyla korur.
+//
+// Bu yüzden: varsayılan kapalı, parola zorunlu, panel bunu ekranda açıkça
+// yazıyor ve internete açmak için SSH tüneli öneriliyor.
+type VNCConfig struct {
+	Enabled bool `json:"enabled,omitempty"`
+	// Port, dinlenen TCP portu. 0 ise varsayılan (5900) kullanılır.
+	Port int `json:"port,omitempty"`
+	// Password, VNC kimlik doğrulamasında kullanılan paroladır.
+	//
+	// DİKKAT: RFB protokolü parolayı 8 BAYTA KIRPAR. Daha uzun bir parola
+	// sessizce kısalır; bu yüzden MCOS 8 karakterlik bir parola üretir ve
+	// kullanıcıdan uzun bir parola istemez (sahte güvenlik olurdu).
+	Password string `json:"password,omitempty"`
+	// ViewOnly, uzaktaki kullanıcının yalnızca İZLEMESİNİ sağlar.
+	//
+	// Kullanışlı: birine ekranı göstermek ile makineyi teslim etmek farklı
+	// şeylerdir.
+	ViewOnly bool `json:"viewOnly,omitempty"`
+}
+
+// DefaultVNCPort is the standard VNC display :0 port.
+const DefaultVNCPort = 5900
+
+// Normalize fills in defaults without changing a deliberate choice.
+func (v VNCConfig) Normalize() VNCConfig {
+	if v.Port <= 0 || v.Port > 65535 {
+		v.Port = DefaultVNCPort
+	}
+	return v
 }
 
 // Normalize fills in defaults without changing a deliberate choice.

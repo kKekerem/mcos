@@ -1,0 +1,72 @@
+#!/bin/sh
+# mcos-stage — açılış ekranına GERÇEK ilerlemeyi bildirir.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# NEDEN VAR
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Açılış ekranındaki ilerleme halkası eskiden GERÇEK DEĞİLDİ: yüzde yalnızca
+# geçen süreden türetiliyordu (92 * (1 - e^(-t/4))). Hızlı bir makinede panel
+# %40'ta açılıyor, yavaş bir makinede halka %92'de donup bekliyordu.
+#
+# Kullanıcının isteği: "acılıs ekranındaki her sey gercek olsun".
+#
+# Artık her adım BİTTİĞİNDE onu bitiren betik buraya haber veriyor ve yüzde
+# gerçekten tamamlanan işten geliyor.
+#
+# ════════════════════════════════════════════════════════════════════════════
+# AŞAMA TABLOSU — tek kaynak
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Yüzdeler ÖLÇÜLEN sürelere göre dağıtıldı (QEMU, donanım hızlandırması yok):
+#
+#   initramfs açıldı, /init çalışıyor          5    (çekirdek işi bitti)
+#   çekirdek dosya sistemleri bağlandı        12
+#   kalıcı depolama çözüldü                   22    (S03mcosdata, ~0,3 sn)
+#   sistem günlüğü + sysctl                   30
+#   ağ arabirimleri                           45    (S40network, ~0,6 sn)
+#   daemon başlatıldı                         60    (S99mcos, ~1,7 sn)
+#   yazı tipleri hazır                        72
+#   daemon yanıt veriyor                      85
+#   panel açılıyor                            95
+#   hazır                                    100    (panel devralır)
+#
+# Ara değer yazmak serbesttir; tablo yalnızca sıralamayı tutarlı tutmak için.
+#
+# Kullanım:
+#   mcos-stage 45 "Ağ başlatılıyor…"
+#   mcos-stage boot                 # ad ile (tablodaki yüzdeyi kullanır)
+#
+# Yazma ATOMİKTİR: açılış ekranı dosyayı 33 ms'de bir okuyor ve yarım yazılmış
+# bir satır okumamalı.
+
+STAGE_DIR="/dev/.mcos"
+STAGE_FILE="$STAGE_DIR/stage"
+
+pct="${1:-}"
+msg="${2:-}"
+
+# Ad ile çağrı: tablodan yüzde ve metin.
+case "$pct" in
+    init)     pct=5;   msg="${msg:-Sistem başlatılıyor…}" ;;
+    mounts)   pct=12;  msg="${msg:-Dosya sistemleri bağlanıyor…}" ;;
+    storage)  pct=22;  msg="${msg:-Kalıcı depolama hazırlanıyor…}" ;;
+    services) pct=30;  msg="${msg:-Servisler başlatılıyor…}" ;;
+    network)  pct=45;  msg="${msg:-Ağ başlatılıyor…}" ;;
+    daemon)   pct=60;  msg="${msg:-Sunucu yöneticisi başlatılıyor…}" ;;
+    fonts)    pct=72;  msg="${msg:-Yazı tipleri hazırlanıyor…}" ;;
+    ready)    pct=85;  msg="${msg:-Sunucular denetleniyor…}" ;;
+    panel)    pct=95;  msg="${msg:-Panel açılıyor…}" ;;
+    done)     pct=100; msg="${msg:-Hazır}" ;;
+esac
+
+case "$pct" in
+    ''|*[!0-9]*) exit 0 ;;   # geçersiz çağrı açılışı DURDURMAZ
+esac
+
+mkdir -p "$STAGE_DIR" 2>/dev/null || exit 0
+# Atomik: geçici dosyaya yaz, sonra taşı.
+tmp="$STAGE_FILE.$$"
+printf '%s|%s\n' "$pct" "$msg" > "$tmp" 2>/dev/null || exit 0
+mv -f "$tmp" "$STAGE_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+exit 0

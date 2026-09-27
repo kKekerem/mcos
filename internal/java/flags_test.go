@@ -39,11 +39,15 @@ func TestJVMArgsTurbo(t *testing.T) {
 			t.Errorf("turbo args missing aikar base %q in %v", want, args)
 		}
 	}
-	// ...and adds the throughput extras.
-	for _, want := range []string{"-XX:+UseNUMA", "-XX:ParallelGCThreads=", "-XX:ConcGCThreads="} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("turbo args missing %q in %v", want, args)
+	// ...ve ÜRETİMİ BOĞAN "iş hacmi" bayraklarını EKLEMEZ (kullanıcı: turbo
+	// açınca Chunky 50 -> 30 cps). GC iş parçacıklarını JVM seçer.
+	for _, yasak := range []string{"-XX:+UseNUMA", "-XX:ParallelGCThreads=", "-XX:ConcGCThreads=", "UseStringDeduplication"} {
+		if strings.Contains(joined, yasak) {
+			t.Errorf("turbo %q ekliyor (parça üretim işçilerinden CPU çalar): %v", yasak, args)
 		}
+	}
+	if !strings.Contains(joined, "-XX:+UseTransparentHugePages") {
+		t.Errorf("Java 21'de büyük sayfa bayrağı yok: %v", args)
 	}
 }
 

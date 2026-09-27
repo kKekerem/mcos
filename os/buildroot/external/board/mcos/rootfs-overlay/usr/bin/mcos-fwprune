@@ -1,0 +1,68 @@
+#!/bin/sh
+# mcos-fwprune — bu makinede HİÇ kullanılmayan büyük firmware'leri RAM'den siler.
+#
+# NEDEN: MCOS'un kök dosya sistemi RAM'dedir (initramfs). /lib/firmware
+# ~238 MB tutuyor ve bunun çoğu makinede bulunmayan kartlar için: iwlwifi
+# 105 MB, amdgpu 78 MB, ath11k 16 MB... Bu bellek hiçbir zaman geri
+# alınmıyordu. Kullanıcı sunucusunu açınca "işlem kesildi, çıkış kodu -1,
+# signal: killed" gördü: çekirdek, bellek bittiği için Java'yı öldürüyordu
+# (bkz. internal/server/memfit.go). Kullanılmayan firmware'i silmek bu belleği
+# sunuculara geri verir (tmpfs'te silinen dosyanın sayfaları serbest kalır).
+#
+# GÜVENLİK: yalnızca sürücüsü KAYITLI ama ona bağlı HİÇBİR aygıt olmayan PCIe
+# aileleri silinir. Yerleşik sürücüler aygıtlarını çekirdek açılışında, bu
+# betik çalışmadan çok önce bağlar; bağlı aygıtı olan ailenin firmware'ine
+# dokunulmaz. Sonradan takılabilen USB Wi-Fi çubuklarının firmware'i (mt76,
+# rtl8xxxu, ath9k_htc, brcm, rtw88 USB) SİLİNMEZ. Bilinen tek sınır: açılıştan
+# sonra Thunderbolt ile takılan harici AMD ekran kartı (yeniden başlatınca
+# çalışır).
+
+FW=/lib/firmware
+toplam=0
+
+# bagli_aygit_yok DRIVER_DIZINI...: sürücülerin hepsi kayıtlıysa ve hiçbirine
+# aygıt bağlı değilse 0 döner. Sürücü dizini YOKSA güvenli tarafta kalınır.
+bagli_aygit_yok() {
+    for d in "$@"; do
+        [ -d "$d" ] || return 1
+        for a in "$d"/*; do
+            case "$(basename "$a")" in
+                [0-9]*:*|[0-9]*-*) return 1 ;;   # PCI 0000:03:00.0, USB 1-2:1.0
+            esac
+        done
+    done
+    return 0
+}
+
+sil() {
+    # $@ = silinecek yollar (glob açılmış)
+    mb=0
+    for y in "$@"; do
+        [ -e "$y" ] || continue
+        k=$(du -sk "$y" 2>/dev/null | cut -f1)
+        mb=$((mb + ${k:-0} / 1024))
+        rm -rf "$y"
+    done
+    toplam=$((toplam + mb))
+    [ "$mb" -gt 0 ] && echo "mcos-fwprune: $AD silindi (${mb} MB) — bu makinede aygıtı yok"
+}
+
+P=/sys/bus/pci/drivers
+AD=amdgpu;  bagli_aygit_yok "$P/amdgpu"      && sil "$FW/amdgpu"
+AD=radeon;  bagli_aygit_yok "$P/radeon"      && sil "$FW/radeon"
+AD=iwlwifi; bagli_aygit_yok "$P/iwlwifi"     && sil "$FW"/iwlwifi-*
+AD=ath11k;  bagli_aygit_yok "$P/ath11k_pci"  && sil "$FW/ath11k"
+# ath10k'nın SDIO/USB türleri de var: onlar da boşsa sil.
+AD=ath10k
+if bagli_aygit_yok "$P/ath10k_pci"; then
+    ek=""
+    [ -d /sys/bus/sdio/drivers/ath10k_sdio ] && ek="$ek /sys/bus/sdio/drivers/ath10k_sdio"
+    [ -d /sys/bus/usb/drivers/ath10k_usb ] && ek="$ek /sys/bus/usb/drivers/ath10k_usb"
+    # shellcheck disable=SC2086
+    if [ -z "$ek" ] || bagli_aygit_yok $ek; then
+        sil "$FW/ath10k"
+    fi
+fi
+
+echo "mcos-fwprune: toplam ${toplam} MB bellek sunuculara bırakıldı"
+exit 0

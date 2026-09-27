@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"mcos/internal/fbui"
+	"mcos/internal/model"
 )
 
 // Sunucu oluşturma sihirbazının sayfa gövdeleri.
@@ -35,21 +36,24 @@ func (a *App) drawWizardBody(w *Wizard, body image.Rectangle, y int) int {
 		// anında okunabiliyordu: uyuşmayan işaretçi/uzunluk çifti ekranda
 		// bozuk metin, kötü durumda da metin çizicide sınır dışı okuma
 		// demekti. Artık hepsi TEK kilitte kopyalanıp öyle çiziliyor.
-		note, loaded, count := a.wizVersionView(w)
-		if !loaded && note == "" {
+		v := a.wizVersionView(w)
+		if !v.loaded && v.note == "" {
 			u.Spinner(body.Min.X, y, a.Spin(), u.Pal.Accent)
 			u.Text(body.Min.X+u.F.CellW+u.M.Gap, y,
-				"Mojang sürüm listesi alınıyor…", u.Pal.TextDim)
+				string(v.software)+" sürüm listesi alınıyor…", u.Pal.TextDim)
 			return y + u.F.CellH + u.M.PadY*2
 		}
-		if note != "" {
+		if v.note != "" {
 			u.WarnTriangle(body.Min.X, y, u.Pal.Warn)
-			u.Text(body.Min.X+u.F.CellW+u.M.Gap, y, note, u.Pal.Warn)
+			u.Text(body.Min.X+u.F.CellW+u.M.Gap, y, v.note, u.Pal.Warn)
 			return y + u.F.CellH + u.M.PadY*2
 		}
-		u.Text(body.Min.X, y,
-			fmt.Sprintf("%d sürüm listelendi.", count), u.Pal.TextFaint)
-		return y + u.F.CellH + u.M.PadY
+		// Liste YAZILIMA göre: hangi yazılımın listesi olduğu yazılır,
+		// çünkü sayfa yazılım seçiminden ÖNCE geliyor ve varsayılan
+		// yazılımın (Paper) listesini gösteriyor.
+		u.Text(body.Min.X, y, wizVersionCount(v.count, v.software), u.Pal.TextFaint)
+		y += u.F.CellH + u.M.PadY
+		return a.drawWizardVersionWarnings(v, body, y)
 
 	case wizSoftware:
 		sw := w.software()
@@ -65,6 +69,13 @@ func (a *App) drawWizardBody(w *Wizard, body image.Rectangle, y int) int {
 			y = a.hint(body, y,
 				"Ortak dünya (MCOS Link) yalnızca mod yükleyen sürümlerde",
 				"çalışır — Fabric önerilir.")
+		}
+		// Yazılım değişince sürüm listesi de değişir; seçilen sürüm yeni
+		// yazılımda yoksa bunu TAM BURADA, değişikliğin yapıldığı sayfada
+		// söyle (sol/sağ ile gezen kullanıcı buradadır).
+		if v := a.wizVersionView(w); v.subst != "" {
+			y += u.M.PadY
+			y = a.drawWizardVersionWarnings(wizVerView{subst: v.subst}, body, y)
 		}
 		return y + u.M.PadY
 
@@ -122,6 +133,57 @@ func (a *App) drawWizardBody(w *Wizard, body image.Rectangle, y int) int {
 	return y
 }
 
+// drawWizardVersionWarnings draws the per-software version notes.
+//
+// İki durum (bkz. applyVersions): açık seçim yeni yazılımda yoktu ve yerine
+// en yakını seçildi; ya da liste yazılımın kendi kaynağından değil yedekten
+// geldi (ağ yok) — o zaman listedeki bir sürüm kurulumda "Desteklenen
+// sürümler: …" hatasıyla düşebilir ve kullanıcı bunu ÖNCEDEN bilmeli.
+func (a *App) drawWizardVersionWarnings(v wizVerView, body image.Rectangle, y int) int {
+	u := a.ui
+	x := body.Min.X + u.F.CellW + u.M.Gap
+	for _, uy := range wizVersionWarnings(v) {
+		u.WarnTriangle(body.Min.X, y, u.Pal.Warn)
+		u.Text(x, y, uy.ana, u.Pal.Warn)
+		y += u.F.CellH
+		if uy.alt != "" {
+			u.Text(x, y, uy.alt, u.Pal.TextFaint)
+			y += u.F.CellH
+		}
+		y += u.M.PadY
+	}
+	return y
+}
+
+// wizUyari is one version warning: ana satır uyarı üçgeniyle, alt satır
+// (boş değilse) altında soluk açıklama.
+type wizUyari struct{ ana, alt string }
+
+// wizVersionWarnings returns the version warnings drawWizardVersionWarnings
+// draws, in order.
+//
+// Metinler çizimden AYRI üretiliyor ki ekran sınaması, gövdeye sığıp
+// sığmadığını ÇİZİLEN metinlerle denetlesin; sınama kendi kopyasını
+// ölçseydi, buradaki metin uzayınca taşma yine görünmezdi.
+func wizVersionWarnings(v wizVerView) []wizUyari {
+	var out []wizUyari
+	if v.subst != "" {
+		out = append(out, wizUyari{ana: v.subst + "."})
+	}
+	if v.fallback {
+		out = append(out, wizUyari{
+			ana: "Yedek liste: " + string(v.software) + " sürüm listesi alınamadı.",
+			alt: "Bazı sürümler bu yazılımda olmayabilir.",
+		})
+	}
+	return out
+}
+
+// wizVersionCount is the "N <yazılım> sürümü listelendi." line.
+func wizVersionCount(n int, sw model.Software) string {
+	return fmt.Sprintf("%d %s sürümü listelendi.", n, sw)
+}
+
 // drawWizardSummary lists every choice before creating.
 func (a *App) drawWizardSummary(w *Wizard, body image.Rectangle, y int) int {
 	u := a.ui
@@ -164,6 +226,10 @@ func (a *App) drawWizardSummary(w *Wizard, body image.Rectangle, y int) int {
 		{"Tünel", onOff(w.wan), u.Pal.Text},
 	})
 	y += u.M.PadY
+	// Sürüm uyarıları özette de: yazılım seçimi sayfayı kendiliğinden
+	// ilerlettiği için (autoNext) kullanıcı yazılım sayfasındaki uyarıyı
+	// görmeden geçmiş olabilir.
+	y = a.drawWizardVersionWarnings(a.wizVersionView(w), body, y)
 
 	if w.creating {
 		u.Spinner(body.Min.X, y, a.Spin(), u.Pal.Accent)

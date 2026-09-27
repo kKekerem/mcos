@@ -143,10 +143,19 @@ fi
 
 echo "== 5. Çekirdek açılışı GÖZLEMLENEBİLİR =="
 
-if grep -qE '^MCOS_CMDLINE_BASE=.*loglevel=[6-7]' "$DISPLAY_LIB"; then
-    pass "loglevel >= 6: açılış kaydı ekranda akıyor (siyah ekran değil)"
+# ── DEĞİŞEN KURAL ──────────────────────────────────────────────────────────
+#
+# Bu test eskiden loglevel >= 6 İSTİYORDU: animasyon geç başlıyordu ve ekranda
+# akan çekirdek kaydı, "makine donmadı" demenin tek yoluydu.
+#
+# Animasyon artık initramfs'in /init'inden başlıyor (aşağıdaki 12. bölüm), yani
+# doldurulacak bir boşluk yok. Kullanıcının isteği de netti: "acılırken linux
+# logları felan gözükmesin". Şimdi TERSİ denetleniyor.
+if grep -qE '^MCOS_CMDLINE_BASE=.*quiet' "$DISPLAY_LIB" &&
+        grep -qE '^MCOS_CMDLINE_BASE=.*loglevel=[0-3]' "$DISPLAY_LIB"; then
+    pass "çekirdek sessiz (quiet + loglevel<=3): ekrana log düşmüyor"
 else
-    fail "loglevel < 6: çekirdek hiçbir şey yazmaz, ekran siyah kalır"
+    fail "çekirdek hâlâ ekrana log basıyor — kullanıcı bunu istemedi"
 fi
 
 echo "== 6. Her açılışta SSH anahtarı üretilmiyor =="
@@ -183,6 +192,60 @@ if code "$MCOSSH" | grep -qE '^\s*sleep 1\s*$'; then
     fail "S99mcos hâlâ 'sleep 1' ile bekliyor (her açılışta bir saniye)"
 else
     pass "S99mcos gereksiz beklemeden arınmış"
+fi
+
+echo
+echo "== 12. animasyon EN ERKEN noktada basliyor =="
+
+INIT="$OVERLAY/init"
+if [ -f "$INIT" ]; then
+    if grep -q 'start_early_splash' "$INIT"; then
+        pass "initramfs /init animasyonu baslatiyor (userspace'in ilk ani)"
+    else
+        fail "animasyon hala busybox init'i bekliyor — ~8 sn log gorunur"
+    fi
+    if grep -q 'mount -t devtmpfs devtmpfs /dev' "$INIT"; then
+        pass "/init devtmpfs'i bagliyor (fb0 olmadan animasyon cizilemez)"
+    else
+        fail "/init /dev'i baglamiyor — /dev/fb0 bulunamaz"
+    fi
+    if grep -q 'echo 0 > /proc/sys/kernel/printk' "$INIT"; then
+        pass "printk susturuluyor (sonradan yuklenen suruculer de yazmasin)"
+    else
+        fail "printk susturulmuyor — animasyonun ustune mesaj dusebilir"
+    fi
+else
+    fail "initramfs /init dosyasi yok"
+fi
+
+# Koordinasyon dosyalari /run'da OLMAMALI: inittab'in "mount -a" satiri
+# birkac saniye sonra oranin ustune tmpfs bagliyor ve erken yazilanlar
+# gorunmez oluyor.
+for f in "$SPLASH" "$LAUNCH" "$INIT"; do
+    [ -f "$f" ] || continue
+    if grep -vE '^[[:space:]]*#' "$f" | grep -qE '(/run/mcos-splash|/run/mcos-boot)'; then
+        fail "$(basename "$f") hala /run altindaki animasyon dosyalarini kullaniyor"
+    else
+        pass "$(basename "$f") /dev/.mcos kullaniyor (tmpfs ile ezilmez)"
+    fi
+done
+
+if [ -x "$OVERLAY/usr/bin/mcos-stage" ]; then
+    pass "mcos-stage var ve calistirilabilir"
+else
+    fail "mcos-stage yok — ilerleme yuzdesi gercek olamaz"
+fi
+
+# Ilerleme GERCEK mi: asama bildirimi yapan en az uc ayri yer olmali.
+n=0
+for f in "$INIT" "$OVERLAY/etc/init.d/S03mcosdata" "$OVERLAY/etc/init.d/S99mcos" "$LAUNCH"; do
+    [ -f "$f" ] || continue
+    grep -q 'mcos-stage' "$f" && n=$((n + 1))
+done
+if [ "$n" -ge 3 ]; then
+    pass "gercek asama bildirimi $n ayri yerden geliyor"
+else
+    fail "yalnizca $n yerde asama bildirimi var — yuzde gercek degil"
 fi
 
 echo

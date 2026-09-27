@@ -80,5 +80,24 @@ func writeJSON(path string, v any) error {
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("store: rename %s -> %s: %w", tmpName, path, err)
 	}
+	// ── Düzeltilen gerçek hata: DİZİN fsync'lenmiyordu ──────────────────────
+	//
+	// İçerik fsync'leniyor (yukarıda tmp.Sync) ve rename atomik — ama rename'in
+	// KENDİSİ dosya sistemi günlüğüne yazılana kadar kalıcı değildir. Elektrik
+	// kesilirse (ya da kullanıcı güç düğmesini basılı tutarsa) dizin girdisi
+	// eski hâlinde kalabilir; ext4'ün varsayılan data=ordered kipinde en kötü
+	// sonuç, config.json'ın SIFIR BAYT ya da hiç olmaması.
+	//
+	// Bu, bir sunucu appliance'ında sıradan bir senaryodur: makine kapanmak
+	// yerine fişten çekilir. Kaybedilen dosya ise kullanıcının Wi-Fi parolası,
+	// teması, düğüm kimliği ve sunucu kayıt defteri.
+	//
+	// Dizini açıp fsync etmek bunu kapatır. Hata YUTULUYOR: bazı dosya
+	// sistemleri (ör. bazı FAT sürücüleri) dizin fsync'ini desteklemez ve
+	// orada başarısız olması yazmayı geçersiz kılmaz.
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
 	return nil
 }

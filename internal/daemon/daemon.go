@@ -58,8 +58,22 @@ type Daemon struct {
 
 	// remoteSt, telefon uygulamasinin bagli oldugu HTTPS koprusu.
 	remoteSt remoteState
+	// wifiScan, canli kablosuz taramasinin oturumu (bkz. handlers_net.go).
+	// TEMBEL kurulur: tarama hic istenmezse hicbir sey ayrilmaz.
+	wifiScan *wifiScanSession
+	// peerScan, canli LAN tarama oturumu (bkz. handlers_link.go).
+	peerScan *peerScanSession
+	// vncSt, ekran paylasimi (RFB). TEMBEL kurulur: kapaliyken hicbir sey
+	// acilmaz (bkz. handlers_vnc.go).
+	vncSt vncState
 	// ssh, kabuk erisimi (dropbear).
 	ssh *sshd.Manager
+	// turboSt, donanim turbosu (frekans, fanlar, P-cekirdekleri); bkz.
+	// handlers_turbo.go. TEMBEL kurulur.
+	turboSt turboState
+	// backupSt, otomatik yedek zamanlayıcısının süreç içi belleği (bkz.
+	// backup_auto.go).
+	backupSt autoBackupState
 	// rpc, kendi yontem tablomuz. Uzaktan kontrol koprusu AYNI tabloyu
 	// kullanir; ayri bir tablo tutmak, iki yolun zamanla ayrismasi demekti.
 	rpc *ipc.Server
@@ -114,6 +128,8 @@ func New(cfgPath, dataRoot string, lg *log.Logger) (*Daemon, error) {
 	// Cluster needs an Executor that runs real work via the daemon's
 	// subsystems, so it is wired after d exists.
 	d.cluster = cluster.NewManager(cfg.Cluster, Version, st, lg, taskExecutor{d})
+	// Kardeş kopyaya hangi düğüm olduğunu söyleyen ortam (MCOS_LINK_SELF).
+	sm.ExtraEnv = d.instanceEnv
 	return d, nil
 }
 
@@ -146,6 +162,12 @@ func (d *Daemon) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodRemoteDisable, d.handleRemoteDisable)
 	s.Handle(ipc.MethodRemoteRotate, d.handleRemoteRotate)
 
+	s.Handle(ipc.MethodVNCStatus, d.handleVNCStatus)
+	s.Handle(ipc.MethodVNCEnable, d.handleVNCEnable)
+	s.Handle(ipc.MethodVNCDisable, d.handleVNCDisable)
+	s.Handle(ipc.MethodVNCRotate, d.handleVNCRotate)
+	s.Handle(ipc.MethodVNCViewOnly, d.handleVNCViewOnly)
+
 	s.Handle(ipc.MethodSSHStatus, d.handleSSHStatus)
 	s.Handle(ipc.MethodSSHEnable, d.handleSSHEnable)
 	s.Handle(ipc.MethodSSHDisable, d.handleSSHDisable)
@@ -158,12 +180,16 @@ func (d *Daemon) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodSystemTurbo, d.handleSystemTurbo)
 	s.Handle(ipc.MethodSystemDisks, d.handleSystemDisks)
 	s.Handle(ipc.MethodSystemPersist, d.handleSystemPersist)
+	s.Handle(ipc.MethodSystemUpdateScan, d.handleSystemUpdateScan)
+	s.Handle(ipc.MethodSystemUpdate, d.handleSystemUpdate)
+	s.Handle(ipc.MethodSystemUpdateStatus, d.handleSystemUpdateStatus)
 	s.Handle(ipc.MethodConfigGet, d.handleConfigGet)
 	s.Handle(ipc.MethodConfigSet, d.handleConfigSet)
 
 	s.Handle(ipc.MethodServerList, d.handleServerList)
 	s.Handle(ipc.MethodServerGet, d.handleServerGet)
 	s.Handle(ipc.MethodServerCreate, d.handleServerCreate)
+	s.Handle(ipc.MethodServerPerfPack, d.handleServerPerfPack)
 	s.Handle(ipc.MethodServerUpdate, d.handleServerUpdate)
 	s.Handle(ipc.MethodServerDelete, d.handleServerDelete)
 	s.Handle(ipc.MethodServerInstall, d.handleServerInstall)
@@ -178,6 +204,9 @@ func (d *Daemon) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodCatalogInstall, d.handleCatalogInstall)
 	s.Handle(ipc.MethodServerScanUSBMods, d.handleServerScanUSBMods)
 	s.Handle(ipc.MethodServerInstallUSBMods, d.handleServerInstallUSBMods)
+	s.Handle(ipc.MethodServerScanUSBFolders, d.handleServerScanUSBFolders)
+	s.Handle(ipc.MethodServerImportUSB, d.handleServerImportUSB)
+	s.Handle(ipc.MethodServerImportFolder, d.handleServerImportFolder)
 
 	s.Handle(ipc.MethodJavaList, d.handleJavaList)
 	s.Handle(ipc.MethodJavaResolve, d.handleJavaResolve)
@@ -190,6 +219,8 @@ func (d *Daemon) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodBackupCreate, d.handleBackupCreate)
 	s.Handle(ipc.MethodBackupRestore, d.handleBackupRestore)
 	s.Handle(ipc.MethodBackupDelete, d.handleBackupDelete)
+	s.Handle(ipc.MethodBackupPolicy, d.handleBackupPolicy)
+	s.Handle(ipc.MethodBackupSetPolicy, d.handleBackupSetPolicy)
 
 	s.Handle(ipc.MethodFilesList, d.handleFilesList)
 	s.Handle(ipc.MethodFilesRead, d.handleFilesRead)
@@ -205,8 +236,13 @@ func (d *Daemon) Register(s *ipc.Server) {
 
 	s.Handle(ipc.MethodClusterPeers, d.handleClusterPeers)
 	s.Handle(ipc.MethodClusterPair, d.handleClusterPair)
+	s.Handle(ipc.MethodClusterPairOffer, d.handleClusterPairOffer)
+	s.Handle(ipc.MethodClusterPairConfirm, d.handleClusterPairConfirm)
+	s.Handle(ipc.MethodClusterPairCancel, d.handleClusterPairCancel)
 	s.Handle(ipc.MethodClusterTasks, d.handleClusterTasks)
 	s.Handle(ipc.MethodClusterScan, d.handleClusterScan)
+	s.Handle(ipc.MethodClusterScanStart, d.handleClusterScanStart)
+	s.Handle(ipc.MethodClusterScanStatus, d.handleClusterScanStatus)
 	s.Handle(ipc.MethodClusterPairManual, d.handleClusterPairManual)
 	s.Handle(ipc.MethodClusterSecret, d.handleClusterSecret)
 
@@ -221,9 +257,12 @@ func (d *Daemon) Register(s *ipc.Server) {
 	s.Handle(ipc.MethodPlayitStart, d.handlePlayitStart)
 	s.Handle(ipc.MethodPlayitStop, d.handlePlayitStop)
 	s.Handle(ipc.MethodPlayitInstall, d.handlePlayitInstall)
+	s.Handle(ipc.MethodPlayitTunnel, d.handlePlayitTunnel)
 
 	s.Handle(ipc.MethodServerVersions, d.handleServerVersions)
 	s.Handle(ipc.MethodNetWiFiScan, d.handleNetWiFiScan)
+	s.Handle(ipc.MethodNetWiFiScanStart, d.handleNetWiFiScanStart)
+	s.Handle(ipc.MethodNetWiFiScanStatus, d.handleNetWiFiScanStatus)
 	s.Handle(ipc.MethodNetWiFiApply, d.handleNetWiFiApply)
 	s.Handle(ipc.MethodNetWiredUp, d.handleNetWiredUp)
 
@@ -254,9 +293,23 @@ func (d *Daemon) Run(ctx context.Context) {
 			d.log.Warnf("sshd: acilista baslatilamadi: %v", err)
 		}
 	}
+	// Ekran paylasimi da yeniden baslatmayi atlatmali: uzaktan baglanip
+	// makineyi yeniden baslatan kullanici, ekrani bir daha goremezse
+	// makinenin basina gitmek zorunda kalir.
+	if vncConfigured(d.Config()) {
+		if err := d.startVNC(); err != nil {
+			d.log.Warnf("vnc: acilista baslatilamadi: %v", err)
+		}
+	}
 
+	// Turbo, autostart'tan ONCE: acilista baslayan sunucular baslatma
+	// kancasiyla dogrudan P-cekirdeklerinde dogsun (bkz. handlers_turbo.go).
+	d.turboStartup(ctx)
 	d.autostart(ctx)
 	go d.backupScheduler(ctx)
+	// WinSCP: /data/sunucular altında adlı bağlar ve yüklenen klasörlerin içe
+	// aktarımı (bkz. handlers_sftp.go).
+	go d.sftpLoop(ctx)
 	go d.clusterWorkLoop(ctx)
 	<-ctx.Done()
 	d.log.Infof("daemon: shutting down, stopping all servers")
@@ -264,10 +317,14 @@ func (d *Daemon) Run(ctx context.Context) {
 		c.Stop()
 	}
 	d.stopRemote()
+	d.stopVNC()
 	d.ssh.Stop()
 	d.playitStop()
 	d.cluster.Stop()
 	d.sup.StopAll()
+	// Sunucular dunyayi tam hizda kaydettikten SONRA: fanlar otomatige,
+	// frekans ayarlari ozgun haline doner.
+	d.turboShutdown()
 }
 
 // applyClusterFromConfig starts or stops the LAN cluster to match
@@ -309,6 +366,10 @@ func (d *Daemon) applyClusterFromConfig() {
 	}
 
 	d.cluster.SetSecret(cfg.Cluster.Secret)
+	// Ad ÇALIŞIRKEN de uygulanır: eskiden yalnızca açılışta okunuyordu ve
+	// sihirbazda verilen ad bir sonraki yeniden başlatmaya kadar eşlere
+	// "mcos-1" olarak gidiyordu (bkz. cluster.SetNodeName).
+	d.cluster.SetNodeName(cfg.Cluster.NodeName)
 	if d.cluster.Running() {
 		return
 	}
@@ -328,96 +389,8 @@ func randomSecret() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// backupScheduler runs auto-backups on each server's configured interval and
-// enforces the retention count. Schedule is a Go duration string ("30m", "6h",
-// "24h"); empty disables it. Backups are submitted as cluster tasks so they go
-// through the same executor path (and stay local — they need the server data).
-func (d *Daemon) backupScheduler(ctx context.Context) {
-	tk := time.NewTicker(1 * time.Minute)
-	defer tk.Stop()
-	// last, yalnızca bu süreçte alınan yedekleri izler. Zamanlama kararı DİSKTEN
-	// okunan en son yedek zamanına dayanır (lastBackupTime): eskiden bu harita
-	// tek gerçek kaynaktı ve her daemon yeniden başlatmasında sıfırlanıyordu;
-	// "seed" dalı bir aralık daha beklettiği için sık yeniden başlayan bir
-	// cihazda otomatik yedek HİÇ alınmıyordu.
-	last := map[string]time.Time{}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-tk.C:
-			servers, err := d.store.ListServers()
-			if err != nil {
-				continue
-			}
-			for _, srv := range servers {
-				if !srv.Backup.Auto || strings.TrimSpace(srv.Backup.Schedule) == "" {
-					continue
-				}
-				every, perr := time.ParseDuration(strings.TrimSpace(srv.Backup.Schedule))
-				if perr != nil || every <= 0 {
-					continue
-				}
-
-				ref, ok := last[srv.ID]
-				if !ok {
-					// Süreç içi kayıt yok — diskteki en son yedeğe bak.
-					ref, ok = d.lastBackupTime(srv.ID)
-				}
-				if ok && now.Sub(ref) < every {
-					continue
-				}
-				if !ok {
-					// Hiç yedek yok: hemen bir tane al, böylece ilk yedek için
-					// bir tam aralık beklenmez.
-					d.log.Infof("backup: %s için ilk otomatik yedek alınıyor", srv.ID)
-				}
-
-				last[srv.ID] = now
-				d.cluster.SubmitTask(model.Task{
-					ID: generateTaskID(), Kind: model.TaskBackup, State: model.TaskQueued,
-					ServerID: srv.ID, Params: map[string]string{"name": ""}, CreatedAt: now,
-				})
-				// NOT: budama artık BURADA yapılmıyor. Görev henüz kuyruğa
-				// alındı, yedek üretilmedi; hemen budamak bir tur gecikmeli
-				// çalışıyordu. Budama, yedek gerçekten oluştuktan sonra
-				// aşağıdaki turda yapılır.
-			}
-
-			// Retention'ı her turda uygula: bu noktada önceki turların yedekleri
-			// diskte hazırdır.
-			for _, srv := range servers {
-				if srv.Backup.Keep > 0 {
-					d.pruneBackups(srv)
-				}
-			}
-		}
-	}
-}
-
-// lastBackupTime returns the creation time of the newest backup on disk.
-// Daemon yeniden başlatmalarına dayanıklı zamanlama için tek gerçek kaynak.
-func (d *Daemon) lastBackupTime(serverID string) (time.Time, bool) {
-	list, err := d.backup.List(serverID) // en yeni ilk
-	if err != nil || len(list) == 0 {
-		return time.Time{}, false
-	}
-	return list[0].CreatedAt, true
-}
-
-// pruneBackups deletes the oldest backups beyond the server's Keep count.
-func (d *Daemon) pruneBackups(srv *model.Server) {
-	if srv.Backup.Keep <= 0 {
-		return
-	}
-	list, err := d.backup.List(srv.ID) // newest-first
-	if err != nil {
-		return
-	}
-	for i := srv.Backup.Keep; i < len(list); i++ {
-		_ = d.backup.Delete(srv.ID, list[i].ID)
-	}
-}
+// backupScheduler, lastBackupTime ve pruneBackups backup_auto.go'ya taşındı
+// (otomatik yedek planı saat/gün aralığı ve günün saatiyle genişledi).
 
 // clusterWorkLoop periodically generates data-light optimization work
 // (log analysis) for running cluster-share servers. When a paired helper is
@@ -465,5 +438,24 @@ func (d *Daemon) autostart(ctx context.Context) {
 		d.log.Errorf("daemon: autostart list: %v", err)
 		return
 	}
+	// Kardeşler kendi başına açılmaz; bölünmüş ana sunucunun kopyaları ana
+	// AÇILMADAN hazırlanır (ortak dünya kipi ve tohum ana sunucunun
+	// server.properties'ine açılışta yazılıyor), ana açıldıktan sonra açılır.
+	servers = model.HideSiblings(servers)
+	pending := map[string][]*model.Server{}
+	for _, s := range servers {
+		if !s.Autostart || d.instanceCount(s) <= 1 {
+			continue
+		}
+		sibs, err := d.ensureInstances(s)
+		if err != nil {
+			d.log.Warnf("instances: %s bölünemedi, tek sunucu açılıyor: %v", s.Name, err)
+			continue
+		}
+		pending[s.ID] = sibs
+	}
 	d.servers.StartAutostart(ctx, servers)
+	for _, sibs := range pending {
+		go d.startSiblings(ctx, sibs)
+	}
 }

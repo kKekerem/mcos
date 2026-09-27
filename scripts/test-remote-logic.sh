@@ -173,19 +173,50 @@ else
     pass "SSH parolası yapılandırmada tutulmuyor (yalnızca PasswordSet)"
 fi
 
-if strip_comments "$SSHL" | grep -q 'cmd.Stdin = strings.NewReader'; then
-    pass "parola chpasswd'ye stdin ile veriliyor (komut satırında değil)"
+# Parola eskiden harici chpasswd ile yazılıyordu; imajda chpasswd YOK ve
+# kullanıcı "chpasswd bulunamadı" alıyordu (QEMU'da gerçek imajla ölçüldü).
+# Artık özet saf Go'da hesaplanıyor; harici bir programa geri dönüş,
+# özelliği yeniden öldürür. Parola hiçbir komut satırında da geçmez.
+# Sınama dosyaları hariç: TestSetPasswordNeedsNoExternalTool chpasswd'ın
+# BULUNAMADIĞINI doğrulamak için adını anıyor.
+chp=0
+for f in "$ROOT"/internal/sshd/*.go; do
+    case "$f" in *_test.go) continue ;; esac
+    if strip_comments "$f" | grep -q '"chpasswd"'; then chp=1; fi
+done
+if [ "$chp" -ne 0 ]; then
+    fail "SSH kodu yine harici chpasswd'a bağımlı — imajda yok"
 else
-    fail "parola komut satırında geçiyor olabilir — /proc'tan görünür"
+    pass "parola harici bir program olmadan (saf Go SHA-512 crypt) yazılıyor"
+fi
+
+if strip_comments "$SSHD" | grep -q 'writeFileAtomic(m.passwordPath(), \[\]byte(hash+"\\n"), 0o600)'; then
+    pass "parolanın ÖZETİ kalıcı klasöre 0600 ile yazılıyor"
+else
+    fail "parola özeti kalıcı klasöre 0600 ile yazılmıyor"
 fi
 
 echo ""
 echo "== 9. SSH: parolasız/anahtarsız açılmıyor =="
 
-if strip_comments "$SSHD" | grep -q '!cfg.PasswordSet && len(cfg.AuthorizedKeys) == 0'; then
+if strip_comments "$SSHD" | grep -q '!pwAuth && len(cfg.AuthorizedKeys) == 0'; then
     pass "parola da anahtar da yoksa SSH açılmıyor"
 else
     fail "SSH parolasız açılabiliyor"
+fi
+
+# Ölçülen açık: kalıcı parola yokken sunucu parola girişine açıktı ve imajın
+# varsayılan kök parolası ("root") SSH'tan kabul ediliyordu. Parola girişi
+# YALNIZCA kalıcı parola uygulanınca açılmalı.
+if strip_comments "$SSHL" | grep -B1 'PasswordAuthentication yes' | grep -q 'if pwAuth'; then
+    pass "PasswordAuthentication yalnızca kalıcı parola varken yes"
+else
+    fail "PasswordAuthentication koşulsuz açık — varsayılan root/root parolası geçer"
+fi
+if strip_comments "$SSHL" | grep -q 'args = append(args, "-s")'; then
+    pass "dropbear'da da parolasızken parola girişi kapalı (-s)"
+else
+    fail "dropbear parola girişini kapatmıyor"
 fi
 
 if strip_comments "$SSHL" | grep -q 'PermitEmptyPasswords no'; then
@@ -206,8 +237,27 @@ else
     fail "sunucu anahtarı klasörü yok"
 fi
 
+# Kök RAM'de: /etc/shadow her açılışta imajın hâline döner. Apply, sunucuyu
+# başlatmadan ÖNCE kalıcı parolayı geri yazmalı.
+apply_restore="$(strip_comments "$SSHD" | grep -n 'm.restorePassword()' | head -1 | cut -d: -f1)"
+apply_start="$(strip_comments "$SSHD" | grep -n 'return m.start(cfg.Port, pwAuth)' | head -1 | cut -d: -f1)"
+if [ -n "$apply_restore" ] && [ -n "$apply_start" ] && [ "$apply_restore" -lt "$apply_start" ]; then
+    pass "kalıcı parola sunucu başlamadan önce /etc/shadow'a geri yazılıyor"
+else
+    fail "kalıcı parola açılışta geri yazılmıyor — yeniden başlatınca parola kaybolur"
+fi
+
 echo ""
 echo "== 11. Go testleri gerçekten var =="
+
+for want in TestSHA512CryptSpecVectors TestSetPasswordNeedsNoExternalTool \
+            TestPasswordSurvivesReboot TestSSHDConfigPasswordAuthFollowsStoredPassword; do
+    if cat "$ROOT"/internal/sshd/*_test.go 2>/dev/null | grep -q "func $want("; then
+        pass "$want var"
+    else
+        fail "$want testi yok"
+    fi
+done
 
 T="$ROOT/internal/remote/server_test.go"
 if [ -f "$T" ]; then

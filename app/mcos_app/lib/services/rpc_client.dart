@@ -5,6 +5,8 @@ import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 
 import '../models/connection.dart';
+import 'pair_uri.dart';
+import 'panel_text.dart';
 
 /// MCOS'un uzaktan kontrol köprüsüne konuşan istemci.
 ///
@@ -26,9 +28,18 @@ import '../models/connection.dart';
 /// İkincisi uygulanıyor. Kullanıcı parmak izini MCOS panelinde de görebilir
 /// ve ilk bağlantıda karşılaştırabilir.
 class RpcClient {
-  RpcClient(this.connection, {this.onPinMismatch});
+  RpcClient(
+    this.connection, {
+    this.onPinMismatch,
+    this.connectTimeout = const Duration(seconds: 8),
+  });
 
   final Connection connection;
+
+  /// TCP bağlantısı için bekleme süresi. QR'daki birden çok adres sırayla
+  /// denenirken kısa tutuluyor: ulaşılamayan her adres için 8 saniye beklemek,
+  /// üç adreste kullanıcıyı yarım dakika bekletirdi.
+  final Duration connectTimeout;
 
   /// Parmak izi değiştiğinde çağrılır. Dönen değer true ise yeni parmak izi
   /// kabul edilir (kullanıcı "evet, sunucuyu yeniden kurdum" dedi).
@@ -56,7 +67,7 @@ class RpcClient {
     final c = HttpClient()
       // Zaman aşımı: ev ağında ulaşılamayan bir adres, kullanıcıyı
       // sonsuza dek dönen bir çarkla baş başa bırakmamalı.
-      ..connectionTimeout = const Duration(seconds: 8)
+      ..connectionTimeout = connectTimeout
       ..idleTimeout = const Duration(seconds: 30);
 
     // ── Sabitleme ─────────────────────────────────────────────────────
@@ -76,7 +87,12 @@ class RpcClient {
       }
       // Sabit süreli karşılaştırmaya gerek yok: parmak izi gizli değil,
       // sunucu onu /health üzerinden zaten herkese söylüyor.
-      return fp == pinned;
+      //
+      // BİÇİMDEN BAĞIMSIZ karşılaştırma: QR'dan gelen parmak izi iki
+      // noktasız ve küçük harf ("a679f0…"), burada hesaplanan ise
+      // "A6:79:F0:…". Düz == ile QR'la eşleşen her bağlantı "kimlik
+      // değişti" diye reddedilirdi.
+      return sameFingerprint(fp, pinned);
     };
 
     _http = c;
@@ -96,25 +112,83 @@ class RpcClient {
   /// Jeton GEREKTİRMEZ: kullanıcı adresi doğru yazıp yazmadığını, jetonu
   /// girmeden önce görebilmeli.
   Future<HealthInfo> health() async {
-    final req = await _client().getUrl(_healthUri);
+    final HttpClientRequest req;
+    try {
+      req = await _client().getUrl(_healthUri);
+    } on HandshakeException {
+      throw _handshakeFailure();
+    }
     final resp = await req.close().timeout(const Duration(seconds: 10));
     final body = await resp.transform(utf8.decoder).join();
     if (resp.statusCode != 200) {
-      throw RpcException('Sunucu ${resp.statusCode} döndü');
+      throw RpcException(
+        'Bu adreste MCOS uzaktan kontrolü yok (sunucu ${resp.statusCode} '
+        'döndü). Port olarak panelde yazanı girin (varsayılan 2223).',
+      );
     }
-    final map = jsonDecode(body) as Map<String, dynamic>;
-    if (map['service'] != 'mcos') {
-      throw RpcException('Bu adreste MCOS yok');
+    final map = _decodeObject(body);
+    if (map == null || map['service'] != 'mcos') {
+      throw RpcException(
+        'Bu adreste MCOS yok. Adresi ve portu MCOS panelindeki '
+        '$panelRemotePath ekranından kontrol edin.',
+      );
     }
     return HealthInfo(
-      version: map['version'] as String? ?? '',
-      name: map['name'] as String? ?? '',
-      fingerprint: map['fingerprint'] as String? ?? '',
+      version: _str(map['version']),
+      name: _str(map['name']),
+      fingerprint: _str(map['fingerprint']),
     );
   }
 
+  /// TLS el sıkışması başarısız olduğunda NEDENİ ayırt eder.
+  ///
+  /// ── Düzeltilen hata (e2e testi yakaladı) ────────────────────────────────
+  /// İlk sürüm her HandshakeException'ı "sunucunun kimliği değişti" diye
+  /// raporluyordu. Oysa en sık sebep YANLIŞ PORT: TLS konuşmayan bir porta
+  /// (ör. mcosd'nin 2222 eşleştirme ya da IPC portu) bağlanınca da aynı
+  /// istisna geliyor. Kimlik değişikliği yalnızca sertifika GÖRÜLDÜYSE ve
+  /// sabitlenmiş parmak iziyle tutmadıysa söylenir; gerisi genel TLS
+  /// mesajına (errors.dart) bırakılır.
+  Object _handshakeFailure() {
+    final pinned = connection.fingerprint;
+    final seen = lastSeenFingerprint;
+    if (pinned != null &&
+        pinned.isNotEmpty &&
+        seen != null &&
+        !sameFingerprint(seen, pinned)) {
+      return _identityChanged();
+    }
+    return const HandshakeException('TLS');
+  }
+
+  RpcException _identityChanged() => RpcException(
+        'Sunucunun kimliği değişti. Ya MCOS yeniden kuruldu ya da araya '
+        'giren biri var. Ayarlardan bu bağlantıyı silip QR ile yeniden '
+        'ekleyin.',
+      );
+
+  /// JSON gövdesini nesne olarak çözer; nesne değilse ya da bozuksa null.
+  ///
+  /// Eski kod `jsonDecode(body) as Map<String, dynamic>` yapıyordu: gövde
+  /// bir HTML hata sayfası ya da boşsa kullanıcı ham "FormatException" /
+  /// "type 'Null' is not a subtype…" metnini görüyordu.
+  static Map<String, dynamic>? _decodeObject(String body) {
+    try {
+      final v = jsonDecode(body);
+      return v is Map<String, dynamic> ? v : null;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  static String _str(Object? v) => v is String ? v : '';
+
   /// Bir JSON-RPC yöntemi çağırır.
-  Future<dynamic> call(String method, [Map<String, dynamic>? params]) async {
+  ///
+  /// [timeout] verilmezse 3 dakika (uzun işlemler için). Bağlantı sınaması
+  /// gibi hızlı yanıt beklenen çağrılar kısa bir süre verir.
+  Future<dynamic> call(String method,
+      [Map<String, dynamic>? params, Duration? timeout,]) async {
     final id = _nextId++;
     final payload = <String, dynamic>{
       'jsonrpc': '2.0',
@@ -126,49 +200,70 @@ class RpcClient {
     HttpClientRequest req;
     try {
       req = await _client().postUrl(_rpcUri);
-    } on HandshakeException catch (e) {
+    } on HandshakeException {
       // Parmak izi tutmadığında dart:io burada patlar. Kullanıcıya teknik
       // metni değil, ne anlama geldiğini söylüyoruz.
-      throw RpcException(
-        'Sunucunun kimliği değişti. Ya MCOS yeniden kuruldu ya da '
-        'araya giren biri var. Ayarlardan bu bağlantıyı silip yeniden '
-        'ekleyin.\n\n(${e.message})',
-      );
+      throw _handshakeFailure();
     }
 
     req.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-    req.headers.set(HttpHeaders.authorizationHeader, 'Bearer ${connection.token}');
+    // cleanToken: eski kayıtlarda panelden boşluklu yazılmış jeton durabilir
+    // (bkz. pair_uri.dart cleanToken); onları da kurtarıyoruz.
+    req.headers.set(
+        HttpHeaders.authorizationHeader, 'Bearer ${cleanToken(connection.token)}',);
     req.add(utf8.encode(jsonEncode(payload)));
 
     final resp = await req.close().timeout(
           // Uzun süren çağrılar var (sunucu yazılımı indirme). Kısa bir
           // zaman aşımı, çalışan bir işlemi "başarısız" gösterirdi.
-          const Duration(minutes: 3),
+          timeout ?? const Duration(minutes: 3),
         );
     final body = await resp.transform(utf8.decoder).join();
 
     if (resp.statusCode == HttpStatus.unauthorized) {
       throw RpcException(
-        'Jeton kabul edilmedi. MCOS panelinde "Uzaktan Kontrol" ekranından '
-        'jetonu kontrol edin.',
+        'Jeton kabul edilmedi. MCOS panelinde $panelRemotePath ekranından '
+        'jetonu kontrol edin ya da QR ile yeniden eşleştirin.',
       );
     }
     if (resp.statusCode != 200) {
-      throw RpcException('Sunucu ${resp.statusCode} döndü');
+      throw RpcException(
+        'MCOS isteği kabul etmedi (HTTP ${resp.statusCode}). Uygulama ile '
+        'MCOS sürümleri uyumsuz olabilir.',
+      );
     }
 
-    final map = jsonDecode(body) as Map<String, dynamic>;
+    final map = _decodeObject(body);
+    if (map == null) {
+      throw RpcException('MCOS\'tan anlaşılmayan bir yanıt geldi.');
+    }
     final err = map['error'];
     if (err is Map<String, dynamic>) {
-      throw RpcException(err['message'] as String? ?? 'bilinmeyen hata');
+      throw RpcException(rpcErrorMessage(method, err));
     }
     return map['result'];
   }
 
+  /// JSON-RPC hata nesnesini kullanıcı cümlesine çevirir.
+  ///
+  /// -32601 (yöntem yok) ayrı ele alınıyor: daemon "method not found: x"
+  /// diyor, bu İngilizce ve kullanıcıya ne yapacağını söylemiyor. Sebep
+  /// hemen her zaman MCOS'un uygulamadan eski olması.
+  static String rpcErrorMessage(String method, Map<String, dynamic> err) {
+    final code = err['code'];
+    if (code == -32601) {
+      return 'Bu MCOS sürümü bu işlemi desteklemiyor ($method). MCOS\'u '
+          'güncelleyin.';
+    }
+    final msg = err['message'];
+    if (msg is String && msg.trim().isNotEmpty) return msg.trim();
+    return 'MCOS işlemi yapamadı ($method).';
+  }
+
   /// Sonucu harita olarak isteyen çağrılar için kısayol.
   Future<Map<String, dynamic>> callMap(String method,
-      [Map<String, dynamic>? params,]) async {
-    final r = await call(method, params);
+      [Map<String, dynamic>? params, Duration? timeout,]) async {
+    final r = await call(method, params, timeout);
     if (r is Map<String, dynamic>) return r;
     return <String, dynamic>{};
   }

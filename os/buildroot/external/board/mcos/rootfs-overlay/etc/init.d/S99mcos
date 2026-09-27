@@ -59,6 +59,7 @@ start() {
         loadkeys trq 2>/dev/null || true
     fi
 
+    [ -x /usr/bin/mcos-stage ] && /usr/bin/mcos-stage services 2>/dev/null || true
     ensure_data
     mkdir -p /run/mcos
 
@@ -78,6 +79,11 @@ start() {
     # HICBIR SEYI garanti etmiyordu. Bedeli olculdu — her acilista tam bir
     # saniye, hem de panelin gorunmesinden tam once.
     start_tunnels
+
+    # Bu makinede aygıtı olmayan büyük firmware'leri RAM'den sil (bkz.
+    # mcos-fwprune): kök dosya sistemi RAM'de ve o bellek sunuculara lazım.
+    # Arka planda: açılışı bekletmesin.
+    [ -x /usr/bin/mcos-fwprune ] && /usr/bin/mcos-fwprune >/run/mcos/fwprune.log 2>&1 &
 }
 
 stop() {

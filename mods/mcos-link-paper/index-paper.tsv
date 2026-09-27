@@ -1,0 +1,40 @@
+# index-paper.tsv — MCOS Link Paper/Purpur eklentisinin DENENDİĞİ sürümler.
+#
+# Biçim (SEKME ile ayrılmış): yükleyici  mc-sürümü  jar  bağımlılık(- = yok)
+# "X+" satırı "X ve sonrası" demektir; tam sürüm satırı her zaman kazanır.
+#
+# Her satır gerçek bir sunucuda sınandı (2026-09-27, eklenti 1.1.0,
+# api-version 1.20.5, paper-api 1.20.6): Paper ilgili sürümün son yapısı,
+# Java 21 (1.20.5-1.21.11) / Java 25 (26.x), "Done" + eklentinin düğümler
+# arası portu MCOSLINK1 yoklamasına "ok" yanıtı. Purpur 1.20.6, 1.21.11 ve
+# 26.3 de aynı jar ile sınandı (Purpur, Paper yükleyicisine eşlenir).
+#
+# KARŞI-SINAMA: eski jar (api-version 1.21.11) 1.21.1'de reddedildi
+# ("Unsupported API version"), yenisi aynı sunucuda yüklendi.
+#
+# Paper 1.21.2 ve düz 26.1 yayımlamadı (fill.papermc.io 404); o sürümler
+# için satır YOK — MCOS en yakın sürümü önerir.
+#
+# NEDEN "26.3+": eklenti yalnızca Bukkit/Paper API'sini kullanır ve bu API
+# sürümler arasında geriye uyumludur (1.20.5'ten 26.3'e kadar tek jar
+# değişmeden çalıştı). Yeni bir Paper sürümünde ortak dünyanın hiç
+# açılmaması, küçük bir uyumsuzluk riskinden daha kötüdür; kırılırsa
+# eklentinin kendi açılış günlüğü bunu gösterir.
+paper	1.20.5	mcos-link-paper.jar	-
+paper	1.20.6	mcos-link-paper.jar	-
+paper	1.21	mcos-link-paper.jar	-
+paper	1.21.1	mcos-link-paper.jar	-
+paper	1.21.3	mcos-link-paper.jar	-
+paper	1.21.4	mcos-link-paper.jar	-
+paper	1.21.5	mcos-link-paper.jar	-
+paper	1.21.6	mcos-link-paper.jar	-
+paper	1.21.7	mcos-link-paper.jar	-
+paper	1.21.8	mcos-link-paper.jar	-
+paper	1.21.9	mcos-link-paper.jar	-
+paper	1.21.10	mcos-link-paper.jar	-
+paper	1.21.11	mcos-link-paper.jar	-
+paper	26.1.1	mcos-link-paper.jar	-
+paper	26.1.2	mcos-link-paper.jar	-
+paper	26.2	mcos-link-paper.jar	-
+paper	26.3	mcos-link-paper.jar	-
+paper	26.3+	mcos-link-paper.jar	-

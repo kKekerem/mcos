@@ -104,11 +104,22 @@ func (a *App) Lock() {
 		return
 	}
 	a.mu.Lock()
+	already := a.locked
 	a.locked = true
 	a.lockInput = ""
 	a.lockErr = ""
 	a.dirty = true
 	a.mu.Unlock()
+
+	// Kilit ekranı SOLUKLAŞARAK gelir; açılırken de öyle gider (unlock).
+	// Sert kesme, uykudan uyanan kullanıcıya "ekran bozuldu" hissi veriyordu.
+	//
+	// KİLİT DIŞINDA: beginTransition kendi kilidini alır. Zaten kilitliyken
+	// yeniden geçiş başlatmıyoruz — uyandırma yolu Lock'u birden çok kez
+	// çağırabilir ve her seferinde yeniden soluklaşmak titreme olurdu.
+	if !already {
+		a.beginTransition(transFade)
+	}
 }
 
 // lockOnSleepWanted reports whether waking should ask for the password.

@@ -19,6 +19,14 @@
 # Kullanım:
 #   scripts/mkusb.sh --mode uefi --out dist/mcos-uefi.img
 #   scripts/mkusb.sh --mode bios --out dist/mcos-bios.img --size 4G
+#   scripts/mkusb.sh --mode both --out dist/mcos-usb.img
+#
+# --mode both: TEK imaj hem BIOS hem UEFI bilgisayarda acilir. MBR tablosu,
+#   FAT32 bolumunde hem syslinux (BIOS) hem \EFI\BOOT\BOOTX64.EFI (UEFI)
+#   bulunur. UEFI firmware'leri cikarilabilir ortamda MBR'li FAT bolumunden
+#   de acar (Rufus'un "BIOS veya UEFI" kipi ayni duzeni kullanir). Windows'tan
+#   USB hazirlayan kullanici bilgisayarinin hangisi oldugunu bilmek zorunda
+#   kalmaz; yanlis imaj secip "USB acilmiyor" yasamaz.
 
 set -euo pipefail
 
@@ -54,8 +62,16 @@ while [ $# -gt 0 ]; do
 done
 
 case "$MODE" in
-    uefi|bios) ;;
-    *) die "--mode uefi veya --mode bios olmalı" ;;
+    uefi|bios|both) ;;
+    *) die "--mode uefi, bios veya both olmalı" ;;
+esac
+# BIOS_YOLU / UEFI_YOLU: hangi önyükleyicilerin kurulacağı. both ikisini de
+# kurar; bölüm tablosu BIOS'un okuyabildiği MBR olur.
+BIOS_YOLU=0; UEFI_YOLU=0
+case "$MODE" in
+    bios) BIOS_YOLU=1 ;;
+    uefi) UEFI_YOLU=1 ;;
+    both) BIOS_YOLU=1; UEFI_YOLU=1 ;;
 esac
 [ -n "$OUT" ] || die "--out gerekli"
 
@@ -78,7 +94,7 @@ need mke2fs
 SYSLINUX_BIN="$BR_OUTPUT/build/syslinux-6.03/bios/mtools/syslinux"
 SYSLINUX_LIB="$BR_OUTPUT/host/share/syslinux"
 
-if [ "$MODE" = bios ]; then
+if [ "$BIOS_YOLU" = 1 ]; then
     # ÖNEMLİ: syslinux kurucusu ile .c32 modülleri AYNI SÜRÜM olmalı, yoksa
     # önyükleyici "Failed to load libcom32.c32" ile durur. Bu yüzden host'un
     # syslinux'ü (6.04) DEĞİL, Buildroot'un derlediği 6.03 kullanılıyor.
@@ -87,7 +103,8 @@ if [ "$MODE" = bios ]; then
     MBR_BIN="$SYSLINUX_LIB/mbr.bin"
     [ -f "$MBR_BIN" ] || MBR_BIN="/usr/lib/SYSLINUX/mbr.bin"
     [ -f "$MBR_BIN" ] || die "MBR önyükleyici bulunamadı (mbr.bin)"
-else
+fi
+if [ "$UEFI_YOLU" = 1 ]; then
     need grub-mkimage
     [ -d /usr/lib/grub/x86_64-efi ] || die "GRUB EFI platformu yok: /usr/lib/grub/x86_64-efi"
 fi
@@ -145,7 +162,7 @@ mmd -i "$BOOTIMG" ::/EFI ::/EFI/BOOT >/dev/null 2>&1 || true
 mcopy -i "$BOOTIMG" -o "$KERNEL" ::/bzImage
 mcopy -i "$BOOTIMG" -o "$INITRD" ::/initrd.img
 
-if [ "$MODE" = uefi ]; then
+if [ "$UEFI_YOLU" = 1 ]; then
     info "[2/5] GRUB EFI önyükleyicisi üretiliyor"
     # Standalone GRUB EFI: prefix (hd0,gpt1)/EFI/BOOT olarak gömülür, böylece
     # grub.cfg'yi ESP üzerinde kendi dizininde arar.
@@ -174,7 +191,8 @@ EOF
     } > "$WORK/grub.cfg"
     mcopy -i "$BOOTIMG" -o "$WORK/BOOTX64.EFI" ::/EFI/BOOT/BOOTX64.EFI
     mcopy -i "$BOOTIMG" -o "$WORK/grub.cfg"    ::/EFI/BOOT/grub.cfg
-else
+fi
+if [ "$BIOS_YOLU" = 1 ]; then
     info "[2/5] syslinux 6.03 önyükleyicisi hazırlanıyor"
     mmd -i "$BOOTIMG" ::/syslinux >/dev/null 2>&1 || true
     for m in ldlinux.c32 libutil.c32 menu.c32 libcom32.c32; do
@@ -248,7 +266,7 @@ dd if="$DATAIMG" of="$OUT" bs=512 seek="$DATA_START" conv=notrunc status=none
 
 # ── 5) Önyükleyiciyi diske gömme ────────────────────────────────────────────
 
-if [ "$MODE" = bios ]; then
+if [ "$BIOS_YOLU" = 1 ]; then
     info "[5/5] MBR önyükleyici ve syslinux kuruluyor"
     # MBR bootstrap: ilk 440 bayt. Bölüm tablosu (446+) korunur.
     dd if="$MBR_BIN" of="$OUT" bs=440 count=1 conv=notrunc status=none

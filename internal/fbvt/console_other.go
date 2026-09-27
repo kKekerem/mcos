@@ -14,5 +14,6 @@ func Open(string, string) (*Console, error) {
 }
 
 func (*Console) Restore() error             { return nil }
+func (*Console) ClearText()                 {}
 func (*Console) Read(p []byte) (int, error) { return 0, errors.New("konsol yok") }
 func (*Console) Blank(bool) bool            { return false }

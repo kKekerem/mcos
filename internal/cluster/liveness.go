@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"mcos/internal/model"
@@ -95,9 +96,25 @@ func (m *Manager) probePairedPeers() {
 		cancel()
 		if err != nil {
 			// Yanıt yok: janitor'a bırak. Burada çevrimdışı İŞARETLEMİYORUZ,
-			// çünkü tek bir kayıp paket eşi düşürmemeli.
+			// çünkü tek bir kayıp paket eşi düşürmemeli. Ama NEDENİ
+			// kaydediyoruz: panel "çevrimdışı"nın yanında "güvenlik duvarı
+			// 2222'yi engelliyor olabilir" diyebilsin.
+			m.setNetProblem(t.key, describeNetErr(err, t.port))
 			continue
 		}
+
+		// ── Aynı adreste BAŞKA bir makine mi var? ──────────────────────
+		// DHCP adresi başka bir cihaza verebilir. Eskiden yanıt veren her
+		// şey eşin kendisi sayılıyor, adı bile üzerine yazılıyordu: MCOS'u
+		// 127.0.0.1'den gören bir düğüm (NAT) kendi kendini yoklayıp kendi
+		// adını MCOS'a yapıştırıyordu.
+		if strings.HasPrefix(t.key, "id:") && st.NodeID != "" &&
+			"id:"+st.NodeID != t.key {
+			m.setNetProblem(t.key, "bu adreste artık başka bir cihaz yanıt "+
+				"veriyor — eşleşmeyi kaldırıp yeniden eşleştirin")
+			continue
+		}
+		m.setNetProblem(t.key, "")
 
 		m.mu.Lock()
 		if p, ok := m.peers[t.key]; ok {
@@ -112,8 +129,23 @@ func (m *Manager) probePairedPeers() {
 			if st.NodeName != "" {
 				p.Name = st.NodeName
 			}
+			if st.Version != "" {
+				p.Version = st.Version
+			}
+			m.remoteLinkHash[t.key] = st.LinkHash
 		}
 		m.mu.Unlock()
+		if st.Proto != LinkProto {
+			m.setLinkProblem(t.key, versionProblem(m.version, st.Version))
+		} else {
+			m.mu.Lock()
+			// Sürüm sorunu güncellemeyle KENDİLİĞİNDEN kalkar; eski
+			// uyarıyı ekranda bırakmak kullanıcıyı yanıltırdı.
+			if strings.HasPrefix(m.linkProb[t.key], "farklı sürüm") {
+				delete(m.linkProb, t.key)
+			}
+			m.mu.Unlock()
+		}
 	}
 }
 

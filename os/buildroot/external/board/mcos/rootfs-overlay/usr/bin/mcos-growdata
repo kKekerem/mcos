@@ -1,0 +1,160 @@
+#!/bin/sh
+# mcos-growdata — bagli MCOS-DATA bolumunu diskin sonundaki bos alana buyutur.
+#
+# Kullanim: mcos-growdata [/dev/sdX2]   (arguman yoksa MCOS-DATA etiketi aranir)
+#
+# ══════════════════════════════════════════════════════════════════════════
+# NEDEN VAR
+# ══════════════════════════════════════════════════════════════════════════
+#
+# Kalici USB imaji (dist/mcos-*.img) 4 GB'dir; veri bolumu ~3,2 GB. Bu imaj
+# 32 GB'lik bir USB'ye yazilinca /data yine 3,2 GB kaliyordu, geri kalan
+# ~28 GB HICBIR SEY tarafindan kullanilmiyordu: mcos-persist MCOS-DATA'yi
+# zaten var gordugu icin degisiklik yapmadan cikiyor. Bir Minecraft dunyasi
+# ve birkac yedek bu alana sigmaz; kullanici "kalicilik calismiyor" yasar.
+#
+# Yontem CEVRIMICI buyutmedir: bolum bagliyken tablo buyutulur (parted
+# resizepart), ardindan dosya sistemi buyutulur (resize2fs, ext4 cevrimici
+# buyumeyi destekler). Cevrimdisi yol e2fsck -f ister; buyuk bir bolumde
+# dakikalar surer ve acilisi bekletir — bu yuzden kullanilmiyor.
+#
+# Guvenlik: yalnizca MCOS-DATA etiketli ext bolum, yalnizca diskin SON
+# bolumuyse ve arkasinda bos alan varsa buyutulur. Bolum hic TASINMAZ (baslangic
+# sektoru ayni kalir), hic KUCULTULMEZ. Ventoy, DVD, salt okunur ortam
+# atlanir.
+#
+# Tekrar calistirilabilir: bos alan yoksa tablo adimi atlanir; resize2fs
+# zaten buyukse "yapacak is yok" der. Bir onceki acilista tablo buyuyup
+# resize2fs yarida kaldiysa (elektrik kesildi) bu acilista tamamlanir.
+
+set -u
+
+log() { echo "mcos-growdata: $*"; }
+
+# En az 128 MiB: hizalama artiklari (1 MiB'dan kucuk) ve GPT yedek basliginin
+# tasinmasindan kalan birkac sektor icin tabloya dokunmaya degmez.
+ESIK=262144
+
+for t in parted resize2fs dd od; do
+    command -v "$t" >/dev/null 2>&1 || { log "gerekli arac yok: $t — atlandi"; exit 0; }
+done
+
+PART="${1:-}"
+[ -n "$PART" ] || PART="$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)"
+[ -n "$PART" ] && [ -b "$PART" ] || { log "MCOS-DATA yok — atlandi"; exit 0; }
+
+# Bagli olmali: cevrimici buyutme ancak boyle mumkun (bkz. bas yorum).
+grep -q "^$PART " /proc/mounts || { log "$PART bagli degil — atlandi"; exit 0; }
+
+imza() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null; }
+imza_hex() { imza "$@" | od -An -tx1 | tr -d ' \n'; }
+
+[ "$(imza_hex "$PART" 1080 2)" = "53ef" ] || { log "$PART ext degil — atlandi"; exit 0; }
+[ "$(imza "$PART" 1144 16 | tr -d '\000')" = "MCOS-DATA" ] || { log "$PART etiketi MCOS-DATA degil — atlandi"; exit 0; }
+
+PAD="${PART#/dev/}"
+[ -f "/sys/class/block/$PAD/partition" ] || { log "$PART bir bolum degil — atlandi"; exit 0; }
+NO="$(cat "/sys/class/block/$PAD/partition")"
+AD="$(basename "$(dirname "$(readlink -f "/sys/class/block/$PAD")")")"
+DEV="/dev/$AD"
+[ -b "$DEV" ] || { log "disk bulunamadi ($AD) — atlandi"; exit 0; }
+
+case "$AD" in
+    sr[0-9]*|scd[0-9]*|loop[0-9]*|ram[0-9]*) log "$DEV buyutulemez — atlandi"; exit 0 ;;
+esac
+[ "$(cat "/sys/class/block/$AD/ro" 2>/dev/null || echo 0)" = "1" ] && { log "$DEV salt okunur — atlandi"; exit 0; }
+
+# Ventoy USB'si: Ventoy diskin sonunu kendisi yonetir; dokunulmaz. Ventoy'un
+# FAT16 EFI bolumunun etiketi VTOYEFI'dir (FAT16 @43, FAT32 @71).
+for p in /sys/class/block/"$AD"/"$AD"*; do
+    [ -e "$p/partition" ] || continue
+    b="/dev/$(basename "$p")"
+    case "$(imza "$b" 43 11)$(imza "$b" 71 11)" in
+        *VTOYEFI*) log "Ventoy USB'si — atlandi"; exit 0 ;;
+    esac
+done
+
+sektor() { cat "/sys/class/block/$PAD/size" 2>/dev/null || echo 0; }
+ONCE="$(sektor)"
+
+TABLO="$(parted -m -s "$DEV" print 2>/dev/null | sed -n '2p' | cut -d: -f6)"
+case "$TABLO" in
+    gpt)
+        # Imaj daha kucuk bir disk icin uretildi: yedek GPT basligi 4 GB'nin
+        # sonunda kaldi. Tasinmazsa parted o noktadan sonrasini "kullanilamaz"
+        # gorur ve bos alan hic cikmaz (mcos-persist ile ayni tuzak).
+        printf 'Fix\n' | parted ---pretend-input-tty "$DEV" print >/dev/null 2>&1 || true
+        ;;
+    msdos)
+        # Mantiksal bolumu buyutmek genisletilmis bolumu de buyutmeyi
+        # gerektirir; imajlarimiz hep birincil bolum kullanir.
+        [ "$NO" -le 4 ] || { log "mantiksal bolum ($NO) — atlandi"; exit 0; }
+        ;;
+    *) log "tanimlanamayan bolum tablosu ($TABLO) — atlandi"; exit 0 ;;
+esac
+
+# ── Tablo: bolum son bolum mu, arkasinda yeterli bos alan var mi? ─────────
+LISTE="$(parted -m -s "$DEV" unit s print free 2>/dev/null)"
+SATIR="$(echo "$LISTE" | grep "^$NO:" | grep -v ':free;$' | head -1)"
+SON="$(echo "$SATIR" | cut -d: -f3 | tr -d s)"
+if [ -z "$SON" ]; then
+    log "bolum $NO tabloda bulunamadi — atlandi"
+    exit 0
+fi
+
+SONRAKI=""
+BOS=0
+# Bolumden SONRA baslayan her satira bak: baska bir bolum varsa buyutmek onu
+# ezer; yalnizca bos alan varsa buyutulur.
+# "while read" + here-doc: GPT bolum adlari bosluk icerebilir ("EFI System"),
+# "for s in $(...)" satirlari bolerdi. Here-doc dongusu ayni kabukta calisir,
+# degiskenler dongu bitince kaybolmaz (boru hattinda kaybolurdu).
+while IFS= read -r s; do
+    case "$s" in [0-9]*:[0-9]*s:*) ;; *) continue ;; esac
+    bas="$(echo "$s" | cut -d: -f2 | tr -d s)"
+    [ "$bas" -gt "$SON" ] || continue
+    case "$s" in
+        *:free\;) b="$(echo "$s" | cut -d: -f4 | tr -d s)"; [ "$b" -gt "$BOS" ] && BOS="$b" ;;
+        *) SONRAKI="$(echo "$s" | cut -d: -f1)" ;;
+    esac
+done <<EOF
+$LISTE
+EOF
+
+if [ -n "$SONRAKI" ]; then
+    log "bolum $NO son bolum degil (arkasinda bolum $SONRAKI var) — tablo buyutulmedi"
+elif [ "$BOS" -lt "$ESIK" ]; then
+    log "diskin sonunda buyutmeye deger bos alan yok ($((BOS / 2048)) MiB)"
+else
+    log "$PART buyutuluyor: +$((BOS / 2048)) MiB ($DEV sonuna kadar)"
+    # Bolum bagli oldugu icin parted "kullaniliyor, devam?" diye sorar
+    # (parted 3.6 _partition_warn_busy); cevap elle veriliyor. Bitis
+    # degeri soru sirasinda kaybolmasin diye parted onu saklayip geri koyar.
+    printf 'Yes\n' | parted ---pretend-input-tty "$DEV" unit s resizepart "$NO" 100% >/dev/null 2>&1 || true
+    # parted cekirdege BLKPG ile bildirir; disk mesgulken BLKRRPART
+    # calismaz. Olmadiysa partprobe bir kez daha dener.
+    [ "$(sektor)" -gt "$ONCE" ] || partprobe "$DEV" >/dev/null 2>&1 || true
+    if [ "$(sektor)" -gt "$ONCE" ]; then
+        log "bolum tablosu buyutuldu: $((ONCE / 2048)) -> $(( $(sektor) / 2048 )) MiB"
+    else
+        log "UYARI: bolum tablosu buyutulemedi ya da cekirdek yeni boyu gormedi"
+    fi
+fi
+
+# ── Dosya sistemi: bolum ne kadarsa o kadar olsun ─────────────────────────
+# Tablo bu acilista buyumemis olsa bile calisir: onceki acilista tablo
+# buyuyup resize2fs yarida kaldiysa burada tamamlanir. Zaten tam boydaysa
+# resize2fs "Nothing to do" der ve 0 doner.
+CIKTI="$(resize2fs "$PART" 2>&1)"
+RC=$?
+case "$CIKTI" in
+    *"Nothing to do"*) log "dosya sistemi zaten bolum boyunda" ;;
+    *)
+        if [ "$RC" -eq 0 ]; then
+            log "dosya sistemi buyutuldu ($(df -h "$PART" 2>/dev/null | awk 'NR==2{print $2}'))"
+        else
+            log "UYARI: resize2fs basarisiz (kod $RC): $(echo "$CIKTI" | tail -1)"
+        fi
+        ;;
+esac
+exit 0

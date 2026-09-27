@@ -58,6 +58,17 @@ type ScanProgress struct {
 	Done int
 	// Found is how many MCOS nodes answered so far.
 	Found int
+	// Peers are the nodes found SO FAR.
+	//
+	// ── Neden sayı yetmiyor ─────────────────────────────────────────────
+	// Panel artık taramayı CANLI gösteriyor: pencere hemen açılıyor ve
+	// cihazlar bulundukça satır satır düşüyor (kablosuz taramasıyla aynı
+	// desen). Bunun için ilerleme raporunun yalnızca "kaç tane" değil
+	// "hangileri" demesi gerekiyor.
+	//
+	// Dilim her raporda KOPYALANIR: çağıran onu saklayıp okurken tarama
+	// goroutine'leri listeye yazmaya devam ediyor.
+	Peers []model.Peer
 }
 
 // ScanLAN actively probes the local networks for MCOS peers.
@@ -90,10 +101,15 @@ func (m *Manager) ScanLAN(ctx context.Context, onProgress func(ScanProgress)) ([
 		if onProgress == nil {
 			return
 		}
+		mu.Lock()
+		peers := append([]model.Peer(nil), found...)
+		mu.Unlock()
+		sort.Slice(peers, func(i, j int) bool { return peers[i].Name < peers[j].Name })
 		onProgress(ScanProgress{
 			Total: len(targets),
 			Done:  int(done.Load()),
 			Found: int(hits.Load()),
+			Peers: peers,
 		})
 	}
 	report()
@@ -149,6 +165,12 @@ type nodeStatus struct {
 	Cores    int    `json:"cores"`
 	RAMMB    int    `json:"ramMB"`
 	Role     string `json:"role"`
+	// Proto: tel sürümü (0 = handshake.go öncesi bir sürüm).
+	Proto int `json:"proto"`
+	// Port: eşin kendi eşleştirme portu.
+	Port int `json:"port"`
+	// LinkHash: eşin elindeki ortak dünya kurulumunun özeti.
+	LinkHash string `json:"linkHash"`
 }
 
 // probeNode asks one address whether it is an MCOS node.
@@ -176,6 +198,15 @@ func probeNode(ctx context.Context, ip string, port int) (nodeStatus, error) {
 		return st, err
 	}
 	return st, nil
+}
+
+// ProbeNodeID asks ip:port for its node id ("" if it is not an MCOS node).
+//
+// Masaüstü düğüm, ikinci kez açıldığında arka planda ZATEN çalışan kendi
+// kopyasını bununla tanır (bkz. cmd/mcos-node/status.go).
+func ProbeNodeID(ctx context.Context, ip string, port int) (string, error) {
+	st, err := probeNode(ctx, ip, port)
+	return st.NodeID, err
 }
 
 // probeFirstPort tries the given ports in order and returns the first answer.
@@ -238,6 +269,7 @@ func (m *Manager) upsertProbedPort(st nodeStatus, ip string, port int) model.Pee
 	p.Name = st.NodeName
 	p.Cores = st.Cores
 	p.RAMMB = st.RAMMB
+	p.Version = st.Version
 	p.State = model.PeerAvailable
 	p.LastSeen = time.Now()
 	// Paired ALANINA DOKUNULMAZ: tarama bir güven işlemi değildir.
@@ -294,6 +326,38 @@ func (m *Manager) AddManual(ctx context.Context, addr string) (model.Peer, error
 		if m.isSelf(st.NodeID, st.NodeName) || isLocalAddress(ip) {
 			return model.Peer{}, fmt.Errorf("bu adres bu makinenin kendisi")
 		}
+		if st.Proto != LinkProto {
+			return model.Peer{}, fmt.Errorf("%s", versionProblem(m.version, st.Version))
+		}
+
+		// ── Anahtarı KARŞIDA sına ─────────────────────────────────────
+		// Eskiden burada yalnızca yerel Paired=true yapılıyordu; anahtar
+		// yanlışsa bu ancak ortak dünya açılırken "yetkisiz" diye
+		// çıkıyordu. Artık yanlış anahtar eşleşme ANINDA söyleniyor.
+		rep, herr := m.sayHello(ctx, ip, port)
+		if herr == nil && !rep.OK && rep.Reason == reasonNoKey {
+			// Karşıda anahtar HİÇ yok: anahtarsız başlayan düğüm (Windows
+			// uygulaması). Hata değil — eşi EŞLEŞMEMİŞ kaydet ve kodla
+			// eşleştirmeye yönlendir (bkz. pairoffer.go). Eskiden kullanıcı
+			// "karşı cihazda anahtar yok" görüp anahtarı elle kopyalıyordu.
+			m.mu.Lock()
+			id := peerKey(st.NodeID, st.NodeName, ip)
+			p, ok := m.peers[id]
+			if !ok {
+				p = &model.Peer{ID: id}
+				m.peers[id] = p
+			}
+			p.IP, p.Name, p.Port = ip, st.NodeName, port
+			p.Cores, p.RAMMB, p.Version = st.Cores, st.RAMMB, st.Version
+			p.State, p.LastSeen = model.PeerAvailable, time.Now()
+			out := *p
+			m.mu.Unlock()
+			return out, ErrNeedsCodePairing
+		}
+		problem, pairable := m.helloProblem(rep, herr, port)
+		if !pairable {
+			return model.Peer{}, fmt.Errorf("%s", problem)
+		}
 
 		m.mu.Lock()
 		id := peerKey(st.NodeID, st.NodeName, ip)
@@ -307,22 +371,33 @@ func (m *Manager) AddManual(ctx context.Context, addr string) (model.Peer, error
 		p.Port = port
 		p.Cores = st.Cores
 		p.RAMMB = st.RAMMB
+		p.Version = st.Version
 		p.State = model.PeerAvailable
 		p.LastSeen = time.Now()
 		p.Paired = true
+		m.remoteLinkHash[id] = st.LinkHash
+		if problem == "" {
+			delete(m.linkProb, id)
+		} else {
+			m.linkProb[id] = problem
+		}
+		delete(m.netProb, id)
 		out := *p
+		out.Problem = problem
 		m.mu.Unlock()
 
 		m.savePeers()
 		if m.log != nil {
-			m.log.Infof("cluster: %s (%s) elle eşleştirildi", st.NodeName, ip)
+			m.log.Infof("cluster: %s (%s:%d) elle eşleştirildi", st.NodeName, ip, port)
 		}
 		return out, nil
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("yanıt yok")
 	}
-	return model.Peer{}, fmt.Errorf("%s adresine bağlanılamadı: %w", addr, lastErr)
+	// Ham "dial tcp …: i/o timeout" yerine NEDEN: güvenlik duvarı mı,
+	// program mı çalışmıyor, ağ mı farklı (bkz. describeNetErr).
+	return model.Peer{}, fmt.Errorf("%s: %s", addr, describeNetErr(lastErr, portsToTry[0]))
 }
 
 // splitPeerAddr parses "host" or "host:port".

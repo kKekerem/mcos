@@ -8,6 +8,10 @@ type CPUInfo struct {
 	UsagePct float64 `json:"usagePct"`
 	MHz      int     `json:"mhz,omitempty"`
 	TempC    float64 `json:"tempC,omitempty"`
+	// CoreMHz: çekirdek başına ANLIK frekans (dizin = çekirdek numarası).
+	// Tek bir "cpu MHz" değeri, turbo açıkken çekirdeklerin gerçekten
+	// yükselip yükselmediğini göstermiyordu (kullanıcı 400 MHz şikâyeti).
+	CoreMHz []int `json:"coreMHz,omitempty"`
 }
 
 // MemInfo describes system memory in bytes.
@@ -55,7 +59,11 @@ type NetStatus struct {
 	NICs     []NICInfo `json:"nics"`
 	LocalIP  string    `json:"localIP"`
 	Internet bool      `json:"internet"`
-	Hostname string    `json:"hostname"`
+	// Reason: internet YOKSA nedeni, kullanıcıya doğrudan gösterilecek
+	// biçimde. "İnternet yok" tek başına ne yapılacağını söylemiyor;
+	// "ağa bağlı değilsiniz" ile "dışarı çıkış engelli" farklı sorunlardır.
+	Reason   string `json:"reason,omitempty"`
+	Hostname string `json:"hostname"`
 }
 
 // SystemStatus is the snapshot shown on the main dashboard. It is computed by
@@ -110,4 +118,6 @@ type SystemStatus struct {
 	// TurboOn mirrors config.Turbo: when on, servers run unclamped with high
 	// priority + an aggressive JVM profile.
 	TurboOn bool `json:"turboOn"`
+	// Turbo: turbonun GERÇEKTE ne yaptığı, madde madde (bkz. TurboStatus).
+	Turbo *TurboStatus `json:"turbo,omitempty"`
 }

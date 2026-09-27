@@ -1,114 +1,310 @@
 #!/bin/sh
 # mcos-install — MCOS'u bir USB belleğe/diske KALICI olarak kurar.
-#                (OOBE sihirbazından çağrılır.)
+#                (OOBE sihirbazından çağrılır: fbpanel/setup.go, runDiskInstall.)
 #
 # ══════════════════════════════════════════════════════════════════════════
-# TASARIM: neden "initramfs + kalıcı /data" modeli
+# TASARIM: disk düzeni ve açılış modeli
 # ══════════════════════════════════════════════════════════════════════════
 #
-# Eski sürüm tüm kök dosya sistemini ext4 bir bölüme kopyalıyor ve çekirdeği
-# "root=PARTUUID=..." ile başlatmaya çalışıyordu. Bu model üç sorun üretti:
+#   p1  FAT32  MCOS-BOOT          bzImage + initrd.img + GRUB (BIOS ve UEFI)
+#   p2  ext4   MCOS-ROOT-xxxxxx   KÖK: kurulu sistem buradan çalışır
+#   p3  ext4   MCOS-DATA          /data: sunucular, Java, config.json
 #
-#   1. Canlı ISO'nun cpio'su bir /init içerir (Buildroot ROOTFS_CPIO_ADD_INIT).
-#      Çekirdek initramfs'te /init bulursa onu PID 1 yapar ve root='u YOK SAYAR.
-#      initrd yüklenirse disk hiç mount edilmez; yüklenmezse ext4 kökün
-#      kusursuz olması gerekir.
-#   2. "root=LABEL=..." çekirdek tarafından desteklenmez → VFS panic.
-#   3. Tüm rootfs'i kopyalamak yavaş ve her cp hatası sessizce yutuluyordu.
+# Çekirdek initramfs ile açılır; initramfs'teki /init komut satırındaki
+# "mcos.root=LABEL=..." parametresini görünce kök bölümünü bağlayıp
+# switch_root ile ona geçer. Çekirdeğe root= VERİLMEZ: initramfs'te /init
+# olduğu için çekirdek onu zaten yok sayar, "root=LABEL=" ise çekirdekte
+# hiç çözülmez (VFS panic). MBR (msdos) seçildi: MBR'li FAT32 bölümünde
+# /EFI/BOOT/BOOTX64.EFI olan disk hem Legacy BIOS hem UEFI'de açılır.
 #
-# Bu sürüm, canlı sistemin ZATEN çalışan boot modelini kullanır:
-#
-#   * Sistem initramfs'ten çalışır (RAM'de, hızlı, güç kesintisine dayanıklı).
-#   * KALICILIK ikinci bölümdedir: ext4, etiket "MCOS-DATA". Açılışta S99mcos
-#     onu mcos-findfs ile bulup /data'ya bağlar. Java kurulumları, sunucular
-#     ve config.json /data altında yaşadığı için reboot'ta KORUNUR.
-#
-# Bu model QEMU'da hem BIOS hem UEFI ile boot ederek doğrulandı
-# (scripts/exp-grub-dd.sh + scripts/boottest.sh) ve scripts/mkusb.sh'nin
-# ürettiği imajlarla birebir aynıdır — tek boot modeli, tek kod yolu.
+# Önyükleyici parçaları BUILD ZAMANINDA üretilip rootfs'e gömülür
+# (post-build.sh → /usr/lib/mcos/boot/). Hedefte yalnızca dd ve cp yapılır;
+# gömülü parçalar yoksa imajdaki grub-install + /lib/grub modülleri yedektir.
 #
 # ══════════════════════════════════════════════════════════════════════════
-# TASARIM: neden hedefte grub-install ÇAĞRILMIYOR
+# ÖLÇÜLEN "exit 1" YOLLARI (kullanıcı gerçek PC'de üç kez bildirdi)
 # ══════════════════════════════════════════════════════════════════════════
 #
-# Hedef rootfs'te grub-install, grub-mkimage ve /usr/lib/grub/i386-pc HİÇ YOK
-# (ölçüldü: scripts/probe-target-boot.sh). Eski kod
+# QEMU'da panelin verdiği argümanla (mcos-install /dev/sdX) yeniden üretildi:
 #
-#     if command -v grub-install >/dev/null 2>&1; then ... fi
+#   1. Hedefte önceden MCOS vardı → "bölüm tablosu oluşturulamadı"
+#      (parted: "unable to inform the kernel ... in use"). Sebep: initrd
+#      aranırken mcos-findfs MCOS-BOOT HEDEFİN KENDİ boot bölümünü buldu ve
+#      /mnt/mcos-src'ye bağladı; ardından aynı disk bölümlenmeye çalışıldı.
+#      → Kaynak aranırken hedef diskteki hiçbir aygıt bağlanmıyor.
+#   2. Hedefte önceden MCOS vardı ve S03mcosdata onun MCOS-DATA'sını /data
+#      olarak bağlamıştı → "şu anda sistem tarafından kullanılıyor (/data)".
+#      mcosd /data'yı tutuyor (mcosd.lock), sökülemez.
+#      → Düzen uygunsa YERİNDE yenileme: yalnızca p1/p2 biçimlenir, /data
+#        (p3) ve içindeki sunucular korunur.
+#   3. MCOS Ventoy'dan açılmıştı → "initramfs (initrd.img) bulunamadı".
+#      Ventoy ISO'yu belleğe açar; ISO hiçbir blok aygıtında bölüm olarak
+#      görünmez, etiketle aranan "boot medyası" yoktur.
+#      → ISO'nun yolu /ventoy/ventoy_os_param'dan okunur, Ventoy bölümü salt
+#        okunur bağlanır ve ISO loop ile açılır.
+#      (Çalışan sistemden yeniden paketlemek mümkün değil: busybox cpio'da
+#      -o yok — CONFIG_FEATURE_CPIO_O kapalı, ölçüldü.)
+#   4. 4 GB USB → "kök bölümü oluşturulamadı" (parted: "The location 3841MiB
+#      is outside of the device"). Boot 768 + kök 3072 MiB SABİTTİ.
+#      → Bölüm boyutları diskin boyutundan hesaplanıyor; gerçekten sığmıyorsa
+#        "en az X GB gerekir" deniyor.
 #
-# kontrolüne takılıp SESSİZCE hiçbir önyükleyici yazmıyordu: kurulum
-# "başarılı" görünüyor, ama BIOS diski bootable görmüyordu. Kullanıcının
-# bildirdiği hata tam olarak buydu.
+# Ayrıca: eski bir MCOS USB'si ile yeni disk aynı anda takılıyken ikisinde
+# de "MCOS-ROOT" etiketi olduğundan /init ilk bulduğu (ESKİ) kökü açabiliyordu.
+# Kök etiketi artık her kurulumda benzersiz (MCOS-ROOT-<6 hex>); /data'yı ise
+# S03mcosdata kökle AYNI diskteki MCOS-DATA'dan seçiyor.
 #
-# Artık önyükleyici parçaları BUILD ZAMANINDA üretilip rootfs'e gömülüyor
-# (board/mcos/post-build.sh → /usr/lib/mcos/boot/). Burada yalnızca dd ve cp
-# yapılır; hedefte hiçbir önyükleyici aracına ihtiyaç yoktur.
+# Hata çıktısı panelde olduğu gibi gösterilir (fbpanel/setup.go,
+# parseInstallFailure): HATA / NEDEN / ÇÖZÜM / GÜNLÜK satırları.
 
 set -eu
 
 STATUS_FILE=/tmp/mcos-install.status
-LOG_FILE=/tmp/mcos-install.log
 TARGET_MNT=/mnt/mcos-target
 ROOT_MNT=/mnt/mcos-root
+SRC_MNT=/mnt/mcos-src        # ISO (loop) ya da boot bölümü: initrd buradan okunur
+PART_MNT=/mnt/mcos-part      # ISO dosyasını taşıyan bölüm (Ventoy vb.)
+KILIT=/tmp/mcos-install.kilit
 BOOTLIB=/usr/lib/mcos/boot
 
-# Boot bölümü: çekirdek (~10 MB) + initramfs (~122 MB) + pay.
+# Tercih edilen boyutlar (MiB). Küçük disklerde aşağıda küçültülür.
 BOOT_MB=768
-# Kok bolumu boyutu. Canli rootfs sikistirilmamis ~400 MB; 3 GB sonraki
-# guncellemeler ve kullanicinin kurdugu seyler icin rahat pay birakir.
 ROOT_MB=3072
+VERI_EN_AZ_MB=1024
+
+NEDEN=""
+LOG_FILE=""
+KILIT_BIZIM=0
+PART_BIZIM=0
+SRC_BIZIM=0
 
 log() {
-    printf '\n>> mcos-install: %s\n' "$*"
-    printf '%s\n' "$*" >>"$LOG_FILE" 2>/dev/null || true
+    printf '>> mcos-install: %s\n' "$*"
+    if [ -n "$LOG_FILE" ]; then
+        printf '%s %s\n' "$(date +%H:%M:%S 2>/dev/null || true)" "$*" >>"$LOG_FILE" 2>/dev/null || true
+    fi
+    return 0
 }
 
-# Panel bu dosyayı "yüzde|mesaj" olarak okur (panel/view_setup.go).
+# Panel bu dosyayı "yüzde|mesaj" olarak okur (fbpanel/setup.go).
 status() {
     log "$2"
     printf '%s|%s\n' "$1" "$2" >"$STATUS_FILE" 2>/dev/null || true
 }
 
-cleanup() {
-    umount "$TARGET_MNT/boot" 2>/dev/null || true
-    umount "$TARGET_MNT" 2>/dev/null || true
-    rmdir "$TARGET_MNT/boot" "$TARGET_MNT" 2>/dev/null || true
+# calistir, bir komutu çalıştırır; çıktısını günlüğe yazar ve başarısız
+# olursa son satırlarını NEDEN'e koyar. Eskiden parted/mkfs çıktısı ya
+# /dev/null'a gidiyor ya da günlüğe hiç yazılmıyordu; panel yalnızca
+# "exit status 1" gösteriyordu.
+calistir() {
+    [ -n "$LOG_FILE" ] && printf '$ %s\n' "$*" >>"$LOG_FILE" 2>/dev/null
+    if _cikti="$("$@" 2>&1)"; then
+        [ -n "$_cikti" ] && [ -n "$LOG_FILE" ] && printf '%s\n' "$_cikti" >>"$LOG_FILE" 2>/dev/null
+        return 0
+    else
+        _rc=$?
+        if [ -n "$LOG_FILE" ]; then
+            [ -n "$_cikti" ] && printf '%s\n' "$_cikti" >>"$LOG_FILE" 2>/dev/null
+            printf '(çıkış kodu %s)\n' "$_rc" >>"$LOG_FILE" 2>/dev/null
+        fi
+        NEDEN="$(printf '%s\n' "$_cikti" | grep -v '^[[:space:]]*$' | tail -n 2 | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+        [ -n "$NEDEN" ] || NEDEN="$1 çıkış kodu $_rc"
+        return "$_rc"
+    fi
 }
 
-# fail: kurulumu anlaşılır bir Türkçe mesajla ve sıfırdan farklı çıkış koduyla
-# bitirir. SESSİZ BAŞARISIZLIK YOK — panel mesajı doğrudan kullanıcıya gösterir.
+bagli_mi() { grep -qs " $1 " /proc/mounts; }
+
+# temizle: bağlama noktalarını söker, kilidi kaldırır. fail() ve EXIT tuzağı
+# çağırır; bu yüzden HİÇBİR adımı başarısız olup betiği (set -e) erken
+# öldürmemeli — yoksa kullanıcı hata mesajını hiç görmezdi.
+temizle() {
+    for m in "$TARGET_MNT/boot" "$TARGET_MNT" "$ROOT_MNT"; do
+        if bagli_mi "$m"; then umount "$m" 2>/dev/null || true; fi
+    done
+    if [ "$SRC_BIZIM" = 1 ] && bagli_mi "$SRC_MNT"; then umount "$SRC_MNT" 2>/dev/null || true; fi
+    if [ "$PART_BIZIM" = 1 ] && bagli_mi "$PART_MNT"; then umount "$PART_MNT" 2>/dev/null || true; fi
+    SRC_BIZIM=0; PART_BIZIM=0
+    rmdir "$TARGET_MNT/boot" "$TARGET_MNT" "$ROOT_MNT" "$SRC_MNT" "$PART_MNT" 2>/dev/null || true
+    if [ "$KILIT_BIZIM" = 1 ]; then rm -rf "$KILIT" || true; fi
+    KILIT_BIZIM=0
+    return 0
+}
+
+# fail: kurulumu Türkçe, yapılabilir bir mesajla bitirir. SESSİZ BAŞARISIZLIK
+# YOK. $1 ne oldu, $2 kullanıcı ne yapmalı. Panel HATA/NEDEN/ÇÖZÜM/GÜNLÜK
+# satırlarını ayıklayıp aynen gösterir.
 fail() {
-    log "HATA: $*"
-    printf 'HATA|%s\n' "$*" >"$STATUS_FILE" 2>/dev/null || true
-    cleanup
-    printf 'mcos-install başarısız: %s\n' "$*" >&2
+    _m="$1"; _c="${2:-}"
+    log "HATA: $_m"
+    printf 'HATA|%s\n' "$_m" >"$STATUS_FILE" 2>/dev/null || true
+    temizle
+    {
+        printf 'mcos-install başarısız\n'
+        printf 'HATA: %s\n' "$_m"
+        [ -n "$NEDEN" ] && printf 'NEDEN: %s\n' "$NEDEN"
+        [ -n "$_c" ] && printf 'ÇÖZÜM: %s\n' "$_c"
+        [ -n "$LOG_FILE" ] && printf 'GÜNLÜK: %s\n' "$LOG_FILE"
+    } >&2
+    if [ -n "$LOG_FILE" ]; then
+        {
+            [ -n "$NEDEN" ] && printf 'NEDEN: %s\n' "$NEDEN"
+            [ -n "$_c" ] && printf 'ÇÖZÜM: %s\n' "$_c"
+        } >>"$LOG_FILE" 2>/dev/null
+    fi
     exit 1
 }
 
 need() {
-    command -v "$1" >/dev/null 2>&1 || fail "gerekli araç bulunamadı: $1"
+    command -v "$1" >/dev/null 2>&1 || fail "gerekli araç imajda yok: $1" \
+        "Bu imaj eksik derlenmiş; ISO'yu yeniden indirip/derleyip tekrar deneyin."
 }
 
-# ── Hedef aygıtı doğrula ────────────────────────────────────────────────────
+# ── Küçük yardımcılar (imajda stat/blockdev/findfs YOK — ölçüldü) ──────────
 
-TARGET="${1:-}"
+dosya_boyutu() {
+    # shellcheck disable=SC2046
+    set -- $(ls -lnL "$1" 2>/dev/null)
+    echo "${5:-0}"
+}
+
+disk_sektor() { cat "/sys/class/block/$(basename "$1")/size" 2>/dev/null || echo 0; }
+
+imza() { dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null; }
+imza_hex() { imza "$@" | od -An -tx1 | tr -d ' \n'; }
+
+ext_mi() { [ "$(imza_hex "$1" 1080 2)" = "53ef" ]; }
+ext_etiket() { imza "$1" 1144 16 | tr -d '\000'; }
+iso_mu() { [ "$(imza "$1" 32769 5)" = "CD001" ]; }
+
+# ana_disk, bir blok aygıtının (bölüm ya da disk) bağlı olduğu diskin adını
+# sysfs'ten verir. Metin karşılaştırması ("/dev/sda"* gibi) KULLANILMAZ:
+# nvme0n1 ile nvme0n10, sda ile sdaa ayrılamaz.
+ana_disk() {
+    _n="$(basename "$1")"
+    [ -e "/sys/class/block/$_n" ] || { echo ""; return 0; }
+    if [ -e "/sys/class/block/$_n/partition" ]; then
+        basename "$(dirname "$(readlink -f "/sys/class/block/$_n")")"
+    else
+        echo "$_n"
+    fi
+}
+
+# dosya_aygiti, bir dosyanın durduğu dosya sisteminin aygıtını verir (en
+# uzun eşleşen bağlama noktası).
+dosya_aygiti() {
+    awk -v f="$1" '
+        $1 ~ /^\/dev\// {
+            mp = $2; gsub(/\\040/, " ", mp)
+            if ((f == mp || index(f, mp == "/" ? "/" : mp "/") == 1) && length(mp) > enuzun) {
+                enuzun = length(mp); d = $1
+            }
+        }
+        END { print d }' /proc/mounts
+}
+
+# hedefte_mi: aygıt hedef diskte mi? loop aygıtları için ARKA DOSYANIN
+# durduğu disk sayılır (Ventoy kalıcılık dosyası: /data = loop0 → sda1).
+hedefte_mi() {
+    _d="$1"
+    case "$_d" in
+        /dev/loop*)
+            _bf="$(cat "/sys/block/$(basename "$_d")/loop/backing_file" 2>/dev/null || true)"
+            [ -n "$_bf" ] || return 1
+            _d="$(dosya_aygiti "$_bf")"
+            [ -n "$_d" ] || return 1
+            ;;
+    esac
+    [ "$(ana_disk "$_d")" = "$HEDEF_AD" ]
+}
+
+# bolum_yolu N: hedefin N. bölümünün aygıt yolu. Ad rakamla bitiyorsa
+# (nvme0n1, mmcblk0) araya "p" girer.
+bolum_yolu() {
+    case "$TARGET" in
+        *[0-9]) echo "${TARGET}p$1" ;;
+        *)      echo "${TARGET}$1" ;;
+    esac
+}
+
+bolum_mb() { echo $(( $(disk_sektor "$1") / 2048 )); }
+
+# ── Argümanlar ──────────────────────────────────────────────────────────────
+#
+# Hedef hem KONUMSAL hem de --device ile verilebilir. Panel bir süre
+# `--device /dev/sda --yes` diye çağırdı ve betik "geçersiz blok aygıtı:
+# --device" deyip diske hiç dokunmadan 1 ile çıkıyordu. Eski panel + yeni
+# betik (ya da tersi) eşleştiğinde de ÇALIŞSIN diye iki biçim kabul ediliyor.
+TARGET=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --device) shift; TARGET="${1:-}" ;;
+        --device=*) TARGET="${1#--device=}" ;;
+        --yes|-y) : ;;  # onay panelde alınıyor; burada etkileşim yok
+        --) shift; [ -n "${1:-}" ] && TARGET="$1" ;;
+        -*) printf 'mcos-install: bilinmeyen seçenek: %s\n' "$1" >&2; exit 2 ;;
+        *) TARGET="$1" ;;
+    esac
+    [ $# -gt 0 ] && shift
+done
 [ -n "$TARGET" ] || { printf 'Kullanım: mcos-install /dev/sdX\n' >&2; exit 2; }
-[ -b "$TARGET" ] || fail "geçersiz blok aygıtı: $TARGET"
+# Bu denetim günlük açılmadan ÖNCE: panelin sınaması (setup_install_test.go)
+# betiği geliştirme makinesinde sahte bir aygıtla çalıştırıyor; orada hiçbir
+# dosya yazılmamalı.
+[ -b "$TARGET" ] || fail "geçersiz blok aygıtı: $TARGET" \
+    "Disk listesini yenileyin (disk çıkarılmış olabilir) ve yeniden seçin."
+HEDEF_AD="$(basename "$TARGET")"
 
-# Üzerinde çalıştığımız medyaya kurmayı reddet: kendi altımızdaki diski
-# biçimlendirmek sistemi anında bozar.
-if [ -r /proc/mounts ]; then
-    while read -r dev mp _rest; do
-        case "$dev" in
-            "$TARGET"*)
-                case "$mp" in
-                    /|/boot|/data)
-                        fail "$TARGET şu anda sistem tarafından kullanılıyor ($mp) — başka bir aygıt seçin"
-                        ;;
-                esac
-                ;;
-        esac
-    done < /proc/mounts
+# ── Günlük ──────────────────────────────────────────────────────────────────
+#
+# Tam günlük kalıcı /data/log altına (yeniden başlatınca da okunabilsin);
+# /data yazılamıyorsa /run/mcos. /tmp/mcos-install.log eski paneller için
+# ona sembolik bağ.
+ZAMAN="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo simdi)"
+for _d in /data/log /run/mcos /tmp; do
+    mkdir -p "$_d" 2>/dev/null || continue
+    if : >"$_d/install-$ZAMAN.log" 2>/dev/null; then
+        LOG_FILE="$_d/install-$ZAMAN.log"
+        break
+    fi
+done
+ln -sf "$LOG_FILE" /tmp/mcos-install.log 2>/dev/null || true
+log "hedef: $TARGET  günlük: $LOG_FILE"
+log "çekirdek: $(uname -r 2>/dev/null || echo ?)  komut satırı: $(cat /proc/cmdline 2>/dev/null || true)"
+
+# İki kurulum aynı anda koşarsa birbirinin bağlama noktalarını söker ve aynı
+# diski böler. Kilit: mkdir atomiktir.
+if ! mkdir "$KILIT" 2>/dev/null; then
+    _eski="$(cat "$KILIT/pid" 2>/dev/null || true)"
+    if [ -n "$_eski" ] && kill -0 "$_eski" 2>/dev/null; then
+        fail "başka bir kurulum zaten sürüyor (pid $_eski)" "Onun bitmesini bekleyin."
+    fi
+    rm -rf "$KILIT"; mkdir "$KILIT" 2>/dev/null || true
+fi
+echo $$ >"$KILIT/pid" 2>/dev/null || true
+KILIT_BIZIM=1
+trap 'temizle' EXIT
+trap 'fail "kurulum yarıda kesildi (sinyal)" "Kurulumu yeniden başlatın."' INT TERM HUP
+
+# Önceki (yarıda kalmış) bir koşudan kalan bağlama noktaları.
+for _m in "$TARGET_MNT/boot" "$TARGET_MNT" "$ROOT_MNT" "$SRC_MNT" "$PART_MNT"; do
+    if bagli_mi "$_m"; then umount "$_m" 2>/dev/null || true; fi
+done
+
+# ── Hedefi doğrula ──────────────────────────────────────────────────────────
+
+[ -e "/sys/class/block/$HEDEF_AD" ] || fail "$TARGET sistemde görünmüyor" \
+    "Diski çıkarıp yeniden takın ve disk listesini yenileyin."
+if [ -e "/sys/class/block/$HEDEF_AD/partition" ]; then
+    fail "$TARGET bir bölüm, disk değil" "Diskin tamamını seçin (ör. /dev/sda, /dev/nvme0n1)."
+fi
+case "$HEDEF_AD" in
+    loop*|ram*|zram*|sr*|dm-*|md*)
+        fail "$TARGET kurulum hedefi olamaz (sanal/optik aygıt)" "Bir USB bellek, SSD ya da HDD seçin." ;;
+esac
+if [ "$(cat "/sys/class/block/$HEDEF_AD/ro" 2>/dev/null || echo 0)" = 1 ]; then
+    fail "$TARGET yazmaya karşı korumalı" \
+        "SD kart/USB üzerindeki kilit anahtarını açın ya da başka bir disk seçin."
 fi
 
 need parted
@@ -116,159 +312,495 @@ need mkfs.vfat
 need mkfs.ext4
 need dd
 need od
+need mount
 need partprobe
 
-: >"$LOG_FILE" 2>/dev/null || true
-
-# ── Önyükleyici parçaları gömülü mü? ────────────────────────────────────────
+# ── Ventoy'dan mı açıldık? ──────────────────────────────────────────────────
 #
-# Bunlar olmadan kurulum boot ETMEZ. En başta kontrol edilir: kullanıcı 5
-# dakika bekleyip sonunda boot etmeyen bir disk almasın.
+# Ventoy açılışta initramfs'e /ventoy/ventoy_os_param koyar. Yapısı (Ventoy
+# ventoy_os_param): guid[16] chksum[1] disk_guid[16] disk_size[8]
+# part_id[2] part_type[2] img_path[384]. disk_guid, Ventoy diskinin MBR'sinde
+# 0x180 ofsetinde de yazılıdır (ölçüldü: QEMU + Ventoy 1.1.x); böylece doğru
+# Ventoy diski birden fazla USB takılıyken bile kesin bulunur.
+VENTOY_DISK=""
+VENTOY_BOLUM=""
+VENTOY_ISO=""
+VP=/ventoy/ventoy_os_param
+if [ -r "$VP" ]; then
+    VENTOY_ISO="$(imza "$VP" 45 384 | tr -d '\000')"
+    _guid="$(imza_hex "$VP" 17 16)"
+    _parca="$(imza "$VP" 41 1 | od -An -tu1 | tr -d ' \n')"
+    for _b in /sys/block/*; do
+        _n="$(basename "$_b")"
+        case "$_n" in loop*|ram*|zram*|sr*|dm-*|md*) continue ;; esac
+        if [ "$(imza_hex "/dev/$_n" 384 16)" = "$_guid" ]; then
+            VENTOY_DISK="$_n"
+            break
+        fi
+    done
+    if [ -n "$VENTOY_DISK" ]; then
+        case "$VENTOY_DISK" in
+            *[0-9]) VENTOY_BOLUM="/dev/${VENTOY_DISK}p${_parca:-1}" ;;
+            *)      VENTOY_BOLUM="/dev/${VENTOY_DISK}${_parca:-1}" ;;
+        esac
+    elif [ -x /usr/bin/mcos-vtoydata ]; then
+        # Yedek: VTOYEFI etiketli bölümü olan disk (mcos-vtoydata bul).
+        # shellcheck disable=SC2046
+        set -- $(/usr/bin/mcos-vtoydata bul 2>/dev/null || true)
+        if [ $# -ge 1 ]; then
+            VENTOY_BOLUM="$1"
+            VENTOY_DISK="$(ana_disk "$1")"
+        fi
+    fi
+    log "Ventoy açılışı: ISO=$VENTOY_ISO disk=${VENTOY_DISK:-?} bölüm=${VENTOY_BOLUM:-?}"
+fi
 
+if [ -n "$VENTOY_DISK" ] && [ "$VENTOY_DISK" = "$HEDEF_AD" ]; then
+    fail "$TARGET, MCOS'un şu an açıldığı Ventoy USB'si" \
+        "Başka bir diske kurun. Bu USB'yi yalnızca MCOS'a ayırmak isterseniz MCOS'u başka bir USB'den/ISO'dan açıp bu USB'yi hedef seçin."
+fi
+
+# ── Hedef diski serbest bırak ───────────────────────────────────────────────
+#
+# Hedefin herhangi bir bölümü bağlıysa parted bölüm tablosunu çekirdeğe
+# bildiremez ("unable to inform the kernel ... in use") ve kurulum 1 ile
+# biter. Burada hedefte bağlı ne varsa sınıflandırılır:
+#   /  /boot       → sistem bu diskten çalışıyor: reddet
+#   /data          → yerinde yenileme adayı (aşağıda)
+#   başka her şey  → (USB tarayıcısının geçici bağlaması, eski bir kurulumun
+#                    artığı, Ventoy bölümü...) söküler
+VERI_HEDEFTE=""
+SOKULECEK=""
+while read -r _dev _mp _rest; do
+    case "$_dev" in /dev/*) ;; *) continue ;; esac
+    hedefte_mi "$_dev" || continue
+    _mp="$(printf '%b' "$_mp")"
+    case "$_mp" in
+        /|/boot)
+            fail "MCOS şu anda $TARGET üzerinden çalışıyor ($_mp)" \
+                "Çalışan sistemin kendi diskine kurulamaz. Başka bir disk seçin ya da MCOS'u USB/ISO'dan açıp tekrar deneyin." ;;
+        /data)
+            case "$_dev" in
+                /dev/loop*)
+                    # /data bu diskteki bir DOSYADAN (Ventoy kalıcılık
+                    # dosyası) bağlı ve mcosd onu tutuyor: disk bölümlenemez.
+                    fail "çalışan sistemin kalıcı verisi (/data) $TARGET üzerindeki bir dosyada (Ventoy kalıcılık dosyası)" \
+                        "Başka bir disk seçin. Bu diske kurmak şartsa: açılış menüsünde MCOS satırındayken 'e' tuşuna basın, 'linux' satırının sonuna ' mcos.nodata' ekleyip F10 ile başlatın ve kurulumu yeniden deneyin." ;;
+            esac
+            VERI_HEDEFTE="$_dev" ;;
+        *)
+            SOKULECEK="$_mp
+$SOKULECEK" ;;
+    esac
+done < /proc/mounts
+
+# İç içe bağlamalar için ters sırada (en son bağlanan önce) sök. Döngü AYNI
+# kabukta: boru hattındaki bir alt kabukta fail() yalnızca alt kabuğu bitirir.
+_eski_ifs="$IFS"
+IFS='
+'
+set -f
+for _mp in $SOKULECEK; do
+    [ -n "$_mp" ] || continue
+    log "hedefte bağlı bölüm çözülüyor: $_mp"
+    if ! calistir umount "$_mp"; then
+        _kim="$(fuser -m "$_mp" 2>/dev/null | tr -s ' ' || true)"
+        NEDEN="$NEDEN${_kim:+ (kullanan süreçler: $_kim)}"
+        IFS="$_eski_ifs"; set +f
+        fail "$TARGET üzerindeki $_mp çözülemedi (kullanımda)" \
+            "O diskte açık dosya/klasör bırakan işlemi kapatın ya da USB'yi çıkarıp takın ve tekrar deneyin."
+    fi
+done
+IFS="$_eski_ifs"
+set +f
+
+# Hedefte takas alanı açıksa kapat.
+if [ -r /proc/swaps ]; then
+    while read -r _dev _rest; do
+        case "$_dev" in /dev/*) ;; *) continue ;; esac
+        if hedefte_mi "$_dev"; then
+            log "hedefteki takas alanı kapatılıyor: $_dev"
+            swapoff "$_dev" 2>/dev/null || true
+        fi
+    done < /proc/swaps
+fi
+
+# ── Önyükleyici parçaları ───────────────────────────────────────────────────
+#
+# Bunlar olmadan kurulum boot ETMEZ; kullanıcı 5 dakika bekleyip açılmayan
+# bir disk almasın diye EN BAŞTA denetlenir. Gömülü parçalar (post-build)
+# yoksa imajdaki grub-install ve /lib/grub modül seti yedek yoldur.
+GRUB_INSTALL="$(command -v grub-install 2>/dev/null || true)"
+GRUB_PC_DIR=""
+GRUB_EFI_DIR=""
+for d in /lib/grub /usr/lib/grub; do
+    if [ -z "$GRUB_PC_DIR" ] && [ -f "$d/i386-pc/boot.img" ] && [ -f "$d/i386-pc/moddep.lst" ]; then
+        GRUB_PC_DIR="$d/i386-pc"
+    fi
+    if [ -z "$GRUB_EFI_DIR" ] && [ -f "$d/x86_64-efi/moddep.lst" ]; then
+        GRUB_EFI_DIR="$d/x86_64-efi"
+    fi
+done
+
+BIOS_YOLU=""
+UEFI_YOLU=""
+if [ -f "$BOOTLIB/boot.img" ] && [ -f "$BOOTLIB/core.img" ]; then
+    BIOS_YOLU=gomulu
+elif [ -n "$GRUB_INSTALL" ] && [ -n "$GRUB_PC_DIR" ]; then
+    BIOS_YOLU=grub-install
+fi
+if [ -f "$BOOTLIB/BOOTX64.EFI" ]; then
+    UEFI_YOLU=gomulu
+elif [ -n "$GRUB_INSTALL" ] && [ -n "$GRUB_EFI_DIR" ]; then
+    UEFI_YOLU=grub-install
+fi
 HAVE_BIOS=0
 HAVE_UEFI=0
-[ -f "$BOOTLIB/boot.img" ] && [ -f "$BOOTLIB/core.img" ] && HAVE_BIOS=1
-[ -f "$BOOTLIB/BOOTX64.EFI" ] && HAVE_UEFI=1
+[ -n "$BIOS_YOLU" ] && HAVE_BIOS=1
+[ -n "$UEFI_YOLU" ] && HAVE_UEFI=1
 
 if [ "$HAVE_BIOS" = 0 ] && [ "$HAVE_UEFI" = 0 ]; then
-    fail "önyükleyici dosyaları imajda yok ($BOOTLIB). Bu MCOS imajı kurulum için derlenmemiş; ISO'yu yeniden derleyin."
+    fail "önyükleyici kurulamaz: ne gömülü parçalar ($BOOTLIB) ne de grub-install + /lib/grub modülleri var" \
+        "Bu imaj eksik derlenmiş; ISO'yu yeniden derleyin/indirin."
 fi
-log "önyükleyici durumu: BIOS=$HAVE_BIOS UEFI=$HAVE_UEFI"
+log "önyükleyici durumu: BIOS=${BIOS_YOLU:-yok} UEFI=${UEFI_YOLU:-yok}"
 
-# Çekirdek ve initramfs'i canlı sistemde bul.
+# ── Çekirdek ve initramfs kaynağı ───────────────────────────────────────────
+#
+# Çekirdek canlı rootfs'te (/boot/bzImage) durur. initramfs ise post-build
+# tarafından rootfs'ten SİLİNİR (kendini özyinelemeli paketlememesi için);
+# açılış ortamından okunmalıdır. Aranan yerler, sırayla:
+#   1. rootfs'teki olası kopyalar
+#   2. kurulu bir diskten açıldıysak o diskin boot bölümü
+#   3. Ventoy: ISO dosyası (loop)
+#   4. optik sürücüler, sonra diğer tüm diskler/bölümler: doğrudan MCOS boot
+#      dosyaları ya da kök/ilk alt dizinde *mcos*.iso
+# HEDEF DİSKTEKİ HİÇBİR AYGIT BAĞLANMAZ (ölçülen hata 1).
 KERNEL=""
+INITRD=""
+KAYNAK=""
+KAYNAK_DIZIN=""
+
 for k in /boot/bzImage /bzImage; do
     [ -f "$k" ] && { KERNEL="$k"; break; }
 done
-[ -n "$KERNEL" ] || fail "çekirdek (bzImage) canlı sistemde bulunamadı"
 
-# initramfs: post-build onu rootfs'ten SİLER (kendini özyinelemeli
-# paketlememesi için), bu yüzden boot medyasından okunur.
-INITRD=""
+# kaynak_uygun_mu DIZIN: dizinde MCOS açılış dosyaları var mı? Başka bir
+# dağıtımın /boot/initrd.img'i alınmasın diye MCOS izi de aranır.
+kaynak_uygun_mu() {
+    _k=""; _i=""
+    for _f in "$1/boot/initrd.img" "$1/initrd.img"; do [ -f "$_f" ] && { _i="$_f"; break; }; done
+    for _f in "$1/boot/bzImage" "$1/bzImage"; do [ -f "$_f" ] && { _k="$_f"; break; }; done
+    [ -n "$_i" ] || return 1
+    if ! grep -qs 'MCOS' "$1/boot/grub/grub.cfg" && [ ! -d "$1/mcos" ]; then
+        return 1
+    fi
+    INITRD="$_i"
+    KAYNAK_DIZIN="$1"
+    [ -n "$KERNEL" ] || KERNEL="$_k"
+    return 0
+}
+
+# iso_dene DOSYA: ISO'yu loop ile SRC_MNT'e bağlar; MCOS ise bağlı bırakır.
+iso_dene() {
+    [ -f "$1" ] || return 1
+    mkdir -p "$SRC_MNT"
+    if ! calistir mount -o loop,ro "$1" "$SRC_MNT"; then
+        log "ISO bağlanamadı: $1 ($NEDEN)"
+        NEDEN=""
+        return 1
+    fi
+    SRC_BIZIM=1
+    if kaynak_uygun_mu "$SRC_MNT"; then
+        KAYNAK="$1 (ISO)"
+        return 0
+    fi
+    umount "$SRC_MNT" 2>/dev/null; SRC_BIZIM=0
+    return 1
+}
+
+# bolum_dene AYGIT: bölümü (ya da ISO-hybrid diski) salt okunur bağlar ve
+# içinde MCOS açılış dosyası ya da MCOS ISO'su arar.
+bolum_dene() {
+    _dev="$1"
+    [ -b "$_dev" ] || return 1
+    hedefte_mi "$_dev" && return 1
+    # ext4 bölümlerine dokunulmaz: MCOS açılış ortamı FAT/ISO9660/exFAT/NTFS
+    # olur; ext4'ü salt okunur bağlamak bile günlük (journal) yeniden
+    # oynatıp başka bir diske yazabilir.
+    ext_mi "$_dev" && return 1
+    _mp="$(awk -v d="$_dev" '$1 == d { print $2; exit }' /proc/mounts)"
+    _mp="$(printf '%b' "$_mp")"
+    _bizim=0
+    if [ -z "$_mp" ]; then
+        mkdir -p "$PART_MNT"
+        mount -o ro "$_dev" "$PART_MNT" 2>/dev/null || return 1
+        _mp="$PART_MNT"; _bizim=1; PART_BIZIM=1
+    fi
+    if kaynak_uygun_mu "$_mp"; then
+        KAYNAK="$_dev"
+        # Bağlama kurulum sonuna dek kalır: initrd ve çevrimdışı paket
+        # buradan okunur (temizle söker).
+        return 0
+    fi
+    for _iso in "$_mp"/*.iso "$_mp"/*.ISO "$_mp"/*/*.iso "$_mp"/*/*.ISO; do
+        case "$(basename "$_iso")" in
+            *[mM][cC][oO][sS]*) iso_dene "$_iso" && return 0 ;;
+        esac
+    done
+    if [ "$_bizim" = 1 ]; then umount "$PART_MNT" 2>/dev/null; PART_BIZIM=0; fi
+    return 1
+}
+
+# 1. rootfs
 for i in /boot/initrd.img /initrd.img "$BOOTLIB/initrd.img"; do
-    [ -f "$i" ] && { INITRD="$i"; break; }
+    [ -f "$i" ] && { INITRD="$i"; KAYNAK="çalışan sistem"; break; }
 done
+
+# 2. Kurulu diskten açıldıysak (kök bir blok aygıtı) aynı diskin boot bölümü.
 if [ -z "$INITRD" ]; then
-    # Boot medyasını bulup oradan al: canlı sistem ondan boot etti.
-    for lbl in MCOS-BOOT MCOS MCOS_LIVE; do
-        part="$(/usr/bin/mcos-findfs "$lbl" 2>/dev/null || true)"
-        [ -n "$part" ] || continue
-        mkdir -p /mnt/mcos-src
-        if mount -o ro "$part" /mnt/mcos-src 2>/dev/null; then
-            for i in /mnt/mcos-src/boot/initrd.img /mnt/mcos-src/initrd.img; do
-                [ -f "$i" ] && { INITRD="$i"; break; }
-            done
-            [ -n "$INITRD" ] && break
-            umount /mnt/mcos-src 2>/dev/null || true
+    _kok="$(awk '$2 == "/" && $1 ~ /^\/dev\// { d = $1 } END { print d }' /proc/mounts)"
+    if [ -n "$_kok" ]; then
+        _kd="$(ana_disk "$_kok")"
+        for _p in /sys/class/block/"$_kd"/"$_kd"*; do
+            [ -e "$_p/partition" ] || continue
+            bolum_dene "/dev/$(basename "$_p")" && break
+        done
+    fi
+fi
+
+# 3. Ventoy ISO'su.
+if [ -z "$INITRD" ] && [ -n "$VENTOY_BOLUM" ] && [ -n "$VENTOY_ISO" ]; then
+    _vmp="$(awk -v d="$VENTOY_BOLUM" '$1 == d { print $2; exit }' /proc/mounts)"
+    _vmp="$(printf '%b' "$_vmp")"
+    if [ -z "$_vmp" ]; then
+        mkdir -p "$PART_MNT"
+        if calistir mount -o ro "$VENTOY_BOLUM" "$PART_MNT"; then
+            _vmp="$PART_MNT"; PART_BIZIM=1
+        else
+            log "Ventoy bölümü bağlanamadı: $VENTOY_BOLUM ($NEDEN)"; NEDEN=""
+        fi
+    fi
+    if [ -n "$_vmp" ]; then
+        iso_dene "$_vmp$VENTOY_ISO" || log "Ventoy ISO'su okunamadı: $_vmp$VENTOY_ISO"
+        if [ -z "$INITRD" ] && [ "$PART_BIZIM" = 1 ]; then umount "$PART_MNT" 2>/dev/null; PART_BIZIM=0; fi
+    fi
+fi
+
+# 4. Optik sürücüler, sonra diğer diskler.
+if [ -z "$INITRD" ]; then
+    for _dev in /dev/sr[0-9]*; do
+        [ -b "$_dev" ] || continue
+        mkdir -p "$SRC_MNT"
+        if mount -o ro "$_dev" "$SRC_MNT" 2>/dev/null; then
+            SRC_BIZIM=1
+            if kaynak_uygun_mu "$SRC_MNT"; then KAYNAK="$_dev"; break; fi
+            umount "$SRC_MNT" 2>/dev/null; SRC_BIZIM=0
         fi
     done
 fi
-[ -n "$INITRD" ] || fail "initramfs (initrd.img) bulunamadı — boot medyası okunamadı"
-log "çekirdek=$KERNEL initramfs=$INITRD"
-
-KSIZE_MB=$(( ( $(stat -c%s "$KERNEL") + $(stat -c%s "$INITRD") ) / 1048576 + 16 ))
-[ "$BOOT_MB" -ge "$KSIZE_MB" ] || BOOT_MB="$KSIZE_MB"
-
-# ── 1/7 Bölümleme ───────────────────────────────────────────────────────────
-#
-# MBR (msdos) seçildi, GPT değil: MBR'li bir FAT32 bölümünde
-# /EFI/BOOT/BOOTX64.EFI bulunan disk, hem Legacy BIOS hem de çoğu UEFI
-# firmware'i tarafından boot edilir. Böylece TEK disk iki firmware türünde de
-# çalışır ve kullanıcıya "hangisini seçeyim" sorusu sorulmaz.
-
-status 5 "[1/7] Bölüm tablosu oluşturuluyor: $TARGET"
-cleanup
-
-# Eski imzaları temizle: kalıntı bir GPT, MBR'yi gölgeleyip firmware'i
-# şaşırtabilir.
-dd if=/dev/zero of="$TARGET" bs=1M count=17 status=none 2>/dev/null || true
-# Diskin SONUNDAKİ yedek GPT başlığını da sil.
-TOTAL_SECTORS="$(blockdev --getsz "$TARGET" 2>/dev/null || echo 0)"
-if [ "$TOTAL_SECTORS" -gt 4096 ]; then
-    dd if=/dev/zero of="$TARGET" bs=512 seek=$(( TOTAL_SECTORS - 2048 )) count=2048 \
-        status=none 2>/dev/null || true
+if [ -z "$INITRD" ]; then
+    for _b in /sys/block/*; do
+        _n="$(basename "$_b")"
+        case "$_n" in loop*|ram*|zram*|sr*|dm-*|md*) continue ;; esac
+        [ "$_n" = "$HEDEF_AD" ] && continue
+        for _p in /sys/class/block/"$_n"/"$_n"*; do
+            [ -e "$_p/partition" ] || continue
+            bolum_dene "/dev/$(basename "$_p")" && break 2
+        done
+        # Bölümsüz ISO-hybrid bellek (dd ile yazılmış ISO): tüm disk ISO9660.
+        if iso_mu "/dev/$_n"; then
+            bolum_dene "/dev/$_n" && break
+        fi
+    done
 fi
 
-parted -s "$TARGET" mklabel msdos || fail "bölüm tablosu oluşturulamadı"
-parted -s "$TARGET" mkpart primary fat32 1MiB "$(( BOOT_MB + 1 ))MiB" \
-    || fail "boot bölümü oluşturulamadı"
-parted -s "$TARGET" set 1 boot on || fail "boot bayrağı ayarlanamadı"
-parted -s "$TARGET" set 1 lba on 2>/dev/null || true
-# KOK bolumu: kurulu sistem BURADAN calisir, RAM'den degil.
+if [ -z "$INITRD" ]; then
+    fail "sistem imajı (initrd.img) hiçbir yerde bulunamadı" \
+        "MCOS'u açtığınız USB/DVD takılı kalmalı. Ventoy kullanıyorsanız ISO dosyası Ventoy bölümünde durmalı; ISO'yu bir diske kopyaladıysanız adında 'mcos' geçmeli."
+fi
+[ -n "$KERNEL" ] || fail "çekirdek (bzImage) bulunamadı" \
+    "MCOS'u açtığınız USB/DVD takılı kalmalı; ISO'yu yeniden indirip deneyin."
+log "kaynak: $KAYNAK  çekirdek=$KERNEL  initramfs=$INITRD"
+
+KSIZE_MB=$(( ( $(dosya_boyutu "$KERNEL") + $(dosya_boyutu "$INITRD") ) / 1048576 ))
+
+# ── Bölüm boyutları ─────────────────────────────────────────────────────────
 #
-# Canli ISO/USB initramfs'ten acilir ve her sey RAM'dedir - bu bilerek
-# boyledir, USB'yi yipratmaz ve ISO'ya hic dokunulmaz. Ama diske kurulan
-# sistemin KALICI olmasi gerekir: yazilan dosya, kurulan paket, degisen
-# ayar reboot'tan sonra durmalidir. Bu yuzden kurulumda ayri bir ext4 KOK
-# bolumu olusturulur ve /init switch_root ile ona gecer.
-parted -s "$TARGET" mkpart primary ext4 "$(( BOOT_MB + 1 ))MiB" \
-    "$(( BOOT_MB + 1 + ROOT_MB ))MiB" \
-    || fail "kök bölümü oluşturulamadı"
-parted -s "$TARGET" mkpart primary ext4 "$(( BOOT_MB + 1 + ROOT_MB ))MiB" 100% \
-    || fail "kalıcı veri bölümü oluşturulamadı"
+# Ölçülen hata 4: 4 GB (3824 MiB) bir USB'de sabit 768 + 3072 MiB sığmıyordu.
+# Gereken en az boyutlar ölçülerek bulunur; küçük diskte boot ve kök bunlara
+# indirilir, kalan veri bölümüne kalır.
+BOOT_GEREK=$(( KSIZE_MB + 96 ))   # çekirdek + initrd + GRUB modülleri + pay
+KOK_KULLANIM=0
+for _d in bin etc lib lib32 lib64 opt root sbin usr var; do
+    [ -d "/$_d" ] || continue
+    _m="$(du -sm "/$_d" 2>/dev/null | awk '{print $1}')"
+    KOK_KULLANIM=$(( KOK_KULLANIM + ${_m:-0} ))
+done
+# +512: canlı sistemde budanan firmware (mcos-fwprune, ~240 MB) kurulumda
+# initrd'den geri konuyor (aşağıda, 7/7); ölçülen canlı kullanım onu içermez.
+KOK_GEREK=$(( KOK_KULLANIM + KOK_KULLANIM / 4 + 512 ))
+[ "$BOOT_MB" -ge "$BOOT_GEREK" ] || BOOT_MB="$BOOT_GEREK"
+[ "$ROOT_MB" -ge "$KOK_GEREK" ] || ROOT_MB="$KOK_GEREK"
+DISK_MB=$(( $(disk_sektor "$TARGET") / 2048 ))
+log "disk=${DISK_MB} MiB  gereken: boot≥${BOOT_GEREK} kök≥${KOK_GEREK} (sistem ${KOK_KULLANIM} MiB) veri≥${VERI_EN_AZ_MB}"
 
-status 12 "[2/7] Bölüm tablosu çekirdeğe bildiriliyor..."
-partprobe "$TARGET" 2>/dev/null || partx -a "$TARGET" 2>/dev/null || true
-# Bu imajda udev yok; udevadm settle her zaman başarısız olur, sabit bekleme.
-sleep 2
+# ── Yerinde yenileme mi? ────────────────────────────────────────────────────
+#
+# Ölçülen hata 2: hedefin MCOS-DATA'sı /data olarak bağlı ve mcosd onu
+# kullanıyor. Bölüm tablosu değişemez; ama düzen bizimkiyse (p1 FAT, p2 ext4,
+# p3 = /data) yalnızca p1 ve p2 yeniden yazılır, /data'ya DOKUNULMAZ.
+YERINDE=0
+BOOT_PART="$(bolum_yolu 1)"
+ROOT_PART="$(bolum_yolu 2)"
+DATA_PART="$(bolum_yolu 3)"
+if [ -n "$VERI_HEDEFTE" ]; then
+    _neden=""
+    if [ "$VERI_HEDEFTE" != "$DATA_PART" ]; then
+        _neden="/data $VERI_HEDEFTE üzerinde, üçüncü bölümde değil (eski düzen)"
+    elif [ ! -b "$BOOT_PART" ] || [ ! -b "$ROOT_PART" ]; then
+        _neden="diskte boot ve kök bölümleri yok"
+    elif [ "$(cat "/sys/class/block/$(basename "$BOOT_PART")/start" 2>/dev/null || echo 0)" -lt 2048 ]; then
+        _neden="ilk bölüm 1 MiB'den önce başlıyor (önyükleyiciye yer yok)"
+    elif [ "$(bolum_mb "$BOOT_PART")" -lt "$BOOT_GEREK" ]; then
+        _neden="boot bölümü küçük ($(bolum_mb "$BOOT_PART") MiB < $BOOT_GEREK)"
+    elif [ "$(bolum_mb "$ROOT_PART")" -lt "$KOK_GEREK" ]; then
+        _neden="kök bölümü küçük ($(bolum_mb "$ROOT_PART") MiB < $KOK_GEREK)"
+    fi
+    if [ -n "$_neden" ]; then
+        NEDEN="$_neden"
+        fail "$TARGET üzerindeki kalıcı bölüm ($VERI_HEDEFTE) şu anda /data olarak kullanılıyor" \
+            "Sunucularınızı yedekleyin. Sonra açılış menüsünde MCOS satırındayken 'e' tuşuna basın, 'linux' satırının sonuna ' mcos.nodata' ekleyip F10 ile başlatın ve kurulumu yeniden deneyin."
+    fi
+    YERINDE=1
+    log "YERİNDE YENİLEME: $DATA_PART (/data) korunuyor; yalnızca $BOOT_PART ve $ROOT_PART yeniden yazılacak"
+else
+    _kul=$(( DISK_MB - 2 ))
+    _en_az=$(( BOOT_GEREK + KOK_GEREK + VERI_EN_AZ_MB ))
+    if [ "$_kul" -lt "$_en_az" ]; then
+        fail "$TARGET çok küçük: $(( DISK_MB )) MiB (en az $(( (_en_az + 1023) / 1024 )) GB gerekir)" \
+            "Daha büyük bir USB bellek ya da disk seçin."
+    fi
+    if [ "$_kul" -lt $(( BOOT_MB + ROOT_MB + 2048 )) ]; then
+        # Küçük disk: boot'u gerekene indir, kalanın üçte biri kök (en az
+        # gereken), gerisi veri.
+        BOOT_MB="$BOOT_GEREK"
+        _kalan=$(( _kul - BOOT_MB ))
+        ROOT_MB=$(( _kalan / 3 ))
+        [ "$ROOT_MB" -ge "$KOK_GEREK" ] || ROOT_MB="$KOK_GEREK"
+        log "küçük disk: boot=${BOOT_MB} kök=${ROOT_MB} veri=$(( _kalan - ROOT_MB )) MiB"
+    fi
+fi
 
-# Bölüm yolları: /dev/sda1 ile /dev/nvme0n1p1 ayrımı. Ayırt edici kural aygıt
-# adının RAKAMLA bitmesidir (nvme0n1, mmcblk0 → "p" eki).
-case "$TARGET" in
-    *[0-9]) BOOT_PART="${TARGET}p1"; ROOT_PART="${TARGET}p2"; DATA_PART="${TARGET}p3" ;;
-    *)      BOOT_PART="${TARGET}1";  ROOT_PART="${TARGET}2";  DATA_PART="${TARGET}3"  ;;
-esac
-[ -b "$BOOT_PART" ] || fail "boot bölümü görünmedi: $BOOT_PART"
-[ -b "$ROOT_PART" ] || fail "kök bölümü görünmedi: $ROOT_PART"
-[ -b "$DATA_PART" ] || fail "veri bölümü görünmedi: $DATA_PART"
+# Her kurulumun kök etiketi benzersiz: eski bir MCOS USB'si (etiketi
+# "MCOS-ROOT") takılı kalsa bile /init YENİ diskin kökünü açar.
+# ext4 etiketi en fazla 16 bayt: "MCOS-ROOT-" + 6 hex = 16.
+_id="$(tr -d '-' </proc/sys/kernel/random/uuid 2>/dev/null | cut -c1-6)"
+[ -n "$_id" ] || _id="$(od -An -tx1 -N3 /dev/urandom | tr -d ' \n')"
+ROOT_LABEL="MCOS-ROOT-$_id"
+
+# ── 1/7 Bölümleme ───────────────────────────────────────────────────────────
+
+if [ "$YERINDE" = 1 ]; then
+    status 5 "[1/7] Mevcut MCOS diski yenileniyor (veriler korunuyor): $TARGET"
+else
+    status 5 "[1/7] Bölüm tablosu oluşturuluyor: $TARGET"
+
+    # Eski imzaları temizle: kalıntı bir GPT/ISO-hybrid başlığı MBR'yi
+    # gölgeleyip firmware'i şaşırtabilir. Diskin SONUNDAKİ yedek GPT de.
+    calistir dd if=/dev/zero of="$TARGET" bs=1M count=17 conv=fsync || \
+        fail "$TARGET diskine yazılamadı" \
+            "Disk bozuk ya da yazmaya kapalı olabilir; başka bir USB/disk deneyin."
+    TOTAL_SECTORS="$(disk_sektor "$TARGET")"
+    if [ "$TOTAL_SECTORS" -gt 4096 ]; then
+        dd if=/dev/zero of="$TARGET" bs=512 seek=$(( TOTAL_SECTORS - 2048 )) count=2048 \
+            2>/dev/null || true
+    fi
+
+    _cozum="Diski çıkarıp yeniden takın ve tekrar deneyin; sürerse bilgisayarı yeniden başlatın."
+    calistir parted -s "$TARGET" mklabel msdos || fail "bölüm tablosu oluşturulamadı" "$_cozum"
+    calistir parted -s "$TARGET" mkpart primary fat32 1MiB "$(( BOOT_MB + 1 ))MiB" \
+        || fail "boot bölümü oluşturulamadı" "$_cozum"
+    calistir parted -s "$TARGET" set 1 boot on || fail "boot bayrağı ayarlanamadı" "$_cozum"
+    parted -s "$TARGET" set 1 lba on >/dev/null 2>&1 || true
+    calistir parted -s "$TARGET" mkpart primary ext4 "$(( BOOT_MB + 1 ))MiB" \
+        "$(( BOOT_MB + 1 + ROOT_MB ))MiB" \
+        || fail "kök bölümü oluşturulamadı" "$_cozum"
+    calistir parted -s "$TARGET" mkpart primary ext4 "$(( BOOT_MB + 1 + ROOT_MB ))MiB" 100% \
+        || fail "kalıcı veri bölümü oluşturulamadı" "$_cozum"
+
+    status 12 "[2/7] Bölüm tablosu çekirdeğe bildiriliyor..."
+    calistir partprobe "$TARGET" || true
+    NEDEN=""
+fi
+
+# udev yok: aygıt düğümlerini devtmpfs oluşturur; gelene kadar bekle.
+_i=0
+while [ "$_i" -lt 15 ]; do
+    [ -b "$BOOT_PART" ] && [ -b "$ROOT_PART" ] && [ -b "$DATA_PART" ] && break
+    sleep 1; _i=$(( _i + 1 ))
+done
+_cozum="Diski çıkarıp yeniden takın ve tekrar deneyin."
+[ -b "$BOOT_PART" ] || fail "boot bölümü görünmedi: $BOOT_PART" "$_cozum"
+[ -b "$ROOT_PART" ] || fail "kök bölümü görünmedi: $ROOT_PART" "$_cozum"
+[ -b "$DATA_PART" ] || fail "veri bölümü görünmedi: $DATA_PART" "$_cozum"
 
 # ── 3/7 Dosya sistemleri ────────────────────────────────────────────────────
 
-status 22 "[3/7] Dosya sistemleri oluşturuluyor (FAT32 boot + ext4 kök + ext4 veri)..."
-mkfs.vfat -F 32 -n MCOS-BOOT "$BOOT_PART" >/dev/null 2>&1 \
-    || fail "boot bölümü biçimlendirilemedi ($BOOT_PART)"
-# ETIKET KRITIK: /init kok bolumunu MCOS-ROOT etiketiyle arar.
-mkfs.ext4 -F -L MCOS-ROOT "$ROOT_PART" >/dev/null 2>&1 \
-    || fail "kök bölümü biçimlendirilemedi ($ROOT_PART)"
-# ETİKET KRİTİK: S99mcos kalıcı bölümü "MCOS-DATA" etiketiyle arar.
-mkfs.ext4 -F -L MCOS-DATA "$DATA_PART" >/dev/null 2>&1 \
-    || fail "kalıcı veri bölümü biçimlendirilemedi ($DATA_PART)"
+_cozum="Disk bozuk olabilir; başka bir USB/disk deneyin."
+if [ "$YERINDE" = 1 ]; then
+    status 22 "[3/7] Dosya sistemleri yenileniyor (FAT32 boot + ext4 kök; /data korunuyor)..."
+else
+    status 22 "[3/7] Dosya sistemleri oluşturuluyor (FAT32 boot + ext4 kök + ext4 veri)..."
+fi
+# FAT ETİKETİ KRİTİK: gömülü core.img boot bölümünü "MCOS-BOOT" ile arar.
+calistir mkfs.vfat -F 32 -n MCOS-BOOT "$BOOT_PART" \
+    || fail "boot bölümü biçimlendirilemedi ($BOOT_PART)" "$_cozum"
+# Kök etiketi benzersiz (yukarıda); /init onu mcos.root=LABEL= ile arar.
+calistir mkfs.ext4 -F -L "$ROOT_LABEL" "$ROOT_PART" \
+    || fail "kök bölümü biçimlendirilemedi ($ROOT_PART)" "$_cozum"
+if [ "$YERINDE" = 0 ]; then
+    # ETİKET KRİTİK: S03mcosdata kalıcı bölümü "MCOS-DATA" etiketiyle arar.
+    calistir mkfs.ext4 -F -L MCOS-DATA "$DATA_PART" \
+        || fail "kalıcı veri bölümü biçimlendirilemedi ($DATA_PART)" "$_cozum"
+fi
 
 # ── 4/7 Çekirdek + initramfs ────────────────────────────────────────────────
 
 status 35 "[4/7] Çekirdek ve sistem imajı kopyalanıyor..."
 mkdir -p "$TARGET_MNT/boot"
-mount "$BOOT_PART" "$TARGET_MNT/boot" || fail "boot bölümü bağlanamadı ($BOOT_PART)"
+calistir mount "$BOOT_PART" "$TARGET_MNT/boot" || fail "boot bölümü bağlanamadı ($BOOT_PART)" "$_cozum"
 mkdir -p "$TARGET_MNT/boot/boot/grub" "$TARGET_MNT/boot/EFI/BOOT"
 
-cp "$KERNEL" "$TARGET_MNT/boot/boot/bzImage" || fail "çekirdek kopyalanamadı (disk dolu olabilir)"
-status 55 "[4/7] Sistem imajı kopyalanıyor (~$(( $(stat -c%s "$INITRD") / 1048576 )) MB)..."
-cp "$INITRD" "$TARGET_MNT/boot/boot/initrd.img" || fail "sistem imajı kopyalanamadı (disk dolu olabilir)"
+calistir cp "$KERNEL" "$TARGET_MNT/boot/boot/bzImage" \
+    || fail "çekirdek kopyalanamadı" "USB/disk dolu ya da bozuk olabilir; başka bir disk deneyin."
+status 55 "[4/7] Sistem imajı kopyalanıyor (~$(( $(dosya_boyutu "$INITRD") / 1048576 )) MB)..."
+calistir cp "$INITRD" "$TARGET_MNT/boot/boot/initrd.img" \
+    || fail "sistem imajı kopyalanamadı" "Kaynak USB/DVD çıkarılmış ya da hedef bozuk olabilir; ikisini de kontrol edip tekrar deneyin."
+if [ "$(dosya_boyutu "$INITRD")" != "$(dosya_boyutu "$TARGET_MNT/boot/boot/initrd.img")" ]; then
+    fail "sistem imajı eksik kopyalandı" "Hedef disk bozuk olabilir; başka bir disk deneyin."
+fi
 
 # ── 5/7 Önyükleyici yapılandırması ──────────────────────────────────────────
 
 status 72 "[5/7] Önyükleyici yapılandırması yazılıyor..."
 
-# root= YOK ve olmamalı: sistem initramfs'ten çalışır (baştaki tasarım notu).
-# "quiet" de yok: bir şey ters giderse kullanıcı gerçek çekirdek mesajını
-# görmeli.
 # Çözünürlük ve komut satırı tanımı derleme sırasında buraya kopyalanır
-# (post-build.sh, kaynağı scripts/lib/display.sh). Böylece ISO, USB imajı ve
-# kurulu disk AYNI çözünürlük listesini kullanır — eskiden üçü farklıydı ve
-# aynı makine üç ayrı çözünürlükte açılıyordu.
+# (post-build.sh, kaynağı scripts/lib/display.sh): ISO, USB imajı ve kurulu
+# disk AYNI listeyi kullanır.
 if [ -r /usr/lib/mcos/display.sh ]; then
     . /usr/lib/mcos/display.sh
 else
-    # Gömülü yedek: imaj eski bir post-build ile derlendiyse kurulum yine de
-    # çalışsın. Değerler scripts/lib/display.sh ile aynı olmalı.
+    # Gömülü yedek: değerler scripts/lib/display.sh ile AYNI OLMAK ZORUNDA
+    # (bir kez ayrıştılar: loglevel=4 kalmıştı). scripts/test-boot-logic.sh
+    # bu üç değeri karşılaştırıyor.
     MCOS_GFXMODE='1920x1080x32,1920x1080,1680x1050,1600x900,1440x900,1366x768,1280x1024,1280x800,1280x720,1024x768,auto'
-    MCOS_CMDLINE_BASE='console=tty0 consoleblank=0 loglevel=4 fbcon=nodefer vt.global_cursor_default=0'
+    MCOS_CMDLINE_BASE='console=tty0 consoleblank=0 quiet loglevel=1 fbcon=nodefer vt.global_cursor_default=0 thinkpad_acpi.fan_control=1'
     MCOS_CMDLINE_RECOVERY='console=tty0 nomodeset vga=normal loglevel=7'
 fi
 
-# Kullanıcı ekran ayarlarından bir mod seçtiyse onu EN BAŞA koy; liste yine de
-# tamamı korunarak devam eder, böylece seçilen mod bu firmware'de yoksa sistem
-# yine açılır (tek değer yazsaydık kara ekran riski olurdu).
+# Kullanıcı ekran ayarlarından bir mod seçtiyse onu EN BAŞA koy; liste yine
+# tamamen korunur (tek değer yazılsaydı kara ekran riski olurdu).
 GFXMODE="$MCOS_GFXMODE"
 if [ -r /data/mcos/display.conf ]; then
     pref="$(sed -n 's/^gfxmode=//p' /data/mcos/display.conf | head -1)"
@@ -277,17 +809,10 @@ if [ -r /data/mcos/display.conf ]; then
     esac
 fi
 
-# KALICILIK ANAHTARI.
-#
-# Canli ISO'nun komut satirinda bu YOKTUR, bu yuzden ISO RAM'den calisir
-# ve dosyasina hic dokunulmaz. Kurulu diskin komut satirinda VARDIR:
-# /init bunu gorunce MCOS-ROOT bolumunu baglar ve switch_root ile icine
-# gecer. Ayrimi yapan tek sey bu parametredir.
-#
-# Etiketle (LABEL=) veriliyor, aygit adiyla degil: disk siralamasi
-# acilistan aciliya degisir, /dev/sda2 bir sonraki acilista baska bir
-# disk olabilir.
-CMDLINE="$MCOS_CMDLINE_BASE mcos.root=LABEL=MCOS-ROOT"
+# KALICILIK ANAHTARI. Canlı ISO'nun komut satırında YOKTUR (ISO RAM'den
+# çalışır); kurulu diskte VARDIR: /init kök bölümünü bağlayıp switch_root
+# yapar. Aygıt adıyla değil etiketle: disk sırası açılıştan açılışa değişir.
+CMDLINE="$MCOS_CMDLINE_BASE mcos.root=LABEL=$ROOT_LABEL"
 
 GRUB_CFG="set timeout=3
 set default=0
@@ -311,7 +836,7 @@ menuentry \"MCOS (kurtarma — VGA metin modu, ayrıntılı günlük)\" {
 }
 "
 printf '%s' "$GRUB_CFG" > "$TARGET_MNT/boot/boot/grub/grub.cfg" \
-    || fail "grub.cfg yazılamadı"
+    || fail "grub.cfg yazılamadı" "Hedef disk dolu ya da bozuk olabilir."
 printf '%s' "$GRUB_CFG" > "$TARGET_MNT/boot/EFI/BOOT/grub.cfg" || true
 
 # ── 6/7 Önyükleyiciyi diske göm ─────────────────────────────────────────────
@@ -320,130 +845,187 @@ status 82 "[6/7] Önyükleyici diske yazılıyor..."
 
 INSTALLED_ANY=0
 
-if [ "$HAVE_UEFI" = 1 ]; then
-    if cp "$BOOTLIB/BOOTX64.EFI" "$TARGET_MNT/boot/EFI/BOOT/BOOTX64.EFI"; then
+# grub-install yedek yolunda eklenecek modüller: grub.cfg'nin kullandığı her şey.
+GRUB_MODS="part_msdos part_gpt fat ext2 iso9660 normal linux configfile echo test search search_fs_file search_label search_fs_uuid gfxterm all_video png"
+
+if [ "$UEFI_YOLU" = gomulu ]; then
+    if calistir cp "$BOOTLIB/BOOTX64.EFI" "$TARGET_MNT/boot/EFI/BOOT/BOOTX64.EFI"; then
         log "UEFI önyükleyici yazıldı (/EFI/BOOT/BOOTX64.EFI)"
         INSTALLED_ANY=1
     else
-        log "UYARI: UEFI önyükleyici kopyalanamadı"
+        log "UYARI: UEFI önyükleyici kopyalanamadı ($NEDEN)"; NEDEN=""
+        HAVE_UEFI=0
+    fi
+elif [ "$UEFI_YOLU" = grub-install ]; then
+    # --removable: /EFI/BOOT/BOOTX64.EFI (firmware kaydı gerekmez).
+    # --no-nvram: canlı makinenin firmware değişkenlerine DOKUNMA.
+    if calistir "$GRUB_INSTALL" --target=x86_64-efi --directory="$GRUB_EFI_DIR" \
+            --efi-directory="$TARGET_MNT/boot" --boot-directory="$TARGET_MNT/boot/boot" \
+            --removable --no-nvram --modules="$GRUB_MODS"; then
+        log "UEFI önyükleyici grub-install ile kuruldu (/EFI/BOOT/BOOTX64.EFI)"
+        INSTALLED_ANY=1
+    else
+        log "UYARI: UEFI önyükleyici kurulamadı ($NEDEN)"; NEDEN=""
+        HAVE_UEFI=0
     fi
 fi
 
-# BIOS: FAT bölümünü ayırmadan önce dd yapmak sorun değil (farklı alanlar),
-# ama düzen için önce senkronize edip ayırıyoruz.
-sync
-umount "$TARGET_MNT/boot" || fail "boot bölümü ayrılamadı"
+# BIOS/grub-install: boot bölümü BAĞLIYKEN çalışmalı (modüller oraya yazılır).
+if [ "$BIOS_YOLU" = grub-install ]; then
+    if calistir "$GRUB_INSTALL" --target=i386-pc --directory="$GRUB_PC_DIR" \
+            --boot-directory="$TARGET_MNT/boot/boot" --modules="$GRUB_MODS biosdisk" \
+            "$TARGET"; then
+        log "BIOS önyükleyici grub-install ile kuruldu (MBR + core.img)"
+        INSTALLED_ANY=1
+    else
+        log "UYARI: BIOS önyükleyici kurulamadı ($NEDEN)"; NEDEN=""
+        HAVE_BIOS=0
+    fi
+fi
 
-if [ "$HAVE_BIOS" = 1 ]; then
+sync
+calistir umount "$TARGET_MNT/boot" || fail "boot bölümü ayrılamadı" "$_cozum"
+
+if [ "$BIOS_YOLU" = gomulu ]; then
     # boot.img'in ilk 440 baytı MBR bootstrap'tır. 440..511 arası bölüm
     # tablosu ve 0x55AA imzasıdır — onlara DOKUNULMAZ.
-    if ! dd if="$BOOTLIB/boot.img" of="$TARGET" bs=440 count=1 conv=notrunc status=none; then
-        fail "MBR önyükleyici yazılamadı"
-    fi
-    # core.img sektör 1'den itibaren MBR boşluğuna. p1 1 MiB'de başladığı için
-    # 2047 sektör (≈1 MB) yer var; core.img ~30 KB.
-    CORE_SECTORS=$(( ( $(stat -c%s "$BOOTLIB/core.img") + 511 ) / 512 ))
+    calistir dd if="$BOOTLIB/boot.img" of="$TARGET" bs=440 count=1 conv=notrunc \
+        || fail "MBR önyükleyici yazılamadı" "$_cozum"
+    # core.img sektör 1'den itibaren MBR boşluğuna (p1 1 MiB'de başlar).
+    CORE_SECTORS=$(( ( $(dosya_boyutu "$BOOTLIB/core.img") + 511 ) / 512 ))
     if [ "$CORE_SECTORS" -ge 2047 ]; then
-        fail "core.img MBR boşluğuna sığmıyor ($CORE_SECTORS sektör)"
+        fail "core.img MBR boşluğuna sığmıyor ($CORE_SECTORS sektör)" "ISO'yu yeniden derleyin."
     fi
-    if ! dd if="$BOOTLIB/core.img" of="$TARGET" bs=512 seek=1 conv=notrunc status=none; then
-        fail "GRUB core imajı yazılamadı"
-    fi
+    calistir dd if="$BOOTLIB/core.img" of="$TARGET" bs=512 seek=1 conv=notrunc \
+        || fail "GRUB core imajı yazılamadı" "$_cozum"
     log "BIOS önyükleyici yazıldı (MBR + $CORE_SECTORS sektör core.img)"
     INSTALLED_ANY=1
 fi
 
-[ "$INSTALLED_ANY" = 1 ] || fail "hiçbir önyükleyici kurulamadı — disk boot etmez"
+[ "$INSTALLED_ANY" = 1 ] || fail "hiçbir önyükleyici kurulamadı — disk açılmaz" \
+    "Günlükteki grub-install satırlarına bakın; ISO'yu yeniden derleyin."
 
-# ── 7/7 Kalıcı veriyi taşı ve doğrula ───────────────────────────────────────
+# ── 7/7 Kök dosya sistemi ve kalıcı veri ────────────────────────────────────
 
 status 86 "[7/7] Kök dosya sistemi diske yazılıyor (kalıcılık)..."
 
-# Canli sistemin TAMAMINI kok bolumune kopyala. Bundan sonra makine RAM'den
-# degil BURADAN acilir.
-#
-# Haric tutulanlar:
-#   /proc /sys /dev /run /tmp : cekirdek tarafindan saglanir, kopyalanamaz
-#   /mnt                      : kurulum sirasindaki gecici baglama noktalari
-#   /data                     : ayri bolume gider (asagida)
-#   /boot                     : cekirdek ve initrd FAT bolumunde
+# Canlı sistemin TAMAMI kök bölümüne kopyalanır; bundan sonra makine RAM'den
+# değil BURADAN açılır. Hariç: /proc /sys /dev /run /tmp (çekirdek sağlar),
+# /mnt (geçici bağlamalar), /data (ayrı bölüm), /boot (FAT bölümünde),
+# /ventoy (Ventoy'un açılışta eklediği araçlar).
 mkdir -p "$ROOT_MNT"
-mount "$ROOT_PART" "$ROOT_MNT" || fail "kök bölümü bağlanamadı ($ROOT_PART)"
+calistir mount "$ROOT_PART" "$ROOT_MNT" || fail "kök bölümü bağlanamadı ($ROOT_PART)" "$_cozum"
 
+# Temel dizinlerden biri eksik kopyalanırsa kurulu sistem AÇILMAZ: dur.
+# Diğerlerinde (opt, root, var...) tek bir özel dosya hatası kurulumu
+# düşürmesin; uyarı günlüğe yazılır.
 copy_failed=""
 for d in bin etc lib lib32 lib64 opt root sbin usr var; do
     [ -e "/$d" ] || continue
-    cp -a "/$d" "$ROOT_MNT/" 2>/dev/null || copy_failed="$copy_failed $d"
+    if ! calistir cp -a "/$d" "$ROOT_MNT/"; then
+        case "$d" in
+            bin|sbin|lib|usr|etc)
+                fail "sistem dosyaları kök bölümüne kopyalanamadı (/$d)" \
+                    "Hedef disk dolu ya da bozuk olabilir; başka bir disk deneyin." ;;
+        esac
+        copy_failed="$copy_failed $d"
+        NEDEN=""
+    fi
 done
-[ -n "$copy_failed" ] && log "UYARI: kopyalanamayan dizinler:$copy_failed"
+[ -z "$copy_failed" ] || log "UYARI: tam kopyalanamayan dizinler:$copy_failed (ayrıntı günlükte)"
 
-# Cekirdegin baglayacagi bos dizinler.
+# BUDANMIŞ FIRMWARE'İ GERİ KOY. mcos-fwprune canlı sistemde bu makinede
+# aygıtı olmayan firmware'i (amdgpu, iwlwifi, ath... ~240 MB) RAM'den siler.
+# Yukarıdaki kopya o budanmış hâli alıyordu (ölçüldü: canlı kök 207 MiB,
+# imajda 431 MiB): diske kurulan sistem başka bir bilgisayarda Wi-Fi/ekran
+# kartı firmware'i bulamazdı. Eksikler kaynağın initrd'sinden çıkarılır;
+# busybox cpio var olan dosyalara dokunmaz. Başarısızlık ölümcül değil.
+status 88 "[7/7] Donanım yazılımları (firmware) tamamlanıyor..."
+if ( cd "$ROOT_MNT" && zcat "$INITRD" 2>/dev/null | cpio -i -d -m 'lib/firmware/*' >/dev/null 2>&1 ); then
+    :
+fi
+log "firmware: $(find "$ROOT_MNT/lib/firmware" -type f 2>/dev/null | wc -l) dosya ($(du -sm "$ROOT_MNT/lib/firmware" 2>/dev/null | awk '{print $1}') MiB)"
+
 mkdir -p "$ROOT_MNT/proc" "$ROOT_MNT/sys" "$ROOT_MNT/dev" "$ROOT_MNT/run" \
          "$ROOT_MNT/tmp" "$ROOT_MNT/mnt" "$ROOT_MNT/data" "$ROOT_MNT/boot"
 chmod 1777 "$ROOT_MNT/tmp"
 
-# ISARET DOSYASI. /init switch_root yapmadan ONCE bunu arar: rastgele bir
-# ext4 bolumune gecmek sistemi aciliste kilitler (PID 1 bulunamaz -> panik).
-# Iceriginde ne oldugu onemli degil, VARLIGI onemli.
+# İŞARET DOSYASI. /init switch_root yapmadan ÖNCE bunu arar: rastgele bir
+# ext4 bölümüne geçmek açılışı kilitler (PID 1 bulunamaz → panik).
 {
     echo "MCOS kalici kok dosya sistemi"
     echo "olusturuldu: $(date 2>/dev/null || echo bilinmiyor)"
     echo "kaynak: $TARGET"
+    echo "etiket: $ROOT_LABEL"
 } > "$ROOT_MNT/etc/mcos-root"
 
-# Kurulu sistemde /init'e gerek yok (switch_root dogrudan /sbin/init calistirir)
-# ama zarari da yok; birakiyoruz ki ayni imaj her iki rolde de kullanilabilsin.
-
 sync
-umount "$ROOT_MNT" || log "UYARI: kök bölümü ayrılamadı"
+umount "$ROOT_MNT" 2>/dev/null || log "UYARI: kök bölümü ayrılamadı"
 
-status 90 "[7/7] Ayarlar kalıcı bölüme taşınıyor..." 
-
-# OOBE'de girilen ayarlar (config.json, WiFi, tema, kaynak bütçesi) canlı
-# sistemin /data'sında duruyor. Yeni kalıcı bölüme kopyalanmazsa kullanıcı
-# reboot'tan sonra sihirbazı BAŞTAN doldurmak zorunda kalır.
-mkdir -p "$TARGET_MNT"
-if mount "$DATA_PART" "$TARGET_MNT"; then
-    mkdir -p "$TARGET_MNT/servers" "$TARGET_MNT/java" "$TARGET_MNT/log"
-    if [ -d /data ]; then
-        cp -a /data/. "$TARGET_MNT/" 2>/dev/null || true
-    fi
-    # ÇEVRİMDIŞI PAKETİ TOHUMLA.
-    #
-    # İmajla gelen sunucu dosyaları (Fabric, ViaFabric, JRE) kalıcı bölüme
-    # kopyalanır. Bundan sonra internet olmadan da sunucu kurulabilir:
-    # internal/server/providers/offline.go indirmeden ÖNCE buraya bakar.
-    #
-    # Neden initramfs'te değil de burada: initramfs tamamen RAM'e açılır;
-    # 150 MB'lık bir paketi oraya koymak her açılışta 150 MB RAM demektir —
-    # üstelik canlı ISO'da hiç kullanılmayabilir.
-    if [ -d /usr/lib/mcos/offline ]; then
-        mkdir -p "$TARGET_MNT/artifacts"
-        seeded=0
-        for f in /usr/lib/mcos/offline/*; do
-            [ -f "$f" ] || continue
-            case "$f" in */INDEX) continue ;; esac
-            if cp -n "$f" "$TARGET_MNT/artifacts/" 2>/dev/null; then
-                seeded=$(( seeded + 1 ))
-            fi
-        done
-        if [ "$seeded" -gt 0 ]; then
-            log "çevrimdışı paket tohumlandı ($seeded dosya)"
+# seed_offline_from DIZIN: imajla gelen sunucu dosyalarını (Fabric, JRE...)
+# kalıcı bölüme kopyalar; internet olmadan da sunucu kurulabilsin
+# (internal/server/providers/offline.go indirmeden ÖNCE buraya bakar).
+seed_offline_from() {
+    src="$1"
+    [ -d "$src" ] || return 1
+    mkdir -p "$VERI_DIZIN/artifacts"
+    seeded=0
+    for f in "$src"/*; do
+        [ -f "$f" ] || continue
+        case "$f" in */INDEX|*/offline-index.txt) continue ;; esac
+        if cp -n "$f" "$VERI_DIZIN/artifacts/" 2>/dev/null; then
+            seeded=$(( seeded + 1 ))
         fi
+    done
+    if [ "$seeded" -gt 0 ]; then
+        log "çevrimdışı paket tohumlandı ($seeded dosya, kaynak: $src)"
+        return 0
     fi
+    return 1
+}
 
-    if [ -f "$TARGET_MNT/config.json" ]; then
-        log "OOBE ayarları kalıcı bölüme taşındı"
-    else
-        log "not: taşınacak config.json yoktu (ilk kurulum)"
-    fi
-    sync
-    umount "$TARGET_MNT" || log "UYARI: veri bölümü ayrılamadı"
+VERI_DIZIN=""
+if [ "$YERINDE" = 1 ]; then
+    status 90 "[7/7] Kalıcı veri yerinde korunuyor (/data)..."
+    VERI_DIZIN=/data
 else
-    log "UYARI: kalıcı veri bölümü bağlanamadı; ayarlar taşınamadı"
+    status 90 "[7/7] Ayarlar kalıcı bölüme taşınıyor..."
+    mkdir -p "$TARGET_MNT"
+    if calistir mount "$DATA_PART" "$TARGET_MNT"; then
+        VERI_DIZIN="$TARGET_MNT"
+        mkdir -p "$TARGET_MNT/servers" "$TARGET_MNT/java" "$TARGET_MNT/log"
+        # OOBE'de girilen ayarlar (config.json, WiFi, tema...) canlı sistemin
+        # /data'sında; kopyalanmazsa kullanıcı sihirbazı BAŞTAN doldurur.
+        if [ -d /data ]; then
+            cp -a /data/. "$TARGET_MNT/" 2>>"$LOG_FILE" || \
+                log "UYARI: /data'nın bir kısmı kopyalanamadı (veri bölümü dolu olabilir)"
+        fi
+    else
+        log "UYARI: kalıcı veri bölümü bağlanamadı; ayarlar taşınamadı ($NEDEN)"; NEDEN=""
+    fi
 fi
 
-# ── Son doğrulama: gerçekten boot edebilir mi? ──────────────────────────────
+if [ -n "$VERI_DIZIN" ]; then
+    # Çevrimdışı paket: eski imajlarda rootfs'te, yenilerde açılış
+    # ortamının /mcos/offline dizininde (RAM'e hiç açılmaz). Kaynak ortam
+    # zaten bağlı; bulunamazsa sunucu kurulumu internet ister.
+    if ! seed_offline_from /usr/lib/mcos/offline; then
+        if [ -z "$KAYNAK_DIZIN" ] || ! seed_offline_from "$KAYNAK_DIZIN/mcos/offline"; then
+            log "not: çevrimdışı paket bulunamadı; sunucu kurulumu internet isteyecek"
+        fi
+    fi
+    if [ -f "$VERI_DIZIN/config.json" ]; then
+        log "OOBE ayarları kalıcı bölümde"
+    else
+        log "not: config.json yoktu (ilk kurulum)"
+    fi
+    sync
+    if [ "$VERI_DIZIN" = "$TARGET_MNT" ]; then
+        umount "$TARGET_MNT" 2>/dev/null || log "UYARI: veri bölümü ayrılamadı"
+    fi
+fi
+
+# ── Son doğrulama: gerçekten açılabilir mi? ─────────────────────────────────
 
 status 96 "[7/7] Kurulum doğrulanıyor..."
 
@@ -451,11 +1033,11 @@ verify_fail=""
 
 # MBR bootstrap + imza (BIOS için zorunlu).
 if [ "$HAVE_BIOS" = 1 ]; then
-    first4="$(dd if="$TARGET" bs=1 count=4 status=none 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    first4="$(imza_hex "$TARGET" 0 4)"
     case "$first4" in
         ""|00000000) verify_fail="MBR bootstrap yazılmamış" ;;
     esac
-    sig="$(dd if="$TARGET" bs=1 skip=510 count=2 status=none 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    sig="$(imza_hex "$TARGET" 510 2)"
     [ "$sig" = "55aa" ] || verify_fail="0x55AA boot imzası yok (bulunan: $sig)"
 fi
 
@@ -473,19 +1055,28 @@ else
     verify_fail="boot bölümü doğrulama için bağlanamadı"
 fi
 
-# Kalıcı bölümün etiketi doğru mu? (Yanlışsa Java/sunucular kalıcı olmaz.)
-lbl_dev="$(/usr/bin/mcos-findfs MCOS-DATA 2>/dev/null || true)"
-[ -n "$lbl_dev" ] || verify_fail="MCOS-DATA etiketli bölüm bulunamadı — kalıcılık çalışmaz"
+# Etiketler, açılışın bulacağı yerde mi? Doğrudan bölümün kendisi okunur:
+# mcos-findfs başka bir diskteki (eski USB) aynı etiketi döndürebilirdi.
+[ "$(ext_etiket "$ROOT_PART")" = "$ROOT_LABEL" ] || verify_fail="kök bölümünün etiketi yanlış"
+[ "$(ext_etiket "$DATA_PART")" = "MCOS-DATA" ] || verify_fail="veri bölümünün etiketi MCOS-DATA değil — kalıcılık çalışmaz"
 
-[ -z "$verify_fail" ] || fail "kurulum doğrulanamadı: $verify_fail"
+if [ -n "$verify_fail" ]; then
+    NEDEN="$verify_fail"
+    fail "kurulum doğrulanamadı" "Disk bozuk olabilir; başka bir disk deneyin."
+fi
 
 sync
-cleanup
+temizle
+trap - EXIT INT TERM HUP
 
 FW="BIOS + UEFI"
 [ "$HAVE_BIOS" = 1 ] || FW="UEFI"
 [ "$HAVE_UEFI" = 1 ] || FW="BIOS"
-status 100 "[7/7] Kurulum tamamlandı ($FW) — USB'yi çıkarıp yeniden başlatın"
-log "kurulum başarılı: boot=$BOOT_PART veri=$DATA_PART firmware=$FW"
+if [ "$YERINDE" = 1 ]; then
+    status 100 "[7/7] Kurulum tamamlandı ($FW); sunucular ve ayarlar korundu — kurulum ortamını çıkarıp yeniden başlatın"
+else
+    status 100 "[7/7] Kurulum tamamlandı ($FW) — kurulum ortamını çıkarıp yeniden başlatın"
+fi
+log "kurulum başarılı: boot=$BOOT_PART kök=$ROOT_PART ($ROOT_LABEL) veri=$DATA_PART firmware=$FW"
 
 exit 0

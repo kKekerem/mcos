@@ -3,6 +3,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -13,6 +15,17 @@ import (
 )
 
 func main() {
+	// SSH kısa komutları (baslat, durdur, yeniden, liste…): /usr/bin'deki
+	// bağ adıyla çağrılınca bayrak ayrıştırılmaz; argümanlar sunucu adıdır.
+	if cmd, ok := kisaKomutMu(); ok {
+		cli, err := ipc.DialClient(ipc.DefaultEndpoint())
+		if err != nil {
+			fail("MCOS'a bağlanılamadı (mcosd çalışıyor mu?): %v", err)
+		}
+		runKisa(cli, cmd, os.Args[1:])
+		cli.Close()
+		return
+	}
 	connect := flag.String("connect", ipc.DefaultEndpoint(), "mcosd IPC endpoint")
 	flag.Usage = usage
 	flag.Parse()
@@ -30,6 +43,17 @@ func main() {
 	defer cli.Close()
 
 	switch args[0] {
+	case "kisa":
+		// Bağ olmadan da denenebilsin: mcosctl kisa yeniden Survival
+		requireArg(args, 2, "kisa <komut> [args]")
+		c, ok := kisaKomutlar[args[1]]
+		if !ok {
+			c = "yardim"
+		}
+		runKisa(cli, c, args[2:])
+	case "call":
+		requireArg(args, 2, "call <method> [json-params]")
+		cmdCall(cli, args[1], strings.Join(args[2:], " "))
 	case "ping":
 		cmdPing(cli)
 	case "status":
@@ -92,6 +116,8 @@ func main() {
 		default:
 			fail("unknown cluster subcommand %q", args[1])
 		}
+	case "turbo":
+		cmdTurbo(cli, args[1:])
 	case "tunnel":
 		requireArg(args, 2, "tunnel compress <command> | resolve <code> | start <code> | stop <code> | list")
 		switch args[1] {
@@ -124,6 +150,8 @@ Usage:
   mcosctl [--connect ENDPOINT] <command> [args]
 
 Commands:
+  call <method> [json]       ham RPC çağrısı; yanıtı JSON olarak yazar
+                             (ör. call cluster.pairOffer '{"id":"..."}')
   ping                       check daemon connectivity
   status                     print system status
   servers                    list servers
@@ -153,6 +181,7 @@ Commands:
   tunnel start <code>        start a tunnel by code
   tunnel stop <code>         stop a tunnel by code
   tunnel list                list all tunnels
+  turbo [ac|kapat|durum]     turbo: frekans/fan/P-çekirdeği ayrıntısı madde madde
 
 Default endpoint: %s
 `, ipc.DefaultEndpoint())
@@ -389,4 +418,30 @@ func cmdTunnelList(cli *ipc.Client) {
 		}
 		fmt.Printf("%s  %s  %s\n", t.Code, state, t.Command)
 	}
+}
+
+// cmdCall sends one raw RPC and prints the JSON result.
+//
+// Neden: uçtan uca sınamada (iki sanal makineli yerel ağ) eşleştirme, ortak
+// dünya ve tünel yöntemleri seri kabuktan sürülüyor; imajda python/socat yok,
+// her yöntem için ayrı bir alt komut yazmak ise sınamayı koddan geri bırakırdı.
+// Sahada da işe yarar: panel bir hata gösterdiğinde aynı çağrı elle
+// tekrarlanıp yanıtın tamamı görülebilir.
+func cmdCall(cli *ipc.Client, method, params string) {
+	var p any
+	if strings.TrimSpace(params) != "" {
+		if err := json.Unmarshal([]byte(params), &p); err != nil {
+			fail("call: parametre geçerli JSON değil: %v", err)
+		}
+	}
+	var out json.RawMessage
+	if err := cli.Call(method, p, &out); err != nil {
+		fail("call %s: %v", method, err)
+	}
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, out, "", "  ") != nil {
+		fmt.Println(string(out))
+		return
+	}
+	fmt.Println(pretty.String())
 }

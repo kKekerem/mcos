@@ -43,9 +43,15 @@ func javaList(cli *ipc.Client) {
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "MAJOR\tVENDOR\tVERSION\tPATH")
+	fmt.Fprintln(w, "MAJOR\tVENDOR\tSOURCE\tVERSION\tPATH")
 	for _, r := range res.Runtimes {
-		fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", r.Major, r.Vendor, r.Version, r.Path)
+		// SOURCE: imajla gelen (gomulu) mu, sonradan indirilen mi. Gomulu
+		// Java indirilmez ve kaldirilamaz; ayrimi gormek hata ayiklamada sart.
+		src := "installed"
+		if r.Builtin {
+			src = "builtin"
+		}
+		fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\n", r.Major, r.Vendor, src, r.Version, r.Path)
 	}
 	w.Flush()
 }

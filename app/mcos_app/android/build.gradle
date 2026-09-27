@@ -1,7 +1,13 @@
-// Kok Gradle dosyasi.
+// Kök Gradle dosyası.
 //
-// Ciktilari ../../build altina tasiyoruz: Flutter'in beklentisi bu ve
-// "flutter clean" o klasoru temizliyor.
+// Çıktıları ../../build altına taşıyoruz: Flutter'ın beklentisi bu ve
+// "flutter clean" o klasörü temizliyor.
+//
+// ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
+// Burada `rootProject.buildDir = "../build"` yazıyordu. Project#buildDir
+// Gradle 8'de kullanımdan kaldırıldı ve Gradle 9'da KALDIRILDI; Flutter'ın
+// ürettiği sarmalayıcı 9.3.1 olduğu için derleme daha yapılandırma aşamasında
+// kırılıyordu. Modern karşılığı layout.buildDirectory'dir.
 allprojects {
     repositories {
         google()
@@ -9,12 +15,14 @@ allprojects {
     }
 }
 
-rootProject.buildDir = "../build"
+def newBuildDir = rootProject.layout.buildDirectory.dir("../../build").get()
+rootProject.layout.buildDirectory.value(newBuildDir)
+
 subprojects {
-    project.buildDir = "${rootProject.buildDir}/${project.name}"
+    project.layout.buildDirectory.value(newBuildDir.dir(project.name))
     project.evaluationDependsOn(":app")
 }
 
 tasks.register("clean", Delete) {
-    delete rootProject.buildDir
+    delete rootProject.layout.buildDirectory
 }

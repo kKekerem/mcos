@@ -7,10 +7,11 @@ rem  Ne yapar:
 rem    Bu bilgisayari MCOS'a "ikinci PC" olarak ekleyen programi calistirir.
 rem    Cift tiklamak yeterlidir.
 rem
-rem  NEDEN YONETICI HAKKI ISTEMIYOR: mcos-flash'in aksine bu program hicbir
-rem  diske ham yazma yapmaz. Yalnizca kendi klasorune yazar ve bir TCP portu
-rem  dinler. Gereksiz yere yonetici istemek, kullanicinin "evet"e refleksle
-rem  basmasini ogretir; istemedigimiz tam olarak budur.
+rem  NOT: Bu betik ARTIK GEREKLI DEGIL. mcos-node.exe'ye dogrudan cift
+rem  tiklamak yeterli: program penceresini kendisi acar, ilk acilista kendini
+rem  kurar ve guvenlik duvari icin YALNIZCA BIR KEZ yonetici izni ister
+rem  (bkz. cmd/mcos-node/platform_windows.go). Betik, argumanlari komut
+rem  satirindan vermek isteyenler icin duruyor.
 rem
 rem  NEDEN chcp 65001: Turkce karakterler (ç, ğ, ı, ö, ş, ü) ve durum
 rem  ekranindaki cizgi karakterleri, kod sayfasi 65001 (UTF-8) olmadan

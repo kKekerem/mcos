@@ -1,13 +1,16 @@
 package fbpanel
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"strconv"
 	"strings"
 
 	"mcos/internal/fbui"
+	"mcos/internal/ipc"
 	"mcos/internal/model"
+	"mcos/internal/sound"
 )
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -29,12 +32,16 @@ const (
 	setTheme settingKind = iota
 	setPointer
 	setAnimations
+	setSounds
 	setPassword
 	setRemote
+	setVNC
 	setSSH
 	setDisplay
 	setSharing
 	setPersist
+	setInstall
+	setUpdate
 	setWizard
 	settingCount
 )
@@ -48,12 +55,16 @@ var settingsRows = [settingCount]settingsRow{
 	setTheme:      {"Tema", "Arayüz vurgu rengini değiştir"},
 	setPointer:    {"Fare ve touchpad", "İmleç desteği, hassasiyet, dokunarak tıklama"},
 	setAnimations: {"Animasyonlar", "Ekran geçişleri ve açılış animasyonu"},
+	setSounds:     {"Ses efektleri", "Geçişlerde kısa ses; hoparlör yoksa sessiz"},
 	setPassword:   {"Panel parolası", "İsteğe bağlı — paneli kilitler"},
 	setRemote:     {"Uzaktan kontrol", "Telefon uygulamasıyla bağlan (jeton burada)"},
+	setVNC:        {"Ekran paylaşımı (VNC)", "RealVNC ile bu ekrana bağlan"},
 	setSSH:        {"SSH", "Kabuk erişimi — bilgisayardan bağlan"},
 	setDisplay:    {"Ekran ayarları", "Çözünürlük (Ekran bölümüne gider)"},
 	setSharing:    {"PC paylaşımı", "Ağdaki diğer MCOS cihazlarıyla çalış"},
 	setPersist:    {"USB'yi kalıcı yap", "Bu USB belleğe kalıcı veri bölümü oluştur"},
+	setInstall:    {"Diske / USB'ye kur", "Sihirbazı açmadan MCOS'u bir diske ya da USB'ye kur"},
+	setUpdate:     {"Sistemi güncelle (USB'deki ISO)", "Yeni sürüme geç; sunucular ve dünyalar korunur"},
 	setWizard:     {"Kurulum sihirbazı", "İlk kurulum adımlarını yeniden çalıştır"},
 }
 
@@ -66,9 +77,33 @@ func (a *App) drawSettings(r image.Rectangle) {
 	y := in.Min.Y
 	cur := a.Cursor()
 
-	for i := settingKind(0); i < settingCount; i++ {
+	// ── Yakalanan gerçek hata: son satır HİÇ çizilmiyordu ──────────────────
+	// Döngü sığmayan satırda duruyordu ve kaydırma yoktu. 800x600'de ölçüldü
+	// (setup_klavye_test.go, TestAyarlarinHerSatiriCizilir): 12 satırdan 11'i
+	// çiziliyordu; "Kurulum sihirbazı" satırına imleç gidiyor ama kullanıcı
+	// onu göremiyordu. "Diske / USB'ye kur" eklenince 1024x768 de taşacaktı.
+	// Artık sığmayan liste imleci izleyerek kayar ve kaç satırın gizli
+	// olduğu altta yazar.
+	rowH := u.F.CellH*2 + u.M.PadY
+	rowStep := rowH + u.M.PadY/2
+	first, last := 0, int(settingCount)
+	if fit := (in.Dy() + u.M.PadY/2) / rowStep; fit < int(settingCount) {
+		// Bir satırlık yer "daha fazla" notuna ayrılır.
+		fit = (in.Dy() - u.F.CellH - u.M.PadY + u.M.PadY/2) / rowStep
+		if fit < 1 {
+			fit = 1
+		}
+		if cur >= fit {
+			first = cur - fit + 1
+		}
+		if first+fit > int(settingCount) {
+			first = int(settingCount) - fit
+		}
+		last = first + fit
+	}
+
+	for i := settingKind(first); i < settingKind(last); i++ {
 		it := settingsRows[i]
-		rowH := u.F.CellH*2 + u.M.PadY
 		if y+rowH > in.Max.Y {
 			break
 		}
@@ -88,6 +123,21 @@ func (a *App) drawSettings(r image.Rectangle) {
 			u.TextRight(in.Max.X-u.M.PadX, ty, val, vc)
 		}
 		y = row.Max.Y + u.M.PadY/2
+	}
+
+	if first > 0 || last < int(settingCount) {
+		note := ""
+		if first > 0 {
+			note = fmt.Sprintf("↑ %d ayar yukarıda", first)
+		}
+		if n := int(settingCount) - last; n > 0 {
+			if note != "" {
+				note += " · "
+			}
+			note += fmt.Sprintf("↓ %d ayar aşağıda", n)
+		}
+		u.Text(in.Min.X, y, note, u.Pal.TextFaint)
+		return
 	}
 
 	if y+u.F.CellH*4 > in.Max.Y {
@@ -156,6 +206,23 @@ func (a *App) settingValue(k settingKind, cfg *model.Config,
 			return "açık", u.Pal.OK
 		}
 		return "kapalı", u.Pal.TextFaint
+	case setSounds:
+		if !ui.Sounds {
+			return "kapalı", u.Pal.TextFaint
+		}
+		// Çıkış aygıtı da yazılıyor: "ses açık ama duyulmuyor" şikâyetinin
+		// ilk sorusu "sistem bir ses aygıtı görüyor mu?"dur — fare
+		// ayarlarında bulunan aygıtları listelemekle aynı gerekçe.
+		switch b := a.SoundBackend(); b {
+		case "alsa":
+			return "açık · ses kartı", u.Pal.OK
+		case "pcspkr":
+			return "açık · anakart bipçisi", u.Pal.Warn
+		case "yok":
+			return "açık · ses aygıtı YOK", u.Pal.Warn
+		default:
+			return "açık", u.Pal.OK
+		}
 	case setPassword:
 		if cfg != nil && cfg.Security.PasswordSet() {
 			return "kurulu", u.Pal.OK
@@ -163,6 +230,14 @@ func (a *App) settingValue(k settingKind, cfg *model.Config,
 		return "yok", u.Pal.TextFaint
 	case setRemote:
 		if cfg != nil && cfg.Remote.Enabled {
+			return "açık", u.Pal.OK
+		}
+		return "kapalı", u.Pal.TextFaint
+	case setVNC:
+		if cfg != nil && cfg.VNC.Enabled {
+			if cfg.VNC.ViewOnly {
+				return "açık · izleme", u.Pal.Warn
+			}
 			return "açık", u.Pal.OK
 		}
 		return "kapalı", u.Pal.TextFaint
@@ -178,6 +253,18 @@ func (a *App) settingValue(k settingKind, cfg *model.Config,
 			return "açık", u.Pal.OK
 		}
 		return "kapalı", u.Pal.TextFaint
+	case setPersist:
+		if a.runningJobs()[persistJobID] {
+			return "sürüyor", u.Pal.Accent
+		}
+	case setInstall:
+		if a.runningJobs()[installJobID] {
+			return "kuruluyor", u.Pal.Accent
+		}
+	case setUpdate:
+		if a.runningJobs()[updateJobID] {
+			return "güncelleniyor", u.Pal.Accent
+		}
 	}
 	return "", u.Pal.TextFaint
 }
@@ -191,6 +278,8 @@ func (a *App) activateSetting(idx int) {
 		a.openPointerSettings()
 	case setAnimations:
 		a.toggleAnimations()
+	case setSounds:
+		a.openSoundSettings()
 	case setPassword:
 		a.openPasswordSettings()
 	case setDisplay:
@@ -200,10 +289,16 @@ func (a *App) activateSetting(idx int) {
 		a.toggleSharing()
 	case setRemote:
 		a.openRemoteSettings()
+	case setVNC:
+		a.openVNCSettings()
 	case setSSH:
 		a.openSSHSettings()
 	case setPersist:
 		a.confirmPersist()
+	case setInstall:
+		a.openInstallPicker()
+	case setUpdate:
+		a.openUpdatePicker()
 	case setWizard:
 		a.confirmRerunWizard()
 	}
@@ -371,6 +466,164 @@ func (a *App) toggleAnimations() {
 		a.Emit(fbui.EventOK, "Animasyonlar açıldı")
 	} else {
 		a.Emit(fbui.EventInfo, "Animasyonlar kapatıldı")
+	}
+}
+
+// ── Ses ayarları ────────────────────────────────────────────────────────────
+
+// soundOption is one row of the sound dialog.
+type soundOption int
+
+const (
+	sndEnabled soundOption = iota
+	sndTest
+	sndOptionCount
+)
+
+// soundModal toggles sound and lets the user HEAR the result.
+//
+// ── Neden ayrı bir pencere, tek satırlık bir aç/kapa değil ──────────────────
+//
+// Ses, doğrulanması en zor özelliktir: ayar açık görünür, hoparlör bağlıdır,
+// ama kodek kapalı olduğu için hiçbir şey duyulmaz. Kullanıcının elinde
+// "açtım, duymuyorum" dışında bir bilgi kalmaz.
+//
+// Bu pencere iki şeyi birlikte gösteriyor: hangi çıkışın seçildiği ve
+// isteğe bağlı bir DENEME sesi. Fare ayarlarında bulunan aygıtların
+// listelenmesiyle aynı gerekçe.
+type soundModal struct{ cursor int }
+
+func newSoundModal() *soundModal { return &soundModal{} }
+
+func (m *soundModal) Cursor() int { return m.cursor }
+
+func (m *soundModal) SetCursor(i int) {
+	if i >= 0 && i < int(sndOptionCount) {
+		m.cursor = i
+	}
+}
+
+func (m *soundModal) Title() string    { return "Ses efektleri" }
+func (m *soundModal) Size() (int, int) { return 54, 14 }
+
+func (m *soundModal) Draw(a *App, r image.Rectangle) {
+	u := a.ui
+	ui := a.UIPrefs()
+
+	y := r.Min.Y
+	u.Text(r.Min.X, y, "Geçişlerde çalan kısa tonlar.", u.Pal.TextDim)
+	y += u.F.CellH + u.M.PadY*2
+
+	rows := [sndOptionCount]struct {
+		label string
+		check bool
+		on    bool
+		value string
+	}{
+		sndEnabled: {label: "Ses efektleri", check: true, on: ui.Sounds},
+		sndTest:    {label: "Sesi dene", value: "Enter"},
+	}
+
+	for i := soundOption(0); i < sndOptionCount; i++ {
+		row := image.Rect(r.Min.X, y, r.Max.X, y+u.M.RowH)
+		a.addZone(row, zoneModalRow, int(i))
+		if int(i) != m.cursor && a.hoverModalRow(int(i)) {
+			u.HoverRow(row)
+		}
+		cx := u.Row(row, int(i) == m.cursor)
+		ty := y + (u.M.RowH-u.F.CellH)/2
+
+		l := rows[i]
+		if l.check {
+			u.Check(cx, ty, l.on)
+			cx += u.F.CellW + u.M.Gap
+		}
+		col := u.Pal.Text
+		switch {
+		case i == sndTest && !ui.Sounds:
+			col = u.Pal.TextFaint // ses kapalıyken deneme anlamsız
+		case int(i) == m.cursor:
+			col = u.Pal.Accent
+		}
+		u.Text(cx, ty, l.label, col)
+		if l.value != "" {
+			u.TextRight(r.Max.X-u.M.PadX, ty, l.value, u.Pal.TextDim)
+		}
+		y += u.M.RowH
+	}
+
+	y += u.M.PadY
+	u.Divider(r.Min.X, r.Max.X, y)
+	y += u.M.PadY * 2
+
+	// Hangi çıkış kullanılıyor: "açtım ama duymuyorum" sorusunun cevabı.
+	backend, note, col := "denenmedi", "İlk ses çalınca aranacak.", u.Pal.TextDim
+	switch a.SoundBackend() {
+	case "alsa":
+		backend, note, col = "ses kartı (ALSA)", "Hoparlör/kulaklık çıkışı.", u.Pal.OK
+	case "pcspkr":
+		backend, note, col = "anakart bipçisi",
+			"Ses kartı bulunamadı; tek tonluk bip çalınır.", u.Pal.Warn
+	case "yok":
+		backend, note, col = "YOK",
+			"Sistem hiçbir ses aygıtı görmüyor.", u.Pal.Warn
+	}
+	u.Text(r.Min.X, y, "ÇIKIŞ", u.Pal.TextFaint)
+	u.TextRight(r.Max.X-u.M.PadX, y, backend, col)
+	y += u.F.CellH + u.M.PadY/2
+	u.Text(r.Min.X, y, note, u.Pal.TextFaint)
+
+	by := r.Max.Y - u.M.ButtonH
+	btns := u.ButtonRow(r.Min.X, by, []fbui.Btn{
+		{Label: "Kapat", Key: "Esc", Style: fbui.ButtonPrimary},
+	}, 0)
+	a.addModalButtons(btns)
+}
+
+func (m *soundModal) Key(a *App, key string) bool {
+	switch key {
+	case "esc", "left", "h":
+		return true
+	case "up", "k":
+		m.cursor = (m.cursor - 1 + int(sndOptionCount)) % int(sndOptionCount)
+	case "down", "j", "tab":
+		m.cursor = (m.cursor + 1) % int(sndOptionCount)
+	case "enter", "right", "l", " ":
+		switch soundOption(m.cursor) {
+		case sndEnabled:
+			a.toggleSounds()
+		case sndTest:
+			// Deneme sesi ONAY tonudur: en belirgin olanı.
+			a.playSound(sound.Confirm)
+			a.Emit(fbui.EventInfo, "Deneme sesi çalındı ("+a.SoundBackend()+")")
+		}
+	}
+	a.Invalidate()
+	return false
+}
+
+// openSoundSettings shows the sound dialog.
+func (a *App) openSoundSettings() { a.OpenModal(newSoundModal()) }
+
+// toggleSounds turns the interface sound effects on or off.
+//
+// Kullanıcının isteği "kapatılabilsin" idi; kapalıyken ses arka ucu hiç
+// aranmaz (bkz. internal/sound), yani ses kartı olmayan bir makinede boşuna
+// aygıt taraması da yapılmaz.
+func (a *App) toggleSounds() {
+	on := false
+	a.updateUI(func(u *model.UIConfig) {
+		u.Sounds = !u.Sounds
+		on = u.Sounds
+	})
+	if on {
+		// Açıldığını DUYURMAK gerekiyor: ayarın işe yarayıp yaramadığı
+		// ancak bir ses çalınca anlaşılır. Ses aygıtı yoksa yalnızca
+		// satırdaki değer bunu söyler.
+		a.playSound(sound.Confirm)
+		a.Emit(fbui.EventOK, "Ses efektleri açıldı ("+a.SoundBackend()+")")
+	} else {
+		a.Emit(fbui.EventInfo, "Ses efektleri kapatıldı")
 	}
 }
 
@@ -573,28 +826,135 @@ func (a *App) toggleSharing() {
 	})
 }
 
+// persistJobID: kalıcılığın arka plan işi. Ayarlar ve sihirbaz AYNI kimliği
+// kullanır: ikisinden birden basılsa bile mcos-persist tek kez çalışır.
+const persistJobID = "kalicilik"
+
+// persistConfirmLines, kalıcılık onay penceresinin metni (Ayarlar ve sihirbaz).
+func persistConfirmLines() []string {
+	return []string{
+		"Bu USB belleğe kalıcı bir veri bölümü oluşturulacak.",
+		"Mevcut veriler korunur; boş alan kullanılır.",
+		"Ventoy USB'sinde bölüm eklenmez: Ventoy bölümüne",
+		"/mcos/mcos-data.dat (4 GB) yazılır; birkaç dakika sürebilir.",
+		"İş arka planda sürer; bu sırada paneli kullanabilirsiniz.",
+	}
+}
+
 func (a *App) confirmPersist() {
 	a.OpenModal(NewConfirmModal(
 		"USB'yi kalıcı yap?",
-		[]string{
-			"Bu USB belleğe kalıcı bir veri bölümü oluşturulacak.",
-			"Mevcut veriler korunur; boş alan kullanılır.",
-		},
+		persistConfirmLines(),
 		"Devam", false,
 		func(app *App) {
 			if app.offline() {
 				return
 			}
-			app.Emit(fbui.EventBusy, "USB kalıcı yapılıyor…")
-			go func() {
-				msg, err := app.cl.Persist("")
-				if err != nil {
-					app.Fail("kalıcılık başarısız", err)
-					return
-				}
-				app.Emit(fbui.EventOK, msg)
-			}()
+			app.startPersist(nil)
 		}))
+}
+
+// startPersist runs mcos-persist as a background job (bkz. jobs.go).
+//
+// sonuc (nil olabilir) işin sonucunu, iş kayıttan düşmeden ÖNCE alır:
+// sihirbaz sayfası kendi durumunu buna göre çizer. Üç sonuç var ve üçü de
+// farklı gösterilmeli (ipcclient.Persist): kuruldu (EventOK), bu ortamda
+// geçerli değil (EventInfo — canlı DVD/ISO; yeşil "tamam" yanlış olurdu),
+// gerçek hata (err).
+func (a *App) startPersist(sonuc func(kind fbui.EventKind, msg string, err error)) bool {
+	return a.runJobKind(persistJobID, "USB kalıcı yapılıyor (Ventoy'da birkaç dakika sürebilir)",
+		func() (fbui.EventKind, string, error) {
+			msg, ok, err := a.cl.Persist("")
+			if err != nil {
+				// Daemon'ın iletisi zaten "kalıcılık başarısız: " ile başlıyor;
+				// a.Fail aynı bağlamı bir kez daha ekleyince QEMU'da alt çubukta
+				// "kalıcılık başarısız: kalıcılık başarısız: mcos-persist: …"
+				// görüldü. Sayfa ve alt çubuk yalnızca betiğin sebebini alır.
+				err = errors.New(strings.TrimPrefix(err.Error(), "kalıcılık başarısız: "))
+			}
+			kind := fbui.EventOK
+			switch {
+			case err != nil:
+				kind = fbui.EventError
+			case !ok:
+				kind = fbui.EventInfo
+			}
+			if sonuc != nil {
+				sonuc(kind, msg, err)
+			}
+			if err != nil {
+				return fbui.EventError, "kalıcılık başarısız", err
+			}
+			return kind, msg, nil
+		}, nil)
+}
+
+// ── Diske / USB'ye kur (sihirbazsız) ────────────────────────────────────────
+
+// openInstallPicker lists install targets without re-running the wizard.
+//
+// Kullanıcı (gerçek PC): "ayarlardan kurulumu başlatmadan direkt USB'ye
+// kurulum yapılabilmeli". Eskiden tek yol "Kurulum sihirbazı"ydı: bütün
+// ayarları baştan sormak, kaydetmek, sonra diske kur sayfasına varmak.
+//
+// Kurulum mantığı sihirbazla AYNIDIR (startDiskInstall → mcos-install
+// <aygıt>): aynı hedef listesi (açılış yapılan USB listelenmez), aynı onay
+// metni (confirmInstallLines), aynı ilerleme ve aynı gerçek hata metni.
+//
+// Disk listesi arka planda alınır (IPC ana döngüyü bloklamamalı; bkz.
+// run.go). Pencere liste gelince açılır; o arada kullanıcı başka bir pencere
+// açtıysa ya da bölümden çıktıysa açılmaz — görmediği bir pencerenin
+// tuşları yutması "klavye çalışmıyor" demektir.
+func (a *App) openInstallPicker() {
+	if a.offline() {
+		a.Emit(fbui.EventError, "daemon bağlantısı yok — diskler listelenemez")
+		return
+	}
+	if a.runningJobs()[installJobID] {
+		a.Emit(fbui.EventInfo, "Kurulum zaten sürüyor — ilerleme alt çubukta")
+		return
+	}
+	a.Emit(fbui.EventBusy, "Diskler taranıyor…")
+	go func() {
+		disks, err := a.cl.Disks()
+		if err != nil {
+			a.Fail("diskler listelenemedi", err)
+			return
+		}
+		if a.ActiveModal() != nil || a.Section() != SecSettings ||
+			a.setupState() != nil || a.Locked() {
+			a.Emit(fbui.EventInfo, "Disk listesi hazır — Ayarlar > Diske / USB'ye kur ile yeniden açın")
+			return
+		}
+		a.OpenModal(newInstallPicker(disks))
+	}()
+}
+
+// newInstallPicker builds the target list; seçim onay penceresini açar.
+func newInstallPicker(disks []ipc.DiskTarget) *ListModal {
+	items := make([]ListItem, 0, len(disks))
+	for _, d := range disks {
+		it := ListItem{Label: d.Device, Detail: diskDetail(d), Value: d}
+		if d.Removable {
+			it.Badge, it.BadgeKind = "USB", fbui.EventInfo
+		}
+		if d.HasPersist {
+			it.Badge, it.BadgeKind = "MCOS", fbui.EventOK
+		}
+		items = append(items, it)
+	}
+	return NewListModal("Diske / USB'ye kur",
+		"Hedef diski seçin. Seçtiğiniz diskteki veriler silinir.", items,
+		func(app *App, _ int, it ListItem) bool {
+			d := it.Value.(ipc.DiskTarget)
+			app.OpenModal(NewConfirmModal("MCOS'u diske kur?",
+				append(confirmInstallLines(d),
+					"Kurulum arka planda sürer; bitene kadar bilgisayarı kapatmayın."),
+				"Kur", true,
+				func(app2 *App) { app2.startDiskInstall(d, nil, nil) }))
+			return true
+		}).
+		WithEmpty("Uygun disk bulunamadı (açılış yapılan USB listelenmez).")
 }
 
 // confirmRerunWizard re-opens the first-boot wizard.

@@ -31,13 +31,21 @@ func (cl *Client) ClusterScan() ([]model.Peer, error) {
 
 // ClusterPairManual pairs with a typed address ("192.168.1.50" or with :port).
 func (cl *Client) ClusterPairManual(addr string) (model.Peer, string, error) {
+	p, msg, _, err := cl.ClusterPairManualCode(addr)
+	return p, msg, err
+}
+
+// ClusterPairManualCode is ClusterPairManual that also reports whether the
+// device has no key and must be paired with a code (anahtarsız düğüm).
+func (cl *Client) ClusterPairManualCode(addr string) (model.Peer, string, bool, error) {
 	var res struct {
-		Peer    model.Peer `json:"peer"`
-		Message string     `json:"message"`
+		Peer      model.Peer `json:"peer"`
+		Message   string     `json:"message"`
+		NeedsCode bool       `json:"needsCode"`
 	}
 	err := cl.call(ipc.MethodClusterPairManual,
 		map[string]string{"address": addr}, &res)
-	return res.Peer, res.Message, err
+	return res.Peer, res.Message, res.NeedsCode, err
 }
 
 // ClusterIdentity returns this machine's pairing key and address.
@@ -49,6 +57,8 @@ type ClusterIdentity struct {
 	NodeName string `json:"nodeName"`
 	Port     int    `json:"port"`
 	Address  string `json:"address"`
+	// Enabled: PC paylaşımı açık mı (kapalıyken anahtar boş olabilir).
+	Enabled bool `json:"enabled"`
 }
 
 // ClusterSecret fetches this node's pairing identity.
@@ -78,7 +88,10 @@ func (cl *Client) LinkEnable(serverID string, diff model.LinkDifficulty,
 		Message string `json:"message"`
 		Seed    string `json:"seed"`
 	}
-	err := cl.call(ipc.MethodLinkEnable, map[string]any{
+	// callLong: daemon modu ÖNCE kurar (fabric-api'yi Modrinth'ten 90 sn'ye
+	// kadar indirebilir); paylaşılan bağlantıda bu süre panelin bütün
+	// çağrılarını dondururdu (TestLinkEnableDoesNotBlockOtherCalls).
+	err := cl.callLong(ipc.MethodLinkEnable, map[string]any{
 		"serverId":   serverID,
 		"difficulty": string(diff),
 		"slabChunks": slabChunks,
@@ -115,6 +128,9 @@ type PlayitStatus struct {
 	ClaimURL  string   `json:"claimUrl"`
 	Log       []string `json:"log"`
 	Note      string   `json:"note"`
+
+	// API'den açılan tüneller ve eşitleme durumu (bkz. ipcclient/playit.go).
+	PlayitSync
 }
 
 // Playit fetches the agent status.
@@ -177,4 +193,51 @@ func (cl *Client) PlayitStop() (string, error) {
 	}
 	err := cl.call(ipc.MethodPlayitStop, nil, &res)
 	return res.Message, err
+}
+
+// ── Canlı eş taraması ───────────────────────────────────────────────────────
+
+// PeerScanProgress mirrors daemon.PeerScanProgress.
+type PeerScanProgress struct {
+	Scanning bool         `json:"scanning"`
+	Peers    []model.Peer `json:"peers"`
+	Total    int          `json:"total"`
+	Done     int          `json:"done"`
+	Error    string       `json:"error,omitempty"`
+	Gen      int          `json:"gen"`
+}
+
+// ClusterScanStart begins a LAN scan and returns immediately.
+func (cl *Client) ClusterScanStart() (PeerScanProgress, error) {
+	var res PeerScanProgress
+	err := cl.call(ipc.MethodClusterScanStart, nil, &res)
+	return res, err
+}
+
+// ClusterScanStatus returns what the running scan has found so far.
+func (cl *Client) ClusterScanStatus() (PeerScanProgress, error) {
+	var res PeerScanProgress
+	err := cl.call(ipc.MethodClusterScanStatus, nil, &res)
+	return res, err
+}
+
+// ClusterPairOffer starts code pairing; supported=false ise eski (anahtar)
+// yolu kullanılmalı.
+func (cl *Client) ClusterPairOffer(id string) (code string, supported bool, err error) {
+	var res ipc.PairOfferResult
+	err = cl.call(ipc.MethodClusterPairOffer, ipc.ClusterPairParams{ID: id}, &res)
+	return res.Code, res.Supported, err
+}
+
+// ClusterPairConfirm sends the sealed key; state "tamam"|"bekliyor"|...
+func (cl *Client) ClusterPairConfirm(id string) (state, message string, err error) {
+	var res ipc.PairConfirmResult
+	err = cl.call(ipc.MethodClusterPairConfirm, ipc.ClusterPairParams{ID: id}, &res)
+	return res.State, res.Message, err
+}
+
+// ClusterPairCancel forgets an outgoing offer.
+func (cl *Client) ClusterPairCancel(id string) error {
+	var res ipc.OKResult
+	return cl.call(ipc.MethodClusterPairCancel, ipc.ClusterPairParams{ID: id}, &res)
 }

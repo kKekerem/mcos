@@ -60,6 +60,21 @@ type Spec struct {
 	// bunu kullaniciya gosterir: "kayitli" ile "uygulaniyor" arasindaki
 	// farkin GORULEBILMESI gerekir.
 	OnLimits func(desc string)
+
+	// BeforeStart, HER başlatmadan (otomatik yeniden başlatmalar dahil) hemen
+	// önce çağrılır; tanımı (Args, Limits) o anki koşullara göre günceller ve
+	// kullanıcıya gösterilecek satırları döner. Süreç kilidi tutulurken
+	// çağrılır: süreçle ilgili hiçbir metodu çağırmamalıdır.
+	//
+	// NEDEN: sunucunun bellek planı (yığın boyutu) o anki boş belleğe göre
+	// yapılır. Tanım yalnızca ilk başlatmada hesaplansaydı, bellek yetmediği
+	// için öldürülen (OOM) bir sunucu otomatik yeniden başlatmada AYNI
+	// boyutla açılıp yine ölürdü.
+	BeforeStart func(spec *Spec) []string
+
+	// turbo, Supervisor.Add tarafından bağlanır: açıksa başlatmada tanımın
+	// turbo hâli (P-çekirdekleri, TurboNice, tavansız) uygulanır.
+	turbo func() (bool, []int)
 }
 
 // Process is a single supervised child.
@@ -77,6 +92,9 @@ type Process struct {
 	exitCode  int
 	exitErr   error
 	done      chan struct{}
+	// oomBase, başlatma anındaki sistem geneli OOM sayacı: çıkışta artmışsa
+	// süreç büyük olasılıkla bellek yetmediği için öldürüldü.
+	oomBase int
 }
 
 // NewProcess creates a process from a spec; it is not started yet.
@@ -120,10 +138,28 @@ func (p *Process) LastLine() string {
 
 // Start launches the process and begins capturing output.
 func (p *Process) Start() error {
+	// Kullanıcıya gidecek satırlar kilit BIRAKILDIKTAN sonra iletilir
+	// (defer'ler ters sırada çalışır: bu en son). OnLine'ı kilit altında
+	// çağırmak kilitlenme demekti: satır yazıcısının geri çağrısı da p.mu'yu
+	// alıyor. Eski kod başlatma hatasında tam olarak bunu yapıyordu
+	// (lw.Write kilit altında) ve süpervizör o sunucu için sonsuza dek
+	// donuyordu.
+	var satirlar []string
+	defer func() {
+		if p.spec.OnLine == nil {
+			return
+		}
+		for _, s := range satirlar {
+			p.spec.OnLine(s)
+		}
+	}()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.state == StateRunning || p.state == StateStopping {
 		return fmt.Errorf("supervisor: already running")
+	}
+	if p.spec.BeforeStart != nil {
+		satirlar = append(satirlar, p.spec.BeforeStart(&p.spec)...)
 	}
 	cmd := exec.Command(p.spec.Path, p.spec.Args...)
 	cmd.Dir = p.spec.Dir
@@ -148,8 +184,8 @@ func (p *Process) Start() error {
 	if err := cmd.Start(); err != nil {
 		stdin.Close()
 		errMsg := fmt.Sprintf("[MCOS HATA] Sunucu başlatılamadı (%s): %v", p.spec.Path, err)
-		lw.Write([]byte(errMsg + "\n"))
-		lw.Flush()
+		p.lastLine = errMsg
+		satirlar = append(satirlar, errMsg)
 		return fmt.Errorf("supervisor: start: %w", err)
 	}
 	p.cmd = cmd
@@ -159,15 +195,23 @@ func (p *Process) Start() error {
 	p.startedAt = time.Now()
 	p.requested = false
 	p.done = make(chan struct{})
+	p.oomBase = globalOOMKills()
 
 	// Apply OS scheduling limits (nice / CPU affinity). No-op off Linux.
-	applyLimits(p.pid, p.spec)
+	// Turbo açıksa tanımın turbo hâli uygulanır (bkz. turbo.go).
+	eff := p.startSpec()
+	applyLimits(p.pid, eff)
+	if p.spec.turbo != nil && p.spec.ID != "" {
+		if on, cpus := p.spec.turbo(); on {
+			go p.lateMainPin(p.pid, cpus)
+		}
+	}
 
 	// Kaynak grubunu sureci baslatir baslatmaz uygula. Once sinirlari kur,
 	// sonra sureci gruba tasi (ApplyCgroup bu sirayi kendisi korur), yoksa
 	// surec kisa bir sure sinirsiz calisir.
 	if p.spec.ID != "" {
-		if desc := ApplyCgroup(p.spec.ID, p.pid, p.spec.Limits); desc != "" {
+		if desc := applyCgroup(p.spec.ID, p.pid, eff.Limits); desc != "" {
 			if p.spec.OnLimits != nil {
 				p.spec.OnLimits(desc)
 			}
@@ -181,10 +225,17 @@ func (p *Process) Start() error {
 func (p *Process) wait(lw *lineWriter) {
 	err := p.cmd.Wait()
 
+	// OOM sayaçları grup SİLİNMEDEN okunmalı (memory.events grupla gider).
+	grupOOM := 0
+	if p.spec.ID != "" {
+		grupOOM = cgroupOOMKills(p.spec.ID)
+	}
+	sistemOOM := globalOOMKills() - p.oomBase
+
 	// Kaynak grubunu temizle. Yapilmazsa her baslatma bos bir cgroup dizini
 	// birakir; binlerce bos grup cekirdek bellegini bosa harcar.
 	if p.spec.ID != "" {
-		RemoveCgroup(p.spec.ID)
+		removeCgroup(p.spec.ID)
 	}
 
 	p.mu.Lock()
@@ -202,8 +253,7 @@ func (p *Process) wait(lw *lineWriter) {
 	p.mu.Unlock()
 
 	if (err != nil || code != 0) && !requested {
-		errMsg := fmt.Sprintf("[MCOS HATA] Süreç beklenmeyen bir şekilde sonlandı (Çıkış kodu: %d, Hata: %v)", code, err)
-		lw.Write([]byte(errMsg + "\n"))
+		lw.Write([]byte(exitMessage(code, err, killedBySIGKILL(p.cmd), grupOOM, sistemOOM) + "\n"))
 	}
 	lw.Flush()
 
@@ -217,7 +267,11 @@ func (p *Process) wait(lw *lineWriter) {
 func (p *Process) WriteStdin(line string) error {
 	p.mu.Lock()
 	stdin := p.stdin
-	running := p.state == StateRunning
+	// "stopping" DA yazılabilir: Stop() durumu önce "stopping" yapıp SONRA
+	// GracefulStop'u (stdin'e "stop") çağırıyor. Eskiden yalnızca "running"
+	// kabul ediliyordu; "stop" hiç gitmiyor, her durdurma StopTimeout (60 sn)
+	// bekleyip SIGTERM'e düşüyordu (bkz. graceful_test.go).
+	running := p.state == StateRunning || p.state == StateStopping
 	p.mu.Unlock()
 	if !running || stdin == nil {
 		return fmt.Errorf("supervisor: not running")

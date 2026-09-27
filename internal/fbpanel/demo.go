@@ -95,6 +95,12 @@ func FillDemo(a *App) {
 			"playit: tunnel established",
 			"playit: mavi-kedi.craft.ply.gg:31417 -> 127.0.0.1:25565",
 		},
+		// API'den açılan tüneller (bkz. daemon/handlers_playit_tunnel.go).
+		PlayitSync: ipcclient.PlayitSync{Tunnels: []ipc.PlayitTunnel{
+			{ID: "t1", Name: "MCOS Survival", Address: "mavi-kedi.craft.ply.gg:31417",
+				LocalPort: 25565, Type: "minecraft-java", State: ipc.PlayitTunnelOpen,
+				ServerID: "a", ServerName: "Survival"},
+		}},
 	}
 	a.pointerDevices = []string{
 		"Logitech USB Optical Mouse (fare)",
@@ -196,6 +202,21 @@ func DemoModal(a *App, kind string) {
 			{Label: "Ofis-5G", Detail: "%74", Badge: "korumali", BadgeKind: fbui.EventWarn},
 			{Label: "Misafir", Detail: "%61", Badge: "acik", BadgeKind: fbui.EventInfo},
 		}, nil))
+	case "scan":
+		// CANLI tarama penceresi: gözden geçirme setinde "yarı dolmuş,
+		// hâlâ arıyor" hâli görünsün. Ekran görüntüsünde animasyon durur
+		// ama gösterge, radar dalgası ve satır yerleşimi denetlenebilir.
+		sm := NewScanModal("Kablosuz Ağ Seç", "Kablosuz ağlar aranıyor…", nil)
+		sm.Replace([]ListItem{
+			{Label: "MCOS-Lab", Detail: "%92", Badge: "korumalı",
+				BadgeKind: fbui.EventWarn, Current: true},
+			{Label: "Ofis-5G", Detail: "%74", Badge: "korumalı",
+				BadgeKind: fbui.EventWarn},
+		})
+		a.OpenModal(sm)
+	case "scan-empty":
+		// Taramanın ilk saniyeleri: hiçbir ağ yok, iskelet satırlar akıyor.
+		a.OpenModal(NewScanModal("Kablosuz Ağ Seç", "Kablosuz ağlar aranıyor…", nil))
 	case "password":
 		m := NewPasswordModal("MCOS-Lab", nil)
 		for _, r := range "parola123" {
@@ -204,6 +225,16 @@ func DemoModal(a *App, kind string) {
 		a.OpenModal(m)
 	case "pointer":
 		a.OpenModal(newPointerModal(a))
+	case "sound":
+		a.OpenModal(newSoundModal())
+	case "vnc":
+		// Ekran paylaşımı penceresi GERÇEK durumdan besleniyor; gözden
+		// geçirme için örnek bir durum veriyoruz.
+		a.showVNCModal(ipcclient.VNCStatus{
+			Enabled: true, Running: true, Port: 5900,
+			Password: "69WBKC5T", Input: true, Clients: 1,
+			Addresses: []string{"192.168.1.42"},
+		})
 	case "text":
 		a.OpenModal(NewTextModal("Elle eşleştir",
 			"Öbür MCOS cihazının IP adresini girin.", nil).
@@ -222,6 +253,20 @@ func DemoModal(a *App, kind string) {
 		// sarsılma) kimsenin bakmadığı tek yerde kalırdı.
 		DemoLock(a, 9)
 	}
+}
+
+// DemoPower paints the shutdown/reboot screen for screenshots.
+//
+// Draw() ile çizilmez: kapanış ekranı panelin bir "bölümü" değil, panelin
+// yerine geçen tam ekran bir karedir (bkz. power_anim.go). Ekran görüntüsü
+// kipinde de o yolun aynısı kullanılmalı, yoksa gözden geçirilen şey gerçekte
+// gösterilenden başka bir çizim olurdu.
+func DemoPower(a *App, kind string) {
+	act := ActPoweroff
+	if kind == "reboot" {
+		act = ActReboot
+	}
+	a.drawPowerScreen(act, 12)
 }
 
 // DemoLock arms the lock screen with n typed characters, for screenshots.

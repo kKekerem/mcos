@@ -114,11 +114,23 @@ func R(x, y, w, h float64) Rect { return Rect{X: x, Y: y, W: w, H: h} }
 func (p *Painter) path(box Rect, build func(r *vector.Rasterizer, ox, oy float32),
 	c color.RGBA) {
 
-	b := p.dst.Bounds()
-	if b.Dx() <= 0 || b.Dy() <= 0 {
+	clip, ok := p.clipFor(box)
+	if !ok {
 		return
 	}
 
+	p.ras.Reset(clip.Dx(), clip.Dy())
+	p.ras.DrawOp = draw.Over
+	build(p.ras, float32(clip.Min.X), float32(clip.Min.Y))
+	p.ras.Draw(p.dst, clip, &image.Uniform{C: c}, image.Point{})
+}
+
+// clipFor returns the canvas rectangle a shape with this box may touch.
+func (p *Painter) clipFor(box Rect) (image.Rectangle, bool) {
+	b := p.dst.Bounds()
+	if b.Dx() <= 0 || b.Dy() <= 0 {
+		return image.Rectangle{}, false
+	}
 	// Kutuyu bir piksel genişlet: kenar yumuşatma şeklin matematiksel
 	// sınırının bir miktar DIŞINA taşar ve kırpılırsa kenar tıraşlanır.
 	clip := image.Rect(
@@ -127,14 +139,7 @@ func (p *Painter) path(box Rect, build func(r *vector.Rasterizer, ox, oy float32
 		int(math.Ceil(box.X+box.W))+1,
 		int(math.Ceil(box.Y+box.H))+1,
 	).Intersect(b)
-	if clip.Empty() {
-		return
-	}
-
-	p.ras.Reset(clip.Dx(), clip.Dy())
-	p.ras.DrawOp = draw.Over
-	build(p.ras, float32(clip.Min.X), float32(clip.Min.Y))
-	p.ras.Draw(p.dst, clip, &image.Uniform{C: c}, image.Point{})
+	return clip, !clip.Empty()
 }
 
 // boundsOf returns the bounding box of a point set.
@@ -212,6 +217,13 @@ func (p *Painter) FillRoundRect(rc Rect, radius float64, c color.RGBA) {
 	if rc.W <= 0 || rc.H <= 0 {
 		return
 	}
+	// Hızlı yol: kutunun tamamını rasterleştirmek yerine düz parçalar dolgu,
+	// yalnızca köşeler yol olarak çizilir (bkz. roundrect_fast.go).
+	// Uygun değilse (küçük ya da kesirli kutu) genel yol çalışır.
+	if fastEligible(rc, radius) {
+		p.fillRoundRectFast(rc, radius, c)
+		return
+	}
 	p.path(rc, func(ras *vector.Rasterizer, ox, oy float32) {
 		roundRectPath(ras, rc, radius, +1, ox, oy)
 	}, c)
@@ -241,6 +253,10 @@ func (p *Painter) StrokeRoundRect(rc Rect, radius, thickness float64, c color.RG
 	// İç yarıçap: dış yarıçaptan kalınlık kadar küçük, ama negatif olamaz.
 	innerRad := math.Max(0, radius-thickness)
 
+	if strokeEligible(rc, radius, thickness) {
+		p.strokeRoundRectFast(rc, radius, thickness, c)
+		return
+	}
 	p.path(rc, func(ras *vector.Rasterizer, ox, oy float32) {
 		roundRectPath(ras, rc, radius, +1, ox, oy)
 		roundRectPath(ras, inner, innerRad, -1, ox, oy)
@@ -345,6 +361,30 @@ func (p *Painter) StrokeCircle(cx, cy, r, thickness float64, c color.RGBA) {
 		p.FillCircle(cx, cy, r, c)
 		return
 	}
+	// ── DENENDİ VE GERİ ALINDI: halkayı dört banda bölmek ───────────────
+	//
+	// Bu çağrı 2r x 2r'lik TÜM kutuyu rasterleştiriyor, oysa halka o kutunun
+	// yalnızca ince bir şeridini kaplıyor. Ölçüldü: r=400, kalınlık=6 için
+	// tek halka 9,4 ms — 33 ms'lik kare bütçesinin neredeyse üçte biri.
+	//
+	// Bariz görünen düzeltme denendi: AYNI yolu dört ayrı dar kutuya
+	// (üst/alt/sol/sağ bant) çizmek. ÇALIŞMADI ve testi yazmasaydım fark
+	// edilmezdi — golang.org/x/image/vector kendi raster alanının DIŞINA
+	// taşan yol kenarlarını doğru saymıyor; sarım (winding) hesabı bozulup
+	// halkanın parçaları kayboluyor:
+	//
+	//	büyük halka   : 187 bayt farklı
+	//	kenara taşan  : 5.555 bayt farklı
+	//	toplam boyalı : 7.500 yerine 2.634 piksel
+	//
+	// Doğru çözüm, yolun KENDİSİNİ dörde bölmektir (her çeyrek kendi içinde
+	// kapalı bir yol olur, sarım o kutuda doğru çıkar) — ama bu yay
+	// segmentlerini elle üretmek demek ve şu an gereksiz: Flip düzeltmesinden
+	// sonra açılış animasyonunun kare maliyeti ~29 ms'den ~18,5 ms'ye indi ve
+	// 33 ms'lik tikin altında rahat kalıyor. Kanıtlanmamış bir hızlandırma
+	// için doğruluk riske atılmıyor.
+	//
+	// Karşı testi duruyor: internal/fbdraw/stroke_circle_test.go
 	p.path(Rect{X: cx - r, Y: cy - r, W: 2 * r, H: 2 * r},
 		func(ras *vector.Rasterizer, ox, oy float32) {
 			circlePath(ras, cx, cy, r, +1, ox, oy)

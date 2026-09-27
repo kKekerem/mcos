@@ -124,6 +124,48 @@ type caps struct {
 	HasWhl  bool
 	HasDbl  bool // BTN_TOOL_DOUBLETAP bildirir (iki parmak kaydırma mümkün)
 	HasBtnL bool
+	// Hover: temas bildirmeden MUTLAK konum veren işaretçi (VNC'nin sanal
+	// faresi, QEMU/VirtualBox "USB tablet"). Konum her pakette imleci taşır;
+	// dokunma (BTN_TOUCH) beklenmez. Bkz. absPointerKind.
+	Hover bool
+}
+
+// absPointerKind classifies an absolute (ABS_X/ABS_Y) device from its key
+// capability bits. hover=true means the device moves the cursor WITHOUT a
+// touch: every reported position is where the cursor must be.
+//
+// ── Yakalanan gerçek hata: VNC'de fare HİÇ çalışmıyordu ────────────────────
+//
+// Kullanıcı: "VNC çok iyi çalışıyor ancak VNC ile fare imlecini kontrol
+// edemiyoruz". Klavye çalışıyordu, fare çalışmıyordu. Sebep burasıydı:
+//
+// VNC sunucusunun sanal aygıtı (internal/vnc, "MCOS VNC") ABS_X/ABS_Y +
+// BTN_LEFT/RIGHT/MIDDLE bildirir; BTN_TOUCH ya da BTN_TOOL_FINGER bildirmez,
+// çünkü bir parmak değil bir FAREDİR. Eski sınıflandırma "parmak aracı yoksa
+// ve BTN_TOUCH da yoksa touchpad say" diyordu. Touchpad çözücüsü hareketi
+// YALNIZCA temas sürerken (BTN_TOUCH=1) işler — VNC hiç temas bildirmediği
+// için imleç bir piksel bile kıpırdamıyordu; tıklamalar da imlecin eski
+// yerine düşüyordu.
+//
+// Doğru sınıf libinput'un da kullandığı kuraldır: mutlak eksen + fare düğmesi,
+// parmak/temas yok -> "mutlak işaretçi" (tablet). Aynı kural QEMU'nun
+// usb-tablet'ini ve VirtualBox'ın USB tabletini de kapsar; onlar da aynı
+// bitleri bildirir. Joystick/gamepad'ler BTN_LEFT değil BTN_TRIGGER/BTN_SOUTH
+// bildirdiği için bu sınıfa girmez; ivmeölçerlerde hiç düğme yoktur.
+func absPointerKind(keyBits []byte) (k Kind, hover bool) {
+	switch {
+	case testBit(keyBits, btnToolFing):
+		return KindTouchpad, false
+	case testBit(keyBits, btnTouch):
+		return KindTouchscreen, false
+	case testBit(keyBits, btnLeft):
+		// Dokunmatik ekran ÇÖZÜCÜSÜ kullanılıyor (mutlak konum doğrudan
+		// imleci koyar) ama temas beklemeden: Hover.
+		return KindTouchscreen, true
+	}
+	// Parmak aracı da düğme de yok: eskisi gibi touchpad sayılır (grafik
+	// tabletlerinin bir kısmı). Temas bildirmedikçe imleci oynatmaz.
+	return KindTouchpad, false
 }
 
 // probe asks the kernel what a device can do.
@@ -147,13 +189,7 @@ func probe(f *os.File) caps {
 		// Parmak aracı bildiren mutlak aygıt = touchpad. Bildirmeyen =
 		// dokunmatik ekran. (Grafik tabletleri BTN_TOOL_PEN bildirir ve
 		// ikisine de girmez; imleç için touchpad gibi davranmaları yeterli.)
-		if testBit(keyBits, btnToolFing) {
-			c.Kind = KindTouchpad
-		} else if testBit(keyBits, btnTouch) {
-			c.Kind = KindTouchscreen
-		} else {
-			c.Kind = KindTouchpad
-		}
+		c.Kind, c.Hover = absPointerKind(keyBits)
 		c.HasMT = hasMTXY
 		if hasMTXY {
 			c.RangeX = absRange(f, absMTPosX)

@@ -2,10 +2,11 @@
 # mcos-display — acilis cozunurlugunu okur ve degistirir.
 #
 # ── NEDEN AYRI BIR PROGRAM? ────────────────────────────────────────────────
-# Cozunurluk bu sistemde CALISIRKEN degistirilemez: cekirdekte gercek ekran
-# karti surucusu yok (i915/amdgpu/nouveau derlenmiyor), framebuffer'i firmware
-# kuruyor. Tek yol onyukleyicideki "set gfxmode=" satirini degistirip yeniden
-# baslatmak.
+# Panel calisirken cozunurlugu ekran kartindan (DRM) degistiriyor. Bu program
+# yalnizca ACILIS cozunurlugunu (GRUB'un "set gfxmode=" satiri) ayni moda
+# esitler: boylece logo ekrani da secilen cozunurlukte gelir. Ekran karti
+# surucusu olmayan makinede (yalnizca simpledrm) calisirken degisim mumkun
+# degildir ve tek yol budur: satiri degistirip yeniden baslatmak.
 #
 # Bu, boot bolumunu baglamayi ve bir dosya yazmayi gerektirir. Panel bunu
 # kendisi yapmaz - ayri, test edilebilir bir program yapar.
@@ -106,20 +107,36 @@ case "$cmd" in
         mode="${2:-}"
         [ -n "$mode" ] || die "kullanim: mcos-display set <GENISLIKxYUKSEKLIK>"
 
-        # Mod gecerli mi? Listede olmayan bir mod, acilista GRUB'un onu
-        # bulamamasi demektir.
-        ok=0
-        for m in $MCOS_MODES; do
-            [ "$m" = "$mode" ] && ok=1
-        done
-        [ "$ok" = 1 ] || die "gecersiz mod: $mode"
+        # Mod BICIMI denetlenir, sabit bir listeye bakilmaz.
+        #
+        # Eskiden yalnizca MCOS_MODES icindeki 9 mod kabul ediliyordu. Panel
+        # artik modlari EKRAN KARTINDAN okuyor (DRM) ve 2560x1440, 3440x1440
+        # gibi listede olmayan modlari da sunuyor; onlar burada "gecersiz
+        # mod" diye reddediliyor, acilis cozunurlugu hic guncellenmiyordu.
+        # GRUB listeyi sirayla dener ve bulamadigini atlar (asagidaki
+        # write_gfxmode tam listeyi arkaya ekliyor), yani bilinmeyen bir mod
+        # kara ekrana yol acmaz.
+        case "$mode" in
+            [0-9]*x[0-9]*) ;;
+            *) die "gecersiz mod bicimi: $mode (ornek: 2560x1440)" ;;
+        esac
+        case "$mode" in
+            *[!0-9x]*) die "gecersiz mod bicimi: $mode" ;;
+        esac
 
         # 1) Tercihi kalici veriye yaz. mcos-install bunu okuyup yeni
         #    kurulumlarda da uygular.
+        #
+        # Dosyanin DIGER satirlari korunur. Panel oraya "mode=" satirini
+        # (calisirken secilen tam mod: 2560x1440@143912) yaziyor; bu dosyayi
+        # bastan yazmak o secimi her seferinde siliyordu.
         mkdir -p "$CONF_DIR" 2>/dev/null || true
-        if ! printf 'gfxmode=%s\n' "$mode" > "$CONF" 2>/dev/null; then
-            die "tercih kaydedilemedi ($CONF yazilamiyor)"
-        fi
+        tmpconf="$CONF.tmp$$"
+        {
+            [ -r "$CONF" ] && grep -v '^gfxmode=' "$CONF"
+            printf 'gfxmode=%s\n' "$mode"
+        } > "$tmpconf" 2>/dev/null && mv "$tmpconf" "$CONF" 2>/dev/null \
+            || { rm -f "$tmpconf"; die "tercih kaydedilemedi ($CONF yazilamiyor)"; }
 
         # 2) Boot bolumundeki grub.cfg'yi guncelle. Bu adim basarisiz olsa
         #    bile tercih kaydedildi; kullaniciya durum acikca soylenir.
