@@ -8,6 +8,7 @@ import 'services/store.dart';
 import 'theme/app_theme.dart';
 import 'theme/palette.dart';
 import 'widgets/mcos_logo.dart';
+import 'services/app_version.dart';
 import 'services/panel_text.dart';
 
 void main() {
@@ -128,6 +129,15 @@ class _Welcome extends StatelessWidget {
   final Store store;
   final Future<void> Function() onAdded;
 
+  Future<void> _add(BuildContext context, {required bool qr}) async {
+    final added = await Navigator.of(context).push<Connection>(
+      MaterialPageRoute(
+        builder: (_) => ConnectScreen(store: store, startWithQr: qr),
+      ),
+    );
+    if (added != null) await onAdded();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -156,23 +166,38 @@ class _Welcome extends StatelessWidget {
                   style: TextStyle(color: Palette.textDim, fontSize: 14),
                 ),
                 const SizedBox(height: 40),
+                // QR İLK SIRADA ve doğrudan tarayıcıyı açıyor: kullanıcı
+                // "QR kod yeri yok" dedi; eskiden QR, "MCOS ekle"nin
+                // arkasındaki formun içindeydi.
                 FilledButton.icon(
-                  onPressed: () async {
-                    final added = await Navigator.of(context).push<Connection>(
-                      MaterialPageRoute(
-                        builder: (_) => ConnectScreen(store: store),
-                      ),
-                    );
-                    if (added != null) await onAdded();
-                  },
-                  icon: const Icon(Icons.add),
-                  label: const Text('MCOS ekle'),
+                  onPressed: () => _add(context, qr: true),
+                  icon: const Icon(Icons.qr_code_scanner, size: 28),
+                  label: const Text('QR kodu tara'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size(260, 60),
+                    textStyle: const TextStyle(
+                        fontSize: 17, fontWeight: FontWeight.w600,),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed: () => _add(context, qr: false),
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  label: const Text('Adresi elle gir'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size(260, 48),
+                  ),
                 ),
                 const SizedBox(height: 20),
                 const Text(
-                  'MCOS panelinde:  $panelRemotePath',
+                  'MCOS panelinde:  $panelQrPath',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Palette.textFaint, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Uygulama sürümü $appVersion',
+                  style: TextStyle(color: Palette.textFaint, fontSize: 11),
                 ),
               ],
             ),

@@ -107,6 +107,45 @@ type UIConfig struct {
 	// arka ucu hiç aranmaz ve hiçbir örnekleme hesaplanmaz
 	// (bkz. internal/sound).
 	Sounds bool `json:"sounds"`
+	// Beeper, ses kartı yokken anakart bipçisine düşülmesine izin verir.
+	//
+	// Varsayılan KAPALI: kullanıcı "farklı PC'lerde farklı ses çıkıyor,
+	// tıklama sesi hoparlörden gelsin" dedi. Bipçi, kartın geç tanındığı ya
+	// da hiç olmadığı makinelerde cılız bir "bip" çalıyordu; efektler artık
+	// yalnızca gerçek ses kartından çalıyor. İsteyen Ayarlar → Ses
+	// efektleri'nden açar.
+	Beeper bool `json:"beeper,omitempty"`
+	// AnimSpeed, bütün geçişlerin hız kademesi: "yavas", "normal", "hizli".
+	//
+	// Boş = normal: alan eklenmeden önce kaydedilmiş yapılandırmalar
+	// değişmeden aynı hızda açılsın. "Kapalı" ayrı bir değer DEĞİL,
+	// Animations=false'tur; iki ayrı "kapalı" anlamı bir gün birbirini
+	// tutmaz hâle gelirdi.
+	AnimSpeed string `json:"animSpeed,omitempty"`
+}
+
+// Animasyon hız kademeleri (UIConfig.AnimSpeed).
+const (
+	AnimSlow   = "yavas"
+	AnimNormal = "normal"
+	AnimFast   = "hizli"
+)
+
+// AnimScale, geçiş sürelerinin çarpanı: yavaş 1,5×, normal 1×, hızlı 0,6×.
+//
+// Animasyonlar kapalıysa 0 döner: çağıran "süre 0 = anında" kuralıyla
+// geçişi hiç oynatmaz.
+func (u UIConfig) AnimScale() float64 {
+	if !u.Animations {
+		return 0
+	}
+	switch u.AnimSpeed {
+	case AnimSlow:
+		return 1.5
+	case AnimFast:
+		return 0.6
+	}
+	return 1
 }
 
 // DefaultUI returns the interface defaults.
@@ -135,6 +174,13 @@ func (u UIConfig) Normalize() UIConfig {
 	}
 	if u.PointerSpeed > 300 {
 		u.PointerSpeed = 300
+	}
+	// Bilinmeyen hız (elle düzenlenmiş dosya, gelecekteki bir sürüm) normal
+	// sayılır: yanlış yazılmış bir değer geçişleri dondurmamalı.
+	switch u.AnimSpeed {
+	case AnimSlow, AnimFast:
+	default:
+		u.AnimSpeed = ""
 	}
 	return u
 }

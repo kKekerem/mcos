@@ -175,9 +175,19 @@ func (d *Daemon) LinkSpec() (model.LinkSpec, bool) {
 		Origin:     d.Config().Cluster.NodeName,
 		// Eşten gelmiş bir kopya kurucusunu korur: koordinatör bu alana
 		// bakarak kurulumu yalnızca kurucunun yaymasını sağlar.
-		OriginID: srv.Link.OriginID,
-		Rules:    linkRulesFor(d.serverDataDir(srv), srv),
+		OriginID:    srv.Link.OriginID,
+		Rules:       linkRulesFor(d.serverDataDir(srv), srv),
+		ProxySecret: proxySecretOf(srv),
 	}.Normalize(), true
+}
+
+// proxySecretOf: sunucu Velocity arkasındaysa anahtar (topolojide "proxy":
+// true olur ve eşlere gider), değilse "".
+func proxySecretOf(srv *model.Server) string {
+	if srv.Link.BehindProxy() {
+		return srv.Link.Proxy.Secret
+	}
+	return ""
 }
 
 // linkRulesFor: kurucu kurallarını kendi server.properties'inden okur; eş
@@ -347,6 +357,7 @@ func (d *Daemon) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 	srv.LevelSeed = spec.Seed
 	srv.Difficulty = string(spec.Difficulty)
 	prevRules := srv.Link.Rules
+	prevProxy := srv.Link.Proxy
 	srv.Link = model.LinkConfig{
 		Mode:       model.LinkSharedWorld,
 		Difficulty: spec.Difficulty,
@@ -356,11 +367,15 @@ func (d *Daemon) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 		// Kurucu BAŞKASI: bu makine kurulumu geri yaymamalı.
 		OriginID: spec.OriginID,
 		Rules:    spec.Rules,
+		// Kurucu tek adresli proxy çalıştırıyorsa bu kopya onun arka ucudur.
+		Proxy: spec.BackendProxy(srv.Software),
 	}
 	spec.Rules.ApplyTo(srv)
 	// Kural değiştiyse (ör. kurucu online-mode'u kapattı) çalışan sunucu
-	// yeniden başlamalı: server.properties yalnızca açılışta okunur.
-	rulesChanged := !created && spec.Rules != nil && !prevRules.Equal(spec.Rules)
+	// yeniden başlamalı: server.properties yalnızca açılışta okunur. Proxy
+	// anahtarı da öyle: paper-global.yml / FabricProxy-Lite açılışta okunur.
+	rulesChanged := !created && ((spec.Rules != nil && !prevRules.Equal(spec.Rules)) ||
+		!prevProxy.Equal(srv.Link.Proxy))
 	srv.UpdatedAt = time.Now()
 
 	if err := d.store.SaveServer(srv); err != nil {
@@ -436,6 +451,9 @@ func (d *Daemon) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 		}
 		if err := d.installLinkMod(s); err != nil {
 			d.log.Errorf("link: mod kurulamadı (%s): %v", s.Name, err)
+		}
+		if err := d.ensureProxyMod(context.Background(), s); err != nil {
+			d.log.Errorf("link: %v", err)
 		}
 		// ── Düzeltilen eksik: sunucu KURULUYOR ama BAŞLATILMIYORDU ──────
 		// Kullanıcının isteği "o da başlasın" idi. Eşten gelen kurulum
@@ -761,6 +779,10 @@ func (d *Daemon) handleLinkStatus(_ context.Context, _ json.RawMessage) (any, er
 	if top.Note != "" {
 		st.Note = top.Note
 	}
+	st.ProxyAddr = d.proxyAddr(srv)
+	if p := d.proxyProblem(); p != "" && st.Note == "" {
+		st.Note = p
+	}
 	if srv != nil && !st.ModInstalled {
 		// NEDEN de yazılır: eskiden yalnızca "kurulmadı" deniyordu ve
 		// kullanıcı 26.3 sunucusunun neden ortak dünya olamadığını göremedi.
@@ -906,6 +928,12 @@ func (d *Daemon) handleLinkEnable(_ context.Context, raw json.RawMessage) (any, 
 
 	msg := fmt.Sprintf("%s ortak dünya oldu (%d cihaz, zorluk %s)",
 		srv.Name, paired+1, model.DifficultyLabel(diff)) + seedNote
+	// Tek adres: kurucu Velocity proxy'sini açar (bkz. proxy.go). Arka
+	// planda: jar indirilebilir, çalışan sunucu yeniden başlatılır.
+	if srv.Software.VelocityBackend() {
+		d.enableProxyInBackground(srv.ID)
+		msg += " — tek adres (proxy) hazırlanıyor"
+	}
 	if local > 0 {
 		msg += fmt.Sprintf(" — bu makinede %d sunucuya bölünecek", local+1)
 	}
@@ -924,9 +952,21 @@ func (d *Daemon) handleLinkDisable(_ context.Context, _ json.RawMessage) (any, e
 		return map[string]any{"message": "ortak dünya zaten kapalı"}, nil
 	}
 	srv.Link.Mode = model.LinkOff
+	// Proxy kapanır, sunucu eski (genel) portuna döner. Çalışıyorsa yeniden
+	// başlamalı: iç portta, online-mode=false ve velocity kipinde kalırsa
+	// proxy'siz hiç kimse giremez.
+	unproxied := restoreFromProxy(srv)
 	srv.UpdatedAt = time.Now()
 	if err := d.store.SaveServer(srv); err != nil {
 		return nil, err
+	}
+	if unproxied {
+		go func(id string) {
+			d.reconcileProxy()
+			if isLive(d.servers.State(id)) {
+				d.restartWorld(id)
+			}
+		}(srv.ID)
 	}
 	// Eşlere de kapat: aksi halde onlar oyuncuyu bize göndermeye devam eder
 	// ve oyuncular kapalı bir dilime düşer.

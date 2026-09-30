@@ -692,7 +692,11 @@ start_splash
 stage daemon
 start_daemon
 wait_daemon
-stage network
+# Soket HAZIR: acilis ekranindaki halka tam burada ilerlemeli. Eskiden burada
+# "stage network" (%45) vardi; halka %60'tan geri gidemedigi icin daemon'un
+# hazir olmasi ekranda HIC gorunmuyordu (yalnizca metin degisiyordu). Acik
+# yuzde, "sunucu yoneticisi yanit veriyor" anini gercek ilerleme yapiyor.
+stage 66 "Sunucu yöneticisi hazır — ağ aygıtları hazırlanıyor…"
 prepare_network_radios
 stage fonts
 prepare_fonts

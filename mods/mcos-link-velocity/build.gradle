@@ -1,0 +1,58 @@
+plugins {
+    // Duz Java eklentisi: Velocity API yalnizca DERLEME zamani bagimliligidir.
+    id 'java'
+}
+
+group = project.maven_group
+version = project.plugin_version
+
+base {
+    archivesName = project.archives_base_name
+}
+
+repositories {
+    mavenCentral()
+    // Velocity API (ve bagimliligi velocity-brigadier) yalnizca burada.
+    maven {
+        name = 'papermc'
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
+}
+
+dependencies {
+    // compileOnly: API (Gson, Guice, SLF4J dahil) proxy'nin KENDISINDE var.
+    // Jar'a gomulseydi hem buyurdu hem de proxy'deki surumle catisabilirdi.
+    compileOnly "com.velocitypowered:velocity-api:${project.velocity_api_version}"
+    // Ek islemci velocity-plugin.json'u @Plugin'den uretir; o dosya olmadan
+    // Velocity jar'i eklenti olarak TANIMAZ ve sessizce atlar.
+    annotationProcessor "com.velocitypowered:velocity-api:${project.velocity_api_version}"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    // Java 25: velocity-api 4.2.0 siniflari 69 (Java 25) surumlu, Velocity
+    // 4.2.0 da Java 25 ister. Daemon eklentiyi yalnizca 4.x proxy'ye koyar.
+    it.options.release = 25
+    it.options.encoding = 'UTF-8'
+}
+
+// ── MCOS'a teslim ───────────────────────────────────────────────────────────
+//
+// dist/mods/link/ altina IKI dosya gider:
+//   mcos-link-velocity.jar — SABIT ad; daemon onu bu adla arar ve proxy'nin
+//                            plugins/ klasorune kopyalar.
+//   index-velocity.tsv     — jar'in imaja (post-build) ve dugum paketine
+//                            (make node-jars) tasinmasi icin; index-fabric/
+//                            index-paper'a DOKUNULMAZ.
+tasks.register('deployToMcos', Copy) {
+    dependsOn tasks.jar
+    into rootProject.file('../../dist/mods/link')
+    from(tasks.jar.archiveFile) {
+        rename { 'mcos-link-velocity.jar' }
+    }
+    from('index-velocity.tsv')
+    doLast {
+        println 'mcos-link-velocity.jar + index-velocity.tsv -> dist/mods/link/'
+    }
+}
+
+tasks.named('build') { finalizedBy 'deployToMcos' }

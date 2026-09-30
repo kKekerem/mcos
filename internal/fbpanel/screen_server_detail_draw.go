@@ -383,12 +383,14 @@ func (a *App) detailViewFor(d *ServerDetail, s *model.Server) detailView {
 			ip = st.Net.LocalIP
 		}
 		lan := "—"
+		// Ortak dünya proxy'si açıksa oyuncunun adresi proxy'nin portudur
+		// (sunucu iç porta taşındı; iç port dışarıdan bağlantı kabul etmez).
 		if ip != "" {
-			lan = fmt.Sprintf("%s:%d", ip, s.Port)
+			lan = fmt.Sprintf("%s:%d", ip, s.ConnectPort())
 		}
 		v.info = [][2]string{
 			{"Sunucu IP (yerel)", orDash(ip)},
-			{"Port", itoa(s.Port)},
+			{"Port", itoa(s.ConnectPort())},
 			{"Yerel ağdan bağlan", lan},
 			{"İnternete açık", acikKapali(s.WAN.Enabled)},
 			{"Genel adres", orDash(s.WAN.Hostname)},

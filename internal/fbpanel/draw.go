@@ -389,6 +389,17 @@ type highlightAnim struct {
 	key      string
 	from, to image.Rectangle
 	at       time.Time
+	// dur, bu kaymanın süresi (hız ayarıyla ölçeklenmiş). Sıfırsa
+	// stripeSlideDur: testler ve ilk kare alanı doldurmadan kurabiliyor.
+	dur time.Duration
+}
+
+// slideDur, kaymanın geçerli süresi.
+func (h *highlightAnim) slideDur() time.Duration {
+	if h.dur > 0 {
+		return h.dur
+	}
+	return stripeSlideDur
 }
 
 // listKey identifies the list being drawn: şerit yalnızca AYNI liste içinde
@@ -404,6 +415,8 @@ func (a *App) slidingStripe(row image.Rectangle) image.Rectangle {
 	}
 	key := a.listKey()
 	now := time.Now()
+	// Kilitten ÖNCE: animDur da a.mu'yu alır.
+	dur := a.animDur(stripeSlideDur)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	h := &a.hl
@@ -415,13 +428,13 @@ func (a *App) slidingStripe(row image.Rectangle) image.Rectangle {
 		// Yeni hedef: animasyon ŞU ANKİ konumdan başlar (basılı tutulan tuşta
 		// şerit hiç zıplamaz).
 		cur := stripeAt(h, now)
-		*h = highlightAnim{key: key, from: cur, to: row, at: now}
+		*h = highlightAnim{key: key, from: cur, to: row, at: now, dur: dur}
 	}
 	return stripeAt(h, now)
 }
 
 func stripeAt(h *highlightAnim, now time.Time) image.Rectangle {
-	t := float64(now.Sub(h.at)) / float64(stripeSlideDur)
+	t := float64(now.Sub(h.at)) / float64(h.slideDur())
 	if t >= 1 {
 		return h.to
 	}
@@ -438,7 +451,7 @@ func stripeAt(h *highlightAnim, now time.Time) image.Rectangle {
 func (a *App) stripeSliding() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return !a.hl.to.Empty() && a.hl.from != a.hl.to && time.Since(a.hl.at) < stripeSlideDur
+	return !a.hl.to.Empty() && a.hl.from != a.hl.to && time.Since(a.hl.at) < a.hl.slideDur()
 }
 
 // contentRow draws a selectable content row AND registers it for the mouse.

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../models/connection.dart';
+import '../services/app_version.dart';
 import '../services/store.dart';
 import '../theme/palette.dart';
 import 'connect_screen.dart';
@@ -211,6 +212,23 @@ class _SettingsTabState extends State<SettingsTab> {
             ),
           ],
         ),
+        const SizedBox(height: 10),
+        // Kayıtlı bir bağlantısı olan kullanıcı karşılama ekranını bir daha
+        // görmüyor; QR'a giden tek yol "Düzenle"nin içindeydi ve "QR kod
+        // yeri yok" dendi. İkinci bir MCOS eklemek de yalnızca buradan.
+        FilledButton.icon(
+          onPressed: () async {
+            final added = await Navigator.of(context).push<Connection>(
+              MaterialPageRoute(
+                builder: (_) =>
+                    ConnectScreen(store: widget.store, startWithQr: true),
+              ),
+            );
+            if (added != null) await widget.onConnectionsChanged();
+          },
+          icon: const Icon(Icons.qr_code_scanner),
+          label: const Text('QR kodu tara: başka bir MCOS ekle'),
+        ),
 
         const SizedBox(height: 24),
         _section('SSH'),
@@ -280,6 +298,14 @@ class _SettingsTabState extends State<SettingsTab> {
             onTap: () => _confirmPower('poweroff', 'Kapat'),
           ),
         ]),
+        const SizedBox(height: 24),
+        // Hangi APK'nın kurulu olduğunu kullanıcı buradan söyleyebilsin.
+        const Center(
+          child: Text(
+            'MCOS uygulaması $appVersion',
+            style: TextStyle(color: Palette.textFaint, fontSize: 11),
+          ),
+        ),
       ],
     );
   }

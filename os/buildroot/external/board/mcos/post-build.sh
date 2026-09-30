@@ -660,6 +660,11 @@ sh "${BOARD_DIR}/builtin-java.sh" || exit 1
 #     (rootfs = RAM; hepsi ~0,2 MB, ölçülemeyecek kadar ucuz). Yalnızca
 #     İNDEKSİN gösterdiği jar'lar kopyalanır: indekste olmayan bir jar'ı daemon
 #     hiçbir sürüme seçmez, RAM'de ölü ağırlık olurdu.
+#   - mcos-link-velocity.jar (index-velocity.tsv, sürüm sütunu "*"): kurucunun
+#     Velocity proxy'sinin eklentisi; aynı döngüyle kopyalanır, daemon onu
+#     sabit adıyla bulup /data/proxy/plugins'e koyar (arka uç listesi
+#     değişince proxy yeniden başlamasın, oyuncular düşmesin). İndeksi
+#     ZORUNLU DEĞİL: yoksa proxy eski yolla (yeniden başlatarak) çalışır.
 #   - fabric-api jar'ları (indeksin 4. sütunu) -> çevrimdışı paketin önyükleme
 #     ortamı ($MCOS_OFFLINE_STAGE = ${BINARIES_DIR}/mcos-offline -> ISO'da
 #     /mcos/offline). Rootfs'e GİRMEZ: her biri ~2,3 MB, 17 sürüm ~40 MB RAM

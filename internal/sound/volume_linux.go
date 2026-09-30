@@ -114,6 +114,15 @@ func applyVolume(v int) {
 	if err != nil {
 		return
 	}
+	// ── Düzeltilen gerçek hata: TUŞLAR YANLIŞ KARTI DEĞİŞTİRİYORDU ──────────
+	// amixer'e kart verilmiyordu, yani seviye hep kart 0'a yazılıyordu. HDMI
+	// sesli bir ekran kartı olan masaüstünde kart 0 HDMI'dir: F3/F4 sayıyı
+	// değiştiriyor ama hoparlörden gelen ses hiç değişmiyordu. Artık çalan
+	// (ya da en iyi) çıkışın kartı ve onun ana kontrolü kullanılıyor.
+	if h := secilenMikser(); h != nil && h.ana != "" {
+		seviyeYaz(amixer, h, v)
+		return
+	}
 	arg := strconv.Itoa(v) + "%"
 	for _, ctl := range mixerControls {
 		// unmute BİRLİKTE veriliyor: seviyeyi yükseltip sessizde bırakmak,
@@ -133,8 +142,12 @@ func ReadVolume() int {
 	if err != nil {
 		return Volume()
 	}
-	for _, ctl := range mixerControls {
-		out, err := exec.Command(amixer, "sget", ctl).Output()
+	kontroller, kart := mixerControls, -1
+	if h := secilenMikser(); h != nil && h.ana != "" {
+		kontroller, kart = []string{h.ana}, h.kart
+	}
+	for _, ctl := range kontroller {
+		out, err := exec.Command(amixer, append(kartArg(kart), "-M", "sget", ctl)...).Output()
 		if err != nil {
 			continue
 		}

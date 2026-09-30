@@ -32,6 +32,11 @@ func UsedPorts(servers []*model.Server, excludeID string) map[int]bool {
 			continue
 		}
 		used[s.Port] = true
+		// Ortak dünya proxy'si sunucunun ESKİ (genel) portunu tutar; başka
+		// bir sunucuya verilirse ikisi de aynı portu dinlemeye çalışır.
+		if px := s.Link.Proxy; px != nil && px.PublicPort > 0 {
+			used[px.PublicPort] = true
+		}
 	}
 	return used
 }

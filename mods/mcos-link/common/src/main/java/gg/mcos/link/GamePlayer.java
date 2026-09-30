@@ -37,4 +37,16 @@ public interface GamePlayer {
      * olmasının sebebi budur.
      */
     void transfer(String host, int port);
+
+    /**
+     * Oyuncuyu Velocity vekilinin arkasındaki başka bir sunucuya geçirir
+     * ("bungeecord:main" kanalında "Connect" mesajı; bkz. {@link ProxyMessage}).
+     *
+     * <p>{@link #transfer}'in aksine istemci bağlantısı KOPMAZ ve oyuncu yeni
+     * bir adres görmez: geçişi vekil yapar. Kullanıcının isteği buydu —
+     * "DonutSMP gibi sessizce geçirsin, hepsi tek IP'den çıksın".
+     *
+     * @throws RuntimeException mesaj gönderilemezse (çağıran yakalar)
+     */
+    void proxyConnect(String backend);
 }

@@ -20,6 +20,7 @@ class DashboardTab extends StatelessWidget {
     required this.loading,
     required this.connection,
     required this.onRefresh,
+    this.onRepair,
   });
 
   final SystemStatus? status;
@@ -28,6 +29,11 @@ class DashboardTab extends StatelessWidget {
   final bool loading;
   final Connection connection;
   final Future<void> Function() onRefresh;
+
+  /// Hata kartındaki "QR kodu tara" düğmesi: bağlantı koptuğunda (MCOS
+  /// yeniden kuruldu, jeton ya da adres değişti) kullanıcı çözümü hatanın
+  /// hemen yanında görsün, Ayarlar → Düzenle'yi aramasın.
+  final Future<void> Function()? onRepair;
 
   @override
   Widget build(BuildContext context) {
@@ -73,7 +79,7 @@ class DashboardTab extends StatelessWidget {
           const SizedBox(height: 20),
 
           if (error != null) ...[
-            _ErrorCard(message: error!),
+            _ErrorCard(message: error!, onRepair: onRepair),
             const SizedBox(height: 16),
           ],
 
@@ -183,9 +189,10 @@ class _Pill extends StatelessWidget {
 }
 
 class _ErrorCard extends StatelessWidget {
-  const _ErrorCard({required this.message});
+  const _ErrorCard({required this.message, this.onRepair});
 
   final String message;
+  final Future<void> Function()? onRepair;
 
   @override
   Widget build(BuildContext context) {
@@ -202,9 +209,22 @@ class _ErrorCard extends StatelessWidget {
           const Icon(Icons.cloud_off, color: Palette.error, size: 20),
           const SizedBox(width: 10),
           Expanded(
-            child: Text(
-              message,
-              style: const TextStyle(color: Palette.text, fontSize: 13),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  message,
+                  style: const TextStyle(color: Palette.text, fontSize: 13),
+                ),
+                if (onRepair != null) ...[
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    onPressed: onRepair,
+                    icon: const Icon(Icons.qr_code_scanner, size: 18),
+                    label: const Text('QR kodu tara, yeniden eşleştir'),
+                  ),
+                ],
+              ],
             ),
           ),
         ],

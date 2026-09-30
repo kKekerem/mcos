@@ -278,6 +278,10 @@ func (a *App) drawPeers(r image.Rectangle) {
 		{"Zorluk", model.DifficultyLabel(link.Difficulty), u.Pal.Text},
 		{"Aktarım", fmt.Sprintf("%d oyuncu geçişi", link.Handoffs), u.Pal.Text},
 	}
+	// Tek adres: oyuncular yalnızca proxy'ye bağlanır, geçişler kopmadan olur.
+	if link.ProxyAddr != "" {
+		summary = append(summary, [3]any{"Tek adres", link.ProxyAddr + " (proxy)", u.Pal.OK})
+	}
 	// Sığmayan özet satırı ÇİZİLMEZ (kvList sınır denetlemiyor).
 	fit := 0
 	for ry := y; fit < len(summary) && ry+u.F.CellH <= in.Max.Y; ry += u.F.CellH + u.M.PadY/2 {

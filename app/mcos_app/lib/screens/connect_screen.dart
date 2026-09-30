@@ -29,12 +29,23 @@ import '../services/panel_text.dart';
 /// kullanıcı hangisi olduğunu bilmeli. Tek bir "bağlanamadı" mesajı, insanı
 /// yanlış yerde arattırır.
 class ConnectScreen extends StatefulWidget {
-  const ConnectScreen({super.key, required this.store, this.existing});
+  const ConnectScreen({
+    super.key,
+    required this.store,
+    this.existing,
+    this.startWithQr = false,
+  });
 
   final Store store;
 
   /// Düzenleme kipinde dolu; yeni bağlantıda null.
   final Connection? existing;
+
+  /// Ekran açılır açılmaz tarayıcıyı başlat. Karşılama ekranındaki ve
+  /// Ayarlar'daki "QR kodu tara" düğmeleri bunu kullanıyor: kullanıcı QR
+  /// istediğini zaten söyledi, onu bir form ekranından geçirip ikinci kez
+  /// düğme aratmak "QR kod yeri yok" şikâyetinin ta kendisiydi.
+  final bool startWithQr;
 
   @override
   State<ConnectScreen> createState() => _ConnectScreenState();
@@ -63,6 +74,13 @@ class _ConnectScreenState extends State<ConnectScreen> {
     _host = TextEditingController(text: e?.host ?? '');
     _port = TextEditingController(text: (e?.port ?? 2223).toString());
     _token = TextEditingController(text: e?.token ?? '');
+    if (widget.startWithQr) {
+      // İlk kare çizildikten sonra: Navigator.push initState içinde
+      // çağrılamaz (bu ekranın rotası henüz yerleşmedi).
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _scanQr();
+      });
+    }
   }
 
   @override
@@ -195,11 +213,23 @@ class _ConnectScreenState extends State<ConnectScreen> {
                   ),
                   const SizedBox(height: 20),
                 ],
-                // QR EN ÜSTTE: elle 32 haneli jeton yazmak istisna olmalı.
+                // QR EN ÜSTTE ve BÜYÜK: elle 32 haneli jeton yazmak istisna
+                // olmalı. Küçük bir düğme formun arasında kayboluyordu.
                 FilledButton.icon(
                   onPressed: _busy ? null : _scanQr,
-                  icon: const Icon(Icons.qr_code_scanner),
-                  label: const Text('QR ile bağlan'),
+                  icon: const Icon(Icons.qr_code_scanner, size: 28),
+                  label: const Text('QR kodu tara'),
+                  style: FilledButton.styleFrom(
+                    minimumSize: const Size.fromHeight(60),
+                    textStyle: const TextStyle(
+                        fontSize: 17, fontWeight: FontWeight.w600,),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Panelde: $panelQrPath',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Palette.textFaint, fontSize: 12),
                 ),
                 const SizedBox(height: 18),
                 const Row(

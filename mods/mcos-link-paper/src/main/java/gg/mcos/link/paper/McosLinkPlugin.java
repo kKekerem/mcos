@@ -116,6 +116,15 @@ public final class McosLinkPlugin extends JavaPlugin implements Listener {
 
         getServer().getPluginManager().registerEvents(this, this);
 
+        // Vekil (Velocity) üzerinden sessiz geçiş: "BungeeCord" kanalına giden
+        // "Connect" mesajı (bkz. ProxyMessage). Kullanıcının isteği: "DonutSMP
+        // gibi sessizce geçirsin, hepsi tek IP'den çıksın" — DonutSMP de bir
+        // Velocity vekilinin arkasındaki Paper sunucularıdır. Bukkit giden
+        // kanalı KAYITSIZ bir eklentinin mesajını reddeder; kayıt ücretsizdir,
+        // vekil yokken de zararsızdır.
+        getServer().getMessenger().registerOutgoingPluginChannel(
+                this, ProxyMessage.BUKKIT_CHANNEL);
+
         // Komut plugin.yml'de tanımlıdır; burada yalnızca yürütücüyü
         // bağlıyoruz. Servisler yukarıda KURULDUKTAN sonra bağlanır, yani
         // Fabric'teki "kayıt servislerden önce" tehlikesi Paper'da yok.

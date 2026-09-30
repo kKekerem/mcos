@@ -23,6 +23,11 @@
 //     dizüstünde hem yalnızca bipçisi olan bir sunucu kutusunda hem de
 //     geliştirme makinesinde çalışır.
 //
+//     Bipçi artık YALNIZCA kullanıcı izin verirse (SetBeeper) denenir.
+//     Kullanıcı "farklı PC'lerde farklı sesler geliyor, tıklama sesi
+//     hoparlörden gelsin" dedi: ses kartı geç tanınan ya da hiç olmayan
+//     makinede efektler bipçiden, ötekinde hoparlörden çalıyordu.
+//
 //  4. VARSAYILAN SESSİZ DEĞİL, AMA KAPATILABİLİR. Ayar model.UIConfig.Sounds
 //     alanındadır; kapalıyken hiçbir arka uç aranmaz ve hiçbir örnekleme
 //     hesaplanmaz.
@@ -75,8 +80,12 @@ type Player struct {
 	mu      sync.Mutex
 	backend backend
 	probed  bool
-	// beepSince, bipçiye ne zaman düşüldüğü. Sıfır ise bipçide değiliz.
-	beepSince time.Time
+	// lastProbe, son aramanın zamanı. Gerçek bir ses kartı bulunana kadar
+	// (bipçideyken YA DA hiçbir şey yokken) aralıklarla yeniden aranıyor.
+	lastProbe time.Time
+
+	// beeper, anakart bipçisine düşülmesine izin var mı. Varsayılan KAPALI.
+	beeper atomic.Bool
 
 	// enabled atomik: panel çizim döngüsünden okunuyor, ayar ekranından
 	// yazılıyor. Kilit almak, her kare için gereksiz bir kilit demekti.
@@ -118,6 +127,12 @@ func New(enabled bool) *Player {
 // SetEnabled turns sound on or off at runtime.
 func (p *Player) SetEnabled(on bool) { p.enabled.Store(on) }
 
+// SetBeeper allows (or forbids) falling back to the motherboard beeper.
+//
+// Kapatıldığı anda etkili: bipçideyken kapatılırsa bir sonraki seste arka uç
+// bırakılır ve yalnızca gerçek ses kartı aranır (ensureBackend).
+func (p *Player) SetBeeper(on bool) { p.beeper.Store(on) }
+
 // Enabled reports whether sound is on.
 func (p *Player) Enabled() bool { return p.enabled.Load() }
 
@@ -136,6 +151,20 @@ func (p *Player) Backend() string {
 		return "yok"
 	}
 	return p.backend.name()
+}
+
+// Output, çalan çıkışın okunur adı ("ALC892 Analog · analog"); bilinmiyorsa "".
+//
+// "Ses kartı" demek yetmiyor: aynı makinede HDMI ve analog iki kart olabilir
+// ve kullanıcının asıl sorusu "hangisinden çalıyor?".
+func (p *Player) Output() string {
+	p.mu.Lock()
+	b := p.backend
+	p.mu.Unlock()
+	if o, ok := b.(interface{ output() string }); ok {
+		return o.output()
+	}
+	return ""
 }
 
 // Play queues an effect. It never blocks and never fails.
@@ -199,32 +228,47 @@ func (p *Player) run() {
 // kilitleniyordu. Yeniden başlatmak da işe yaramaz: yarış her açılışta
 // tekrarlanır. Kullanıcının gerçek PC'de de bip duymasının sebebi budur.
 //
-// Çözüm: bipçideysek belirli aralıklarla YENİDEN ARA. Gerçek bir ses aygıtı
-// belirdiği anda ona geçilir. ALSA bulunduysa artık aranmaz — orada yarış yok.
+// Çözüm: gerçek bir ses kartı bulunana kadar belirli aralıklarla YENİDEN ARA.
+// Kart belirdiği anda ona geçilir. ALSA bulunduysa artık aranmaz — orada
+// yarış yok.
+//
+// ── Düzeltilen gerçek hata: HİÇ AYGIT YOKKEN KALICI SESSİZLİK ───────────────
+//
+// Yeniden arama yalnızca BİPÇİDEYKEN yapılıyordu. Bipçi kapalıyken (artık
+// varsayılan) ilk ses HDA kodeği henüz tanınmadan çalınırsa arka uç "yok"
+// olarak önbelleğe alınır ve oturum boyunca bir daha aranmazdı. Artık "yok"
+// da bipçi gibi geçici sayılıyor.
 func (p *Player) ensureBackend() backend {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.probed {
-		p.backend = probe()
-		p.probed = true
-		if p.backend != nil && p.backend.name() == beepName {
-			p.beepSince = time.Now()
-		}
+	allowBeep := p.beeper.Load()
+
+	// Kullanıcı bipçiyi kapattıysa ondan HEMEN vazgeç: "kapattım ama hâlâ
+	// bipliyor" ayarın işe yaramadığı izlenimini verirdi.
+	if p.backend != nil && p.backend.name() == beepName && !allowBeep {
+		p.backend = nil
+		p.probed = false
+	}
+	// Gerçek ses kartındayız: aramaya gerek yok (her seste /dev/snd taramak
+	// boşuna iştir).
+	if p.backend != nil && p.backend.name() != beepName {
 		return p.backend
 	}
-	// Yalnızca bipçideyken yeniden aranıyor: ALSA çalışıyorsa her seste
-	// /dev/snd taramak boşuna iştir.
-	if !p.beepSince.IsZero() && time.Since(p.beepSince) >= beepRetryEvery {
-		p.beepSince = time.Now()
-		if b := probe(); b != nil && b.name() != beepName {
-			p.backend = b
-			p.beepSince = time.Time{}
-		}
+	if p.probed && time.Since(p.lastProbe) < beepRetryEvery {
+		return p.backend
+	}
+	p.probed = true
+	p.lastProbe = time.Now()
+	if b := probe(allowBeep); b != nil || p.backend == nil {
+		// Bipçideyken yeni arama da bipçiyi bulursa yenisi alınıyor (zararsız);
+		// hiçbir şey bulamazsa ve bipçiye izin varsa eldeki bipçi korunuyor.
+		p.backend = b
 	}
 	return p.backend
 }
 
-// beepRetryEvery, bipçideyken gerçek ses kartının yeniden aranma aralığı.
+// beepRetryEvery, gerçek ses kartının yeniden aranma aralığı (bipçideyken ya
+// da hiçbir aygıt yokken).
 //
 // 2 saniye: HDA araştırması 60 saniyeye kadar sürebiliyor, yani birkaç
 // denemeye yer olmalı; ama her seste /dev/snd taramak da gereksiz. Kullanıcı

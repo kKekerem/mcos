@@ -276,6 +276,15 @@ func ReadLinkRules(dir string, srv *model.Server) *model.LinkRules {
 			}
 		}
 	}
+	// Proxy arka ucuyken dosyada online-mode=false yazar (hesabı Velocity
+	// doğrular). Gerçek kural kayıtta ya da işaret dosyasında durur; dosyadan
+	// okunsaydı eşlere "çevrimdışı" yayılır ve proxy de online-mode'u
+	// kapatırdı.
+	if px := srv.Link.Proxy; px != nil && px.Secret != "" {
+		r.OnlineMode = px.OnlineMode
+	} else if on, ok := ProxyMarkerOnlineMode(dir); ok {
+		r.OnlineMode = on
+	}
 	return r
 }
 

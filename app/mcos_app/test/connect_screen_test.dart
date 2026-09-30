@@ -2,7 +2,7 @@
 // hata ekranında ham metin var mı.
 //
 // Kullanıcı "Android uygulamasında QR kod yeri yok" dedi. Bu test ekranın
-// en üstünde "QR ile bağlan" düğmesinin durduğunu, düğmenin tarayıcıyı
+// en üstünde "QR kodu tara" düğmesinin durduğunu, düğmenin tarayıcıyı
 // açtığını ve kamera açılamazsa Türkçe bir açıklama göründüğünü doğrular.
 // (Testte gerçek kamera yok: eklentinin yerel kanalı taklit ediliyor ve
 // kamera izni REDDEDİLMİŞ bir telefon canlandırılıyor.)
@@ -25,7 +25,7 @@ void main() {
 
   testWidgets('QR düğmesi en üstte ve elle giriş alanları duruyor', (t) async {
     await t.pumpWidget(app());
-    final qr = find.widgetWithText(FilledButton, 'QR ile bağlan');
+    final qr = find.widgetWithText(FilledButton, 'QR kodu tara');
     expect(qr, findsOneWidget);
     expect(find.text('ya da elle girin'), findsOneWidget);
     expect(find.widgetWithText(TextFormField, 'IP adresi'), findsOneWidget);
@@ -53,7 +53,7 @@ void main() {
     addTearDown(() =>
         t.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, null),);
     await t.pumpWidget(app());
-    await t.tap(find.widgetWithText(FilledButton, 'QR ile bağlan'));
+    await t.tap(find.widgetWithText(FilledButton, 'QR kodu tara'));
     await t.pump();
     await t.pump(const Duration(milliseconds: 500));
     expect(find.byType(QrScanScreen), findsOneWidget);
@@ -104,5 +104,27 @@ void main() {
     for (final raw in ['Exception', 'null', 'undefined', 'Instance of']) {
       expect(texts, isNot(contains(raw)));
     }
+  });
+
+  testWidgets('startWithQr: ekran açılınca tarayıcı hemen açılıyor', (t) async {
+    // Karşılama ve Ayarlar'daki "QR kodu tara" düğmeleri bu yolu kullanıyor;
+    // kullanıcı formda ikinci bir düğme aramamalı.
+    const channel = MethodChannel('dev.steenbakker.mobile_scanner/scanner/method');
+    t.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, (call) async {
+      switch (call.method) {
+        case 'state':
+          return 0;
+        case 'request':
+          return false;
+      }
+      return null;
+    });
+    addTearDown(() =>
+        t.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel, null),);
+    await t.pumpWidget(
+        MaterialApp(home: ConnectScreen(store: Store(), startWithQr: true)),);
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 500));
+    expect(find.byType(QrScanScreen), findsOneWidget);
   });
 }

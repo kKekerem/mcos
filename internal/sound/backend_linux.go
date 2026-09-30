@@ -20,9 +20,14 @@ import (
 //
 // SIRA ÖNEMLİ: gerçek ses kartı > anakart bipçisi > sessizlik. Bipçiyi önce
 // denemek, hoparlörü olan bir makinede cılız bir "bip" çalmak demekti.
-func probe() backend {
+//
+// allowBeep false ise bipçi HİÇ aranmaz (varsayılan; bkz. model.UIConfig.Beeper).
+func probe(allowBeep bool) backend {
 	if a := probeALSA(); a != nil {
 		return a
+	}
+	if !allowBeep {
+		return nil
 	}
 	if b := probeBeep(); b != nil {
 		return b
@@ -34,41 +39,60 @@ func probe() backend {
 
 type alsaBackend struct {
 	bin string
-	// mixerOnce, Master kanalını bir kez açar.
-	mixerOnce sync.Once
-	// device, çalışan ilk PCM aygıt adı. İlk başarılı çalmadan sonra
+	// adaylar, denenecek PCM aygıtları, en iyisi önde (cards.go sıralar).
+	adaylar []alsaAday
+
+	// device/kart, çalışan ilk aday. İlk başarılı çalmadan sonra
 	// sabitlenir; her seste yeniden denemek gereksiz süreç başlatmaktır.
 	mu     sync.Mutex
 	device string
+	kart   int
+	tanim  string
+	// hazir, mikseri açılmış kartlar (kart başına BİR kez).
+	hazir map[int]*mikserHedefi
 }
 
-// alsaDevices are tried in order until one plays.
+// alsaAday, aplay'e verilecek bir aygıt ve ait olduğu kart.
+//
+// kart -1: kart numarası bilinmiyor ("default" gibi); amixer'e -c verilmez.
+type alsaAday struct {
+	dev  string
+	kart int
+	// tanim, ayarlar ekranı için okunur ad ("ALC892 Analog · analog").
+	tanim string
+}
+
+// alsaDevices, /proc/asound okunamazsa kullanılan eski sabit liste.
 //
 // ── Düzeltilen gerçek hata ──────────────────────────────────────────────────
 //
-// İlk sürüm yalnızca varsayılan aygıtı kullanıyordu (aplay'e -D vermemek
-// "default" demektir). QEMU'da uçtan uca ölçümde tek bir örnek bile
-// çalınmadı; mcos-soundcheck sebebi gösterdi:
+// İlk sürüm yalnızca varsayılan aygıtı kullanıyordu. QEMU'da uçtan uca
+// ölçümde tek bir örnek bile çalınmadı; mcos-soundcheck sebebi gösterdi:
 //
 //	ALSA lib pcm_direct.c:2188:(_snd_pcm_direct_new)
 //	    unable to create IPC semaphore
 //	aplay: main:850: audio open error: Function not implemented
 //
-// alsa-lib'in "default" aygıtı dmix'tir (yazılım karıştırıcı) ve süreçler
-// arası kilit için System V semaforu açar. Çekirdekte CONFIG_SYSVIPC kapalıysa
-// semget() ENOSYS döner ve ses kartı çalışır durumdayken bile HİÇBİR ŞEY
-// duyulmaz.
-//
-// Çekirdekte SYSVIPC artık açık, ama tek savunma ona bırakılmadı: MCOS başka
-// bir çekirdekle de çalıştırılabilir (kullanıcı kendi imajını üretebilir) ve
-// bu liste dmix'i tamamen atlayan bir yola düşmeyi garanti eder.
-//
-//	default     : normal yol (dmix, birden çok sürecin sesi karışabilir)
-//	plughw:0,0  : dmix YOK, ama biçim/oran dönüşümü var
-//	hw:0,0      : ham donanım; kart 44100/S16_LE/mono kabul etmezse başarısız
-var alsaDevices = []string{"default", "plughw:0,0", "hw:0,0"}
+// alsa-lib'in "default" aygıtı dmix'tir ve System V semaforu açar; çekirdekte
+// CONFIG_SYSVIPC kapalıysa hiçbir şey duyulmaz. Bu yüzden "default" artık
+// SON halka; önce kartına göre seçilmiş plughw:K,A aygıtları deneniyor
+// (cards.go: HDMI'ye değil hoparlöre gitsin diye).
+var alsaDevices = []string{"plughw:0,0", "default"}
 
 func (a *alsaBackend) name() string { return "alsa" }
+
+// output, çalan aygıtın okunur adı (henüz çalmadıysa en iyi aday).
+func (a *alsaBackend) output() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.tanim != "" {
+		return a.tanim
+	}
+	if len(a.adaylar) > 0 {
+		return a.adaylar[0].tanim
+	}
+	return ""
+}
 
 // probeALSA requires BOTH a playback device and the aplay binary.
 //
@@ -83,7 +107,39 @@ func probeALSA() backend {
 	if err != nil {
 		return nil
 	}
-	return &alsaBackend{bin: bin}
+	return &alsaBackend{bin: bin, adaylar: alsaAdaylari(), kart: -1,
+		hazir: map[int]*mikserHedefi{}}
+}
+
+// alsaAdaylari, /proc/asound'dan sıralanmış çalma aygıtlarını okur.
+//
+// Sonuna "default" EKLENİYOR: hiçbir plughw açılamazsa (ör. aygıtı başka
+// bir süreç tutuyor) dmix hâlâ çalabilir.
+func alsaAdaylari() []alsaAday {
+	cikislar := siraliCikislar(readProc("/proc/asound/pcm"), readProc("/proc/asound/cards"))
+	var out []alsaAday
+	for _, c := range cikislar {
+		out = append(out, alsaAday{dev: c.aplayAygiti(), kart: c.kart, tanim: c.Tanim()})
+	}
+	if len(out) == 0 {
+		for _, d := range alsaDevices {
+			k := -1
+			if strings.HasPrefix(d, "plughw:0,") {
+				k = 0
+			}
+			out = append(out, alsaAday{dev: d, kart: k})
+		}
+		return out
+	}
+	return append(out, alsaAday{dev: "default", kart: -1})
+}
+
+func readProc(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // hasPlaybackDevice reports whether /dev/snd has a playback PCM node.
@@ -92,57 +148,154 @@ func hasPlaybackDevice() bool {
 	return err == nil && len(matches) > 0
 }
 
-// unmute raises the Master control once.
+// ── Mikser: hangi kartın hangi kontrolü ─────────────────────────────────────
+
+// mikserHedefi, ses seviyesinin yazıldığı kart ve kontrol.
+type mikserHedefi struct {
+	kart int    // -1: varsayılan kart (amixer'e -c verilmez)
+	ana  string // kullanıcı seviyesini taşıyan kontrol ("Master" ...)
+}
+
+// hedef, F3/F4'ün değiştirdiği mikser. Çalan kart belli olunca o yazılır;
+// henüz hiç ses çalmadıysa en iyi çıkışın kartından hesaplanır.
+var (
+	hedefMu sync.Mutex
+	hedef   *mikserHedefi
+)
+
+// kartArg, amixer'e kart seçtiren argümanlar.
+func kartArg(kart int) []string {
+	if kart < 0 {
+		return nil
+	}
+	return []string{"-c", strconv.Itoa(kart)}
+}
+
+// amixerRun, amixer'i çalıştırır; çıktı yok sayılır, yalnızca başarı döner.
+func amixerRun(amixer string, kart int, args ...string) error {
+	cmd := exec.Command(amixer, append(kartArg(kart), args...)...)
+	cmd.Stdout, cmd.Stderr = nil, nil
+	return cmd.Run()
+}
+
+// mikserAc, bir kartın çıkış yolunu açar ve seviye hedefini döndürür.
 //
 // ── Neden gerekli ───────────────────────────────────────────────────────────
-// HDA kodeklerinin çoğu açılışta Master KAPALI gelir. O hâlde her şey doğru
-// kurulur, aplay 0 ile döner ve hiçbir şey duyulmaz. Teşhisi en zor ses
-// arızası budur; bir kerelik amixer çağrısı onu tamamen ortadan kaldırır.
+// HDA kodeklerinin çoğu açılışta çıkışları KAPALI getirir. O hâlde her şey
+// doğru kurulur, aplay 0 ile döner ve hiçbir şey duyulmaz. Teşhisi en zor ses
+// arızası budur. Plan (hangi kontrol seviyeyi taşır, hangileri yalnızca
+// açılır) cards.go'daki mikserPlani'dir.
 //
-// Hatalar yok sayılır: "Master" kontrolü olmayan kartlar var (ör. bazı USB
-// aygıtlarında yalnızca "PCM"), ve orada ses zaten açıktır.
-func (a *alsaBackend) unmute() {
-	a.mixerOnce.Do(func() {
-		amixer, err := exec.LookPath("amixer")
-		if err != nil {
-			return
+// Hatalar yok sayılır: kontrolü olmayan kartlar var ve orada ses zaten açıktır.
+func mikserAc(kart int) *mikserHedefi {
+	h := &mikserHedefi{kart: kart}
+	amixer, err := exec.LookPath("amixer")
+	if err != nil {
+		return h
+	}
+	out, err := exec.Command(amixer, append(kartArg(kart), "scontrols")...).Output()
+	var kontroller []string
+	if err == nil {
+		kontroller = parseScontrols(string(out))
+	}
+	ana, yan := mikserPlani(kontroller)
+	if len(kontroller) == 0 {
+		// Kontrol listesi okunamadı: eski davranış, bilinen adları dene.
+		ana, yan = "Master", []string{"PCM", "Speaker", "Headphone", "Front"}
+	}
+	h.ana = ana
+	// Yan kontroller 0 dB'e (geçirgen) açılıyor: seviye zincirde YALNIZCA
+	// ana kontrolde uygulanmalı (bkz. mikserPlani). dB bilgisi olmayan
+	// kontrolde "0dB" reddedilir; o zaman tam açık.
+	for _, k := range yan {
+		if amixerRun(amixer, kart, "-q", "sset", k, "0dB", "unmute") != nil {
+			_ = amixerRun(amixer, kart, "-q", "sset", k, "100%", "unmute")
 		}
-		for _, ctl := range []string{"Master", "PCM", "Speaker", "Headphone"} {
-			cmd := exec.Command(amixer, "-q", "sset", ctl, "70%", "unmute")
-			cmd.Stdout, cmd.Stderr = nil, nil
-			_ = cmd.Run()
-		}
-	})
+	}
+	if ana != "" {
+		seviyeYaz(amixer, h, Volume())
+	}
+	return h
+}
+
+// seviyeYaz, kullanıcı seviyesini ana kontrole yazar.
+//
+// -M (eşlenmiş ölçek): alsamixer'in gösterdiği algısal ölçek. Ham yüzdeyle
+// HDA'da %70 = -22 dB idi, yani "%70" kulağa neredeyse sessiz geliyordu.
+func seviyeYaz(amixer string, h *mikserHedefi, v int) {
+	arg := strconv.Itoa(v) + "%"
+	// unmute BİRLİKTE veriliyor: seviyeyi yükseltip sessizde bırakmak,
+	// "sesi açtım ama duyulmuyor" demek olurdu.
+	if amixerRun(amixer, h.kart, "-q", "-M", "sset", h.ana, arg, "unmute") != nil {
+		_ = amixerRun(amixer, h.kart, "-q", "sset", h.ana, arg, "unmute")
+	}
+}
+
+// secilenMikser, ses seviyesinin yazılacağı yeri döndürür (nil: bilinmiyor).
+func secilenMikser() *mikserHedefi {
+	hedefMu.Lock()
+	defer hedefMu.Unlock()
+	if hedef != nil {
+		return hedef
+	}
+	// Henüz ses çalmadı (ya da efektler kapalı): en iyi çıkışın kartını al.
+	// Bu olmadan F3/F4, kart 0'ın (çoğu masaüstünde HDMI) mikserini
+	// değiştiriyordu.
+	c := siraliCikislar(readProc("/proc/asound/pcm"), readProc("/proc/asound/cards"))
+	if len(c) == 0 {
+		return nil
+	}
+	hedef = mikserAc(c[0].kart)
+	return hedef
+}
+
+// hazirla, bir kartın mikserini BİR KEZ açar.
+func (a *alsaBackend) hazirla(kart int) *mikserHedefi {
+	a.mu.Lock()
+	h, ok := a.hazir[kart]
+	a.mu.Unlock()
+	if ok {
+		return h
+	}
+	h = mikserAc(kart)
+	a.mu.Lock()
+	a.hazir[kart] = h
+	a.mu.Unlock()
+	return h
 }
 
 // play pipes raw PCM into aplay, trying each device until one works.
 func (a *alsaBackend) play(_ Effect, pcm []int16, rate int) error {
-	a.unmute()
-
 	a.mu.Lock()
-	known := a.device
+	adaylar := a.adaylar
+	if a.device != "" {
+		adaylar = []alsaAday{{dev: a.device, kart: a.kart, tanim: a.tanim}} // çalışan aygıt bulundu
+	}
 	a.mu.Unlock()
 
-	devices := alsaDevices
-	if known != "" {
-		devices = []string{known} // çalışan aygıt bulundu; onu kullan
-	}
-
 	var lastErr error
-	for _, dev := range devices {
-		err := a.playOn(dev, pcm, rate)
+	for _, ad := range adaylar {
+		h := a.hazirla(ad.kart)
+		err := a.playOn(ad.dev, pcm, rate)
 		if err == nil {
 			a.mu.Lock()
-			a.device = dev
+			a.device, a.kart, a.tanim = ad.dev, ad.kart, ad.tanim
 			a.mu.Unlock()
+			// Ses seviyesi tuşları artık ÇALAN kartı değiştirsin.
+			if h != nil && h.ana != "" {
+				hedefMu.Lock()
+				hedef = h
+				hedefMu.Unlock()
+			}
 			return nil
 		}
 		lastErr = err
 	}
 	// Bilinen aygıt artık çalışmıyorsa (USB kart çıkarıldı) listeyi
-	// baştan denemek için sıfırla.
+	// baştan denemek için sıfırla. Hata dönünce Player da arka ucu bırakıp
+	// yeniden arıyor ve /proc/asound yeniden okunuyor.
 	a.mu.Lock()
-	a.device = ""
+	a.device, a.kart, a.tanim = "", -1, ""
 	a.mu.Unlock()
 	return lastErr
 }

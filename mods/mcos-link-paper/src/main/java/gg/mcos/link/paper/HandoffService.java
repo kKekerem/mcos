@@ -399,7 +399,14 @@ public final class HandoffService {
         }
 
         String name = player.getName();
-        actionBar(player, Fmt.AQUA + target.name + " bölgesine geçiliyor…");
+        boolean viaProxy = top.viaProxy(target);
+        // Vekil üzerinden geçiş SESSİZDİR (kullanıcının isteği: "DonutSMP
+        // gibi sessizce geçirsin"): oyuncu yürümeye devam eder, arka sunucu
+        // değişir. "Geçiliyor…" yazısı yalnızca istemcinin gerçekten yeniden
+        // bağlandığı eski transfer yolunda bir anlam taşır.
+        if (!viaProxy) {
+            actionBar(player, Fmt.AQUA + target.name + " bölgesine geçiliyor…");
+        }
 
         // ANA İŞ PARÇACIĞI. Oyuncu verisini ŞİMDİ diske yaz. Bu, aktarımın
         // doğruluğu için zorunlu tek "sıralama duyarlı" çağrıdır: kayıt
@@ -467,6 +474,38 @@ public final class HandoffService {
                     }
                     handoffs++;
                     coordinator.event("handoff", name, self, target.name, null);
+
+                    // Sıra sözleşmedir: veri YUKARIDA hedefe ulaştı ve
+                    // onaylandı; oyuncu ancak şimdi yollanır. Vekil yolunda da
+                    // aynı gerekçe: vekil bizden önce davranırsa oyuncu hedefte
+                    // boş envanterle doğardı.
+                    if (viaProxy) {
+                        // Oyuncuya bir şey yazılmaz (geçiş sessiz); iz günlükte.
+                        Log.info(name + " -> " + target.name
+                                + " (vekil üzerinden, sunucu " + target.backend + ")");
+                        // Bukkit, oyuncunun bağlantısı kanalı duyurmadıysa
+                        // mesajı HİÇBİR HATA VERMEDEN atar. Velocity kanalı
+                        // yalnızca bungee-plugin-message-channel açıkken
+                        // duyurur; bu satır o sessiz arızayı günlükte görünür
+                        // kılar (oyuncu yerinde kalır, 10 sn sonra yeniden
+                        // denenir).
+                        if (!p.getListeningPluginChannels().contains(ProxyMessage.CHANNEL)) {
+                            Log.warn("vekil '" + ProxyMessage.CHANNEL + "' kanalını duyurmadı"
+                                    + " — velocity.toml'da bungee-plugin-message-channel"
+                                    + " = true mu?");
+                        }
+                        try {
+                            p.sendPluginMessage(plugin, ProxyMessage.BUKKIT_CHANNEL,
+                                    ProxyMessage.connect(target.backend));
+                        } catch (RuntimeException e) {
+                            // Kanal kaydı yoksa ya da mesaj sınırı aşılırsa
+                            // Bukkit fırlatır; transfer dalıyla aynı muamele.
+                            Log.warn("vekil mesajı gönderilemedi (" + name + "): " + e);
+                            actionBar(p, Fmt.RED + target.name
+                                    + " bölgesine geçilemedi — yerinde kaldınız");
+                        }
+                        return;
+                    }
                     Log.info(name + " -> " + target.name + " ("
                             + target.host + ":" + target.mcPort + ")");
 

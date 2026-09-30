@@ -76,7 +76,7 @@ GO_CMDS := mcosd mcosctl mcos-detect mcos-panel mcos-panel-fb mcos-splash
 # Masaustu araclari: imaja girmez, ayri derlenir (make flash / flash-windows).
 GO_HOST_CMDS := mcos-flash
 
-.PHONY: offline-bundle all app build test test-boot check-ui check-fonts preview-ui vet fmt run clean os iso qemu qemu-uefi qemu-run qemu-run-uefi lite help preflight uefi bios usb usb-both windows-usb verify-usb boottest linux flash flash-windows flash-all node node-windows node-linux node-jars node-winres node-all mod mod-fabric mod-paper shots
+.PHONY: offline-bundle all app build test test-boot check-ui check-fonts preview-ui vet fmt run clean os iso qemu qemu-uefi qemu-run qemu-run-uefi lite help preflight uefi bios usb usb-both windows-usb verify-usb boottest linux flash flash-windows flash-all node node-windows node-linux node-jars node-winres node-all mod mod-fabric mod-paper mod-velocity shots
 
 all: app
 
@@ -773,7 +773,7 @@ node-all: node-windows node-linux
 # ve ikisi birbirinin dosyasini TANIMAZ. Tek bir jar ile ikisini birden
 # beslemek mumkun degil. Ikisi de AYNI tel protokolunu konusur, yani bir Paper
 # dugumu ile bir Fabric dugumu ayni ortak dunyayi paylasabilir.
-mod: mod-fabric mod-paper
+mod: mod-fabric mod-paper mod-velocity
 	@ls -l dist/mods/ 2>/dev/null || true
 
 ## mod-fabric: ortak dunya modu (Fabric, 1.20.5 .. 26.3) -> dist/mods/link/
@@ -821,6 +821,34 @@ mod-paper:
 	fi
 	@mkdir -p dist/mods
 	@cd mods/mcos-link-paper && (./gradlew build --no-daemon || gradle build --no-daemon)
+
+## mod-velocity: kurucunun Velocity proxy'si icin eklenti -> dist/mods/link/
+##               mcos-link-velocity.jar + index-velocity.tsv
+#
+# Arka uc listesi degisince (yeni PC, IP/port degisimi, kopya acilip kapandi)
+# Velocity YENIDEN BASLATILIYORDU ve proxy'deki herkes dusuyordu. Eklenti
+# listeyi MCOS'tan (/link/proxy) okuyup calisan proxy'ye kendisi uygular.
+# velocity-api 4.2.0 Java 25 bayt kodudur; Java 25 mod-fabric'teki sirayla
+# aranir (MOD_JAVA_HOME, JAVA_HOME, ~/toolchains/jdk25, /usr/lib/jvm).
+mod-velocity:
+	@if [ ! -f mods/mcos-link-velocity/build.gradle ]; then \
+		echo "mods/mcos-link-velocity bulunamadi"; exit 1; \
+	fi
+	@mkdir -p dist/mods/link
+	@jh=""; \
+	for c in "$(MOD_JAVA_HOME)" "$$JAVA_HOME" "$$HOME/toolchains/jdk25" /usr/lib/jvm/*25*; do \
+		[ -n "$$c" ] && [ -x "$$c/bin/java" ] || continue; \
+		v=$$("$$c/bin/java" -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java.specification.version = //p'); \
+		if [ "$${v%%.*}" -ge 25 ] 2>/dev/null; then jh="$$c"; break; fi; \
+	done; \
+	if [ -z "$$jh" ]; then \
+		echo "HATA: Java 25 bulunamadi (velocity-api 4.2.0 icin gerekli)."; \
+		echo "  make mod-velocity MOD_JAVA_HOME=/jdk25/yolu   ya da   ~/toolchains/jdk25"; \
+		exit 1; \
+	fi; \
+	cd mods/mcos-link-velocity && \
+	if [ -x ./gradlew ]; then JAVA_HOME="$$jh" ./gradlew build --no-daemon -q; \
+	else JAVA_HOME="$$jh" gradle build --no-daemon -q; fi
 
 ## shots: arayuzun her ekranini PNG olarak basar (donanim gerekmez)
 shots:

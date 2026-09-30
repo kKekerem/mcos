@@ -2,6 +2,8 @@ package gg.mcos.link.fabric;
 
 import gg.mcos.link.GamePlayer;
 import gg.mcos.link.Msg;
+import gg.mcos.link.ProxyMessage;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.network.packet.s2c.common.ServerTransferS2CPacket;
 import net.minecraft.server.network.ServerPlayerEntity;
 
@@ -69,5 +71,12 @@ final class YarnPlayer implements GamePlayer {
         // Bu paketten sonra istemci bizden kopar; başka bir şey göndermenin
         // anlamı yok.
         player.networkHandler.sendPacket(new ServerTransferS2CPacket(host, port));
+    }
+
+    @Override
+    public void proxyConnect(String backend) {
+        // Kanal kaydı BungeePayload'da; mesaj istemciye değil, yoldaki
+        // Velocity vekiline gider ve o oyuncuyu bağlantıyı koparmadan geçirir.
+        ServerPlayNetworking.send(player, new BungeePayload(ProxyMessage.connect(backend)));
     }
 }

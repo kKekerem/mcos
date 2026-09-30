@@ -93,8 +93,13 @@ class Pairing {
         'olabilir.',
       );
     }
+    // QR parmak izi TUTTUYSA eski sabitleme yok sayılıyor: QR bant dışı
+    // (ekran → kamera) geldiği için eski kayıttan daha güçlü bir güven
+    // çapası. Aksi hâlde MCOS yeniden kurulduktan sonra "Düzenle → QR kodu
+    // tara" diyen kullanıcı, tam da istenen şeyi yaptığı hâlde "kimlik
+    // değişti, QR ile yeniden ekleyin" hatasına takılıyordu.
     final pin = normalizeFingerprint(pinnedFingerprint);
-    if (pin.isNotEmpty && !sameFingerprint(seen, pin)) {
+    if (exp.isEmpty && pin.isNotEmpty && !sameFingerprint(seen, pin)) {
       throw RpcException(
         'Sunucunun kimliği DEĞİŞTİ.\n\nBeklenen:\n$pinnedFingerprint\n\n'
         'Gelen:\n$seen\n\n'

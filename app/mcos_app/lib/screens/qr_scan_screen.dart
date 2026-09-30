@@ -66,7 +66,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('QR ile bağlan'),
+        title: const Text('QR kodu tara'),
         actions: [
           IconButton(
             tooltip: 'Fener',

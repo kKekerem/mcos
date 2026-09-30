@@ -193,6 +193,13 @@ func (m *Manager) Start(ctx context.Context, srv *model.Server) error {
 		return failStart(startErr(StageLaunch,
 			"server.properties yazılamadı; disk dolu ya da salt okunur olabilir.", err))
 	}
+	// Velocity arka ucu (tek adresli ortak dünya) ya da geri alınması; bkz.
+	// proxy_backend.go. WriteLinkProperties'ten SONRA: o kurucunun
+	// online-mode kuralını yazar, proxy açıkken bu onu false'a çeker.
+	if err := WriteProxyBackend(dataDir, srv); err != nil {
+		return failStart(startErr(StageLaunch,
+			"Proxy arka ucu ayarları yazılamadı; disk dolu ya da salt okunur olabilir.", err))
+	}
 	r.setState(model.StateStarting)
 	r.mu.Lock()
 	r.players = 0

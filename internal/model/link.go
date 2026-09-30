@@ -1,7 +1,9 @@
 package model
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -144,6 +146,132 @@ type LinkConfig struct {
 	// birden çok kopyaya bölündüğü için açıldı. Kopya sayısı 1'e inince
 	// MCOS kipi kendisi geri kapatır; kullanıcının elle açtığına dokunmaz.
 	Auto bool `json:"auto,omitempty"`
+
+	// Proxy: bu sunucu MCOS'un Velocity proxy'sinin ARKASINDA bir arka uç
+	// (bkz. LinkProxy). nil: eski davranış, oyuncu transfer paketiyle geçer.
+	Proxy *LinkProxy `json:"proxy,omitempty"`
+}
+
+// LinkProxy, ortak dünyanın tek adresli proxy kurulumudur.
+//
+// ── Neden proxy ─────────────────────────────────────────────────────────────
+// Kullanıcının isteği: "çoklu PC bağlama çok yanlış, bildiğin yeni sunucuya
+// aktarıyorsun; DonutSMP gibi modern sunucular böyle yapmıyor, sessizce
+// geçiriyor; tek bir IP'den çıkış versin hepsi, proxy olsun onları yöneten."
+// Transfer paketi istemciyi BAŞKA bir adrese yeniden bağlatır: yükleme ekranı
+// görünür, her PC'nin portu dışarı açık olmalıdır. DonutSMP gibi ağlar Paper
+// sunucularını bir Velocity proxy'sinin arkasına koyar: oyuncu tek adrese
+// bağlanır, sunucular arası geçiş proxy içinde olur ve bağlantı kopmaz.
+//
+// Kurucuda Velocity sunucunun GENEL portunu (PublicPort, ör. 25565) alır;
+// sunucunun kendisi Port alanındaki iç porta taşınır. Eşlerde ve kardeş
+// kopyalarda PublicPort 0'dır: onlar yalnızca arka uçtur.
+type LinkProxy struct {
+	// Secret, Velocity "modern" yönlendirmesinin paylaşılan anahtarıdır.
+	// Arka uç bu anahtarla imzalanmamış bağlantıyı reddeder: proxy'yi
+	// atlayıp doğrudan iç porta bağlanan biri sahte bir oyuncu adı
+	// kullanamaz (online-mode=false olduğu için tek koruma budur).
+	Secret string `json:"secret"`
+	// PublicPort, proxy'nin dinlediği (sunucunun ESKİ) port; yalnızca
+	// kurucuda dolu. Ortak dünya kapanınca sunucu bu porta geri döner.
+	PublicPort int `json:"publicPort,omitempty"`
+	// OnlineMode, GERÇEK online-mode kuralıdır. Proxy açıkken
+	// server.properties'te online-mode=false yazar (kimliği proxy doğrular);
+	// kural dosyadan okunsaydı false'a düşer ve eşlere yanlış yayılırdı.
+	OnlineMode bool `json:"onlineMode"`
+}
+
+// ConnectPort is the port players connect to: proxy açıkken sunucunun kendisi
+// iç porttadır, oyuncunun adresi proxy'nin (eski genel) portudur.
+func (s *Server) ConnectPort() int {
+	if s.Link.BehindProxy() && s.Link.Proxy.PublicPort > 0 {
+		return s.Link.Proxy.PublicPort
+	}
+	return s.Port
+}
+
+// BehindProxy reports whether the server runs as a Velocity backend now.
+func (c LinkConfig) BehindProxy() bool {
+	return c.Mode == LinkSharedWorld && c.Proxy != nil && c.Proxy.Secret != ""
+}
+
+// Equal reports whether two backend setups are the same (nil == nil).
+func (p *LinkProxy) Equal(o *LinkProxy) bool {
+	if p == nil || o == nil {
+		return p == nil && o == nil
+	}
+	return *p == *o
+}
+
+// BackendProxy is the backend setup a PEER's copy takes from the origin's
+// spec (nil: proxy yok ya da bu yazılım Velocity arkasına giremez).
+//
+// Gerçek online-mode kurucunun kuralıdır; eşin kendi dosyası proxy açıkken
+// false yazar.
+func (s LinkSpec) BackendProxy(sw Software) *LinkProxy {
+	if s.ProxySecret == "" || !sw.VelocityBackend() {
+		return nil
+	}
+	online := true
+	if s.Rules != nil {
+		online = s.Rules.OnlineMode
+	}
+	return &LinkProxy{Secret: s.ProxySecret, OnlineMode: online}
+}
+
+// VelocityBackend reports whether sw can sit behind Velocity's "modern"
+// forwarding.
+//
+// Paper ailesi bunu paper-global.yml ile, Fabric FabricProxy-Lite moduyla
+// yapar. Spigot/CraftBukkit yalnızca eski BungeeCord yönlendirmesini bilir:
+// onlarda proxy açılırsa kimse giremezdi, bu yüzden eski transfer yolu kalır.
+func (s Software) VelocityBackend() bool {
+	switch s {
+	case SoftwarePaper, SoftwarePurpur, SoftwareFolia, SoftwareFabric:
+		return true
+	}
+	return false
+}
+
+// ProxyBackendName, bir düğüm adının Velocity'deki sunucu adıdır.
+//
+// Sözleşme (Java tarafı aynı adı topolojinin "backend" alanından okur):
+// ad küçük harfe çevrilir, [a-z0-9_-] dışındaki her karakter "-" olur.
+// Örn. "PC-B" -> "pc-b", "mcos kutu-2" -> "mcos-kutu-2".
+func ProxyBackendName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	if b.Len() == 0 {
+		return "node"
+	}
+	return b.String()
+}
+
+// ProxyBackendNames maps node names to UNIQUE backend names, in order.
+//
+// "PC B" ile "pc-b" aynı ada düşer; Velocity'de iki sunucu aynı adı
+// taşıyamaz (biri sessizce kaybolur ve oyuncu yanlış makineye gider).
+// İkinci ve sonrakilere "-2", "-3" eklenir.
+func ProxyBackendNames(names []string) []string {
+	out := make([]string, len(names))
+	seen := map[string]bool{}
+	for i, n := range names {
+		base := ProxyBackendName(n)
+		name := base
+		for k := 2; seen[name]; k++ {
+			name = fmt.Sprintf("%s-%d", base, k)
+		}
+		seen[name] = true
+		out[i] = name
+	}
+	return out
 }
 
 // PairingPort is where MCOS nodes accept pairing and shared-world pushes.
@@ -300,6 +428,10 @@ type LinkNode struct {
 	// playit ile gelen oyuncu kardeşe o kardeşin KENDİ tüneliyle aktarılır
 	// (tünel adresi ana sunucununkinden farklıdır, port eklemek işe yaramaz).
 	PublicAddr string `json:"publicAddr,omitempty"`
+	// Backend, düğümün MCOS Velocity proxy'sindeki sunucu adıdır (bkz.
+	// ProxyBackendName). Proxy açıkken mod oyuncuyu transfer paketiyle
+	// değil, proxy'ye "Connect <backend>" diyerek geçirir.
+	Backend string `json:"backend,omitempty"`
 }
 
 // LinkStatus is what the panel shows on the pairing screen.
@@ -324,6 +456,9 @@ type LinkStatus struct {
 	Note string `json:"note,omitempty"`
 	// Handoffs counts player transfers since the server started.
 	Handoffs int `json:"handoffs,omitempty"`
+	// ProxyAddr, oyuncuların bağlanacağı TEK adrestir ("IP:port"); proxy
+	// kapalıysa boş.
+	ProxyAddr string `json:"proxyAddr,omitempty"`
 }
 
 // LinkSpec is everything a peer needs to create its half of a shared world.
@@ -380,6 +515,12 @@ type LinkSpec struct {
 	// Rules, iki yarının da AYNI olması gereken oyun kurallarıdır (bkz.
 	// LinkRules). nil: eski bir kurucu göndermedi; eş kendi değerini korur.
 	Rules *LinkRules `json:"rules,omitempty"`
+
+	// ProxySecret: dolu ise oyuncular kurucunun Velocity proxy'sinin
+	// arkasındadır ve her düğüm kendi sunucusunu bu anahtarla "modern"
+	// yönlendirmeli arka uç olarak kurar (bkz. LinkProxy). Eşler zaten
+	// güvenilir bir eşleştirmede; anahtar yalnızca onlara gider.
+	ProxySecret string `json:"proxySecret,omitempty"`
 
 	// Instances, bu makinede aynı dünyayı çalıştıran KARDEŞ kopyalardır.
 	//

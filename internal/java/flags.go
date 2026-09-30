@@ -2,6 +2,7 @@ package java
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 )
 
@@ -66,7 +67,10 @@ func JVMArgs(profile string, ramMB, major int) []string {
 	// Büyük sayfalar (2 MB): büyük yığında TLB ıskalarını azaltır. Çekirdek
 	// THP'yi "madvise" kipinde açar (S02mcostune); bu bayrak JVM'in yığını
 	// için madvise ister. Java 8'in bu bayrağı güvenilir değil.
-	if major >= 11 {
+	// YALNIZCA Linux: Windows JVM'i bu bayrağı tanımıyor ("Unrecognized VM
+	// option") ve 0,2 sn'de çıkış kodu 1 ile düşüyor — mcos-node'da (Windows)
+	// her sunucu açılmıyordu (2026-09-27, kullanıcının PC'sinde ölçüldü).
+	if major >= 11 && runtime.GOOS == "linux" {
 		args = append(args, "-XX:+UseTransparentHugePages")
 	}
 	// Java 8 predates a couple of the experimental knobs above being stable; it

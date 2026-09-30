@@ -150,10 +150,22 @@ type playitTarget struct {
 }
 
 func serverPort(s *model.Server) int {
+	// Ortak dünya proxy'si açıkken sunucu iç porttadır; dışarıya açılacak
+	// TEK adres proxy'nin (sunucunun eski, genel) portudur.
+	if px := s.Link.Proxy; px != nil && px.PublicPort > 0 && s.Link.BehindProxy() {
+		return px.PublicPort
+	}
 	if s.Port > 0 {
 		return s.Port
 	}
 	return playitDefaultPort
+}
+
+// proxyOnlyBackend: sunucu başka bir makinenin/ana sunucunun proxy'sinin
+// arkasında bir arka uç. Ona tünel açılmaz: proxy'yi atlayan bağlantıyı
+// zaten reddeder ve kullanıcının isteği "tek bir IP'den çıkış" idi.
+func proxyOnlyBackend(s *model.Server) bool {
+	return s.Link.BehindProxy() && s.Link.Proxy.PublicPort <= 0
 }
 
 func isLive(st model.ServerState) bool {
@@ -178,7 +190,7 @@ func playitPickTargets(servers []*model.Server, state func(string) model.ServerS
 	seen := map[int]bool{}
 	add := func(s *model.Server) {
 		p := serverPort(s)
-		if seen[p] {
+		if seen[p] || proxyOnlyBackend(s) {
 			return
 		}
 		seen[p] = true

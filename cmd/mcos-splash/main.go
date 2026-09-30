@@ -230,6 +230,10 @@ func run(fbPath, ttyPath, until, stage, save, shot string, brandOnly bool,
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
+	// Durum/hazır/kare dosyalarını dizine BAĞLA: diskten açılışta switch_root
+	// sonrası mutlak yollar bu süreç için çözülmüyor (bkz. anchor.go).
+	until, stage, save = anchorRunDir(until, stage, save)
+
 	ticker := time.NewTicker(frameInterval)
 	defer ticker.Stop()
 

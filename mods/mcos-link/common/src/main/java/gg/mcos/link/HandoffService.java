@@ -258,7 +258,14 @@ public final class HandoffService {
         }
 
         String name = player.name();
-        player.actionBar(Msg.of(target.name + " bölgesine geçiliyor…", Msg.Color.AQUA));
+        boolean viaProxy = top.viaProxy(target);
+        // Vekil üzerinden geçiş SESSİZDİR (kullanıcının isteği: "DonutSMP
+        // gibi sessizce geçirsin"): oyuncu yürümeye devam eder, arka sunucu
+        // değişir. "Geçiliyor…" yazısı yalnızca istemcinin gerçekten yeniden
+        // bağlandığı eski transfer yolunda bir anlam taşır.
+        if (!viaProxy) {
+            player.actionBar(Msg.of(target.name + " bölgesine geçiliyor…", Msg.Color.AQUA));
+        }
 
         // Oyuncu verisini ŞİMDİ diske yaz. Bu, aktarımın doğruluğu için
         // zorunlu tek "eşleme duyarlı" çağrıdır: kayıt olmadan gönderilecek
@@ -315,6 +322,24 @@ public final class HandoffService {
                 }
                 handoffs++;
                 coordinator.event("handoff", name, self, target.name, null);
+
+                // Sıra sözleşmedir: veri YUKARIDA hedefe ulaştı ve onaylandı;
+                // oyuncu ancak şimdi yollanır. Vekil yolunda da aynı gerekçe:
+                // vekil bizden önce davranırsa oyuncu hedefte boş envanterle
+                // doğardı.
+                if (viaProxy) {
+                    // Oyuncuya bir şey yazılmaz (geçiş sessiz); iz günlükte.
+                    Log.info(name + " -> " + target.name + " (vekil üzerinden, sunucu "
+                            + target.backend + ")");
+                    try {
+                        p.proxyConnect(target.backend);
+                    } catch (RuntimeException e) {
+                        Log.warn("vekil mesajı gönderilemedi (" + name + "): " + e);
+                        p.actionBar(Msg.of(target.name
+                                + " bölgesine geçilemedi — yerinde kaldınız", Msg.Color.RED));
+                    }
+                    return;
+                }
                 Log.info(name + " -> " + target.name + " ("
                         + target.host + ":" + target.mcPort + ")");
 

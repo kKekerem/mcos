@@ -74,6 +74,8 @@ type Daemon struct {
 	// backupSt, otomatik yedek zamanlayıcısının süreç içi belleği (bkz.
 	// backup_auto.go).
 	backupSt autoBackupState
+	// proxySt, ortak dünyanın tek adresli Velocity proxy'si (bkz. proxy.go).
+	proxySt proxyState
 	// rpc, kendi yontem tablomuz. Uzaktan kontrol koprusu AYNI tabloyu
 	// kullanir; ayri bir tablo tutmak, iki yolun zamanla ayrismasi demekti.
 	rpc *ipc.Server
@@ -88,7 +90,11 @@ type Daemon struct {
 // Ayrı bir yardımcı çünkü cluster paketi daemon'u ithal EDEMEZ (döngü
 // olurdu); bağlantı burada, LinkHost arayüzü üzerinden kuruluyor.
 func newLinkCoordinator(d *Daemon) *cluster.LinkCoordinator {
-	return cluster.NewLinkCoordinator(d.cluster, d)
+	c := cluster.NewLinkCoordinator(d.cluster, d)
+	// Velocity eklentisi arka uç listesini buradan okur (/link/proxy):
+	// liste değişince proxy'yi yeniden başlatıp herkesi düşürmemek için.
+	c.SetProxySource(d.proxyList)
+	return c
 }
 
 // New constructs a daemon: loads config, opens the store, prepares logging,
@@ -311,6 +317,9 @@ func (d *Daemon) Run(ctx context.Context) {
 	// aktarımı (bkz. handlers_sftp.go).
 	go d.sftpLoop(ctx)
 	go d.clusterWorkLoop(ctx)
+	// Ortak dünya proxy'si: sunucular açıldıktan sonra (autostart) Velocity
+	// onların önüne geçer.
+	go d.proxyLoop(ctx)
 	<-ctx.Done()
 	d.log.Infof("daemon: shutting down, stopping all servers")
 	if c := d.cluster.LinkCoord(); c != nil {

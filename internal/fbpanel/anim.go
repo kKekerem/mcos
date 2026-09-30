@@ -122,6 +122,29 @@ func (t *transition) progress() (float64, bool) {
 // animationsOn reports whether transitions are enabled.
 func (a *App) animationsOn() bool { return a.UIPrefs().Animations }
 
+// animDur, bir geçiş süresini kullanıcının hız ayarına göre ölçekler.
+//
+// Kullanıcının isteği: "animasyon hızı ayarlanabilsin". Her animasyonun kendi
+// sabiti var (kayma 180 ms, açılış 900 ms, kapanış 1,6 sn); hepsine AYNI
+// çarpanı uygulamak, aralarındaki oranı — yani hangi hareketin "büyük jest",
+// hangisinin "küçük geri bildirim" olduğunu — koruyor. Ayrı ayrı hız ayarı
+// kullanıcıya anlamsız bir karar yükü olurdu.
+//
+// Animasyonlar kapalıysa 0 döner. a.mu TUTULURKEN çağrılamaz (UIPrefs kilidi
+// kendisi alır).
+func (a *App) animDur(d time.Duration) time.Duration {
+	return scaleDur(d, a.UIPrefs().AnimScale())
+}
+
+// scaleDur, süreyi çarpanla ölçekler; kilit ve yapılandırma gerektirmez
+// (testler ve güç animasyonu bunu doğrudan kullanır).
+func scaleDur(d time.Duration, k float64) time.Duration {
+	if k <= 0 {
+		return 0
+	}
+	return time.Duration(float64(d) * k)
+}
+
 // beginTransition requests an animation. It NEVER touches the canvas.
 //
 // Animasyonlar kapalıysa HİÇBİR ŞEY yapmaz — ne kopya alınır ne bellek
@@ -150,6 +173,8 @@ func (a *App) beginTransition(kind transKind) {
 	if !a.animationsOn() {
 		return
 	}
+	// Süre kilitten ÖNCE okunuyor: animDur da a.mu'yu alır.
+	dur := a.animDur(transDuration)
 	a.mu.Lock()
 	// Bekleyen bir AÇILIŞ geçişi EZİLMEZ. O geçiş, panel daha ilk karesini
 	// çizmeden kurulur ve saati döngüye girilirken başlar (armIntro); tam o
@@ -158,7 +183,7 @@ func (a *App) beginTransition(kind transKind) {
 	// sessizce yok ederdi. Açılış jesti, o kısa geçişten daha önemli.
 	started := false
 	if a.trans == nil || !a.trans.pending {
-		a.trans = &transition{kind: kind, start: time.Now(), dur: transDuration}
+		a.trans = &transition{kind: kind, start: time.Now(), dur: dur}
 		a.dirty = true
 		started = true
 	}
@@ -188,6 +213,7 @@ func (a *App) BeginIntro(from *image.RGBA) {
 	if !a.animationsOn() {
 		return
 	}
+	dur := a.animDur(introDuration)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	b := a.ui.Bounds()
@@ -201,7 +227,7 @@ func (a *App) BeginIntro(from *image.RGBA) {
 	}
 	// pending: saat burada DEĞİL, armIntro()'da başlar. Gerekçe transition
 	// türünün yanında yazılı — açılışın bloklayan RPC'leri arada duruyor.
-	a.trans = &transition{kind: transIntro, dur: introDuration, pending: true}
+	a.trans = &transition{kind: transIntro, dur: dur, pending: true}
 	a.dirty = true
 }
 

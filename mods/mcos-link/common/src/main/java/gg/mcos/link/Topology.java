@@ -26,7 +26,7 @@ public final class Topology {
     /** Hiçbir şeyin açık olmadığı, güvenli varsayılan. */
     public static final Topology DISABLED =
             new Topology(SUPPORTED_VERSION, false, "", "normal", 32, 2,
-                    List.of(), List.of(), "", "ortak dünya kapalı");
+                    List.of(), List.of(), "", "ortak dünya kapalı", false);
 
     public final int version;
     public final boolean enabled;
@@ -42,10 +42,26 @@ public final class Topology {
     public final String token;
     /** Kapalıysa nedenini açıklar (panelde/günlükte gösterilir). */
     public final String note;
+    /**
+     * Oyuncular MCOS'un Velocity vekil sunucusunun (proxy) ARKASINDA mı.
+     *
+     * <p>Neden: kullanıcının isteği — "DonutSMP gibi modern sunucular
+     * oyuncuyu başka sunucuya aktarmıyor, sessizce geçiriyor; hepsi tek bir
+     * IP'den çıkıyor". DonutSMP, bir Velocity vekilinin arkasındaki Paper
+     * sunucularıdır: oyuncu yalnızca vekile bağlanır, sunucular arası geçişi
+     * vekil yapar ve istemci bağlantısı hiç kopmaz. Transfer paketi ise
+     * istemciye "şu adrese yeniden bağlan" der; oyuncu yeni bir adres, yeni
+     * bir bağlantı ve "sunucuya aktarılıyor" ekranı görür.
+     *
+     * <p>Eski koordinatörler bu alanı göndermez; yokluğu "vekil yok, eski
+     * transfer paketi" demektir.
+     */
+    public final boolean proxy;
 
     private Topology(int version, boolean enabled, String self, String difficulty,
                      int slabChunks, int hysteresisChunks, List<Node> nodes,
-                     List<Area> areas, String token, String note) {
+                     List<Area> areas, String token, String note,
+                     boolean proxy) {
         this.version = version;
         this.enabled = enabled;
         this.self = self;
@@ -56,6 +72,7 @@ public final class Topology {
         this.areas = List.copyOf(areas);
         this.token = token;
         this.note = note;
+        this.proxy = proxy;
     }
 
     /** Bir düğüm: adı, oyuncunun aktarılacağı adres ve eşler arası port. */
@@ -75,10 +92,21 @@ public final class Topology {
         public final boolean local;
         /** Düğümün playit adresi ("ad" ya da "ad:port"); yoksa boş. */
         public final String publicAddr;
+        /**
+         * Velocity yapılandırmasındaki sunucu adı (ör. "PC-B" → "pc-b");
+         * yoksa boş.
+         *
+         * <p>Adı mod TÜRETMEZ, koordinatörden okur: Velocity'nin
+         * velocity.toml'unu MCOS yazar ve adın iki yerde ayrı ayrı
+         * hesaplanması, bir gün birinin kuralı değişince oyuncunun "böyle bir
+         * sunucu yok" diye yerinde kalması demekti.
+         */
+        public final String backend;
 
         Node(String name, String host, int mcPort, int linkPort,
              boolean self, boolean online, int players,
-             boolean local, String publicAddr) {
+             boolean local, String publicAddr, String backend) {
+            this.backend = backend;
             this.local = local;
             this.publicAddr = publicAddr;
             this.name = name;
@@ -168,6 +196,18 @@ public final class Topology {
         return null;
     }
 
+    /**
+     * Bu düğüme geçiş vekil sunucu üzerinden mi yapılacak.
+     *
+     * <p>İkisi birden gerekir: vekil açık AMA düğümün vekildeki adı yoksa
+     * (yarım güncellenmiş bir koordinatör), vekile "Connect" diyecek bir ad
+     * da yoktur; o zaman eski transfer paketi, oyuncuyu hiç geçirmemekten
+     * iyidir.
+     */
+    public boolean viaProxy(Node target) {
+        return proxy && target != null && !target.backend.isEmpty();
+    }
+
     /** Ada göre düğüm; yoksa null. */
     public Node node(String name) {
         for (Node n : nodes) {
@@ -212,6 +252,7 @@ public final class Topology {
         String difficulty = getStr(o, "difficulty", "normal");
         int slab = getInt(o, "slabChunks", 32);
         int hyst = getInt(o, "hysteresisChunks", 2);
+        boolean proxy = getBool(o, "proxy");
 
         List<Node> nodes = new ArrayList<>();
         if (o.has("nodes") && o.get("nodes").isJsonArray()) {
@@ -231,7 +272,8 @@ public final class Topology {
                         n.has("online") && n.get("online").getAsBoolean(),
                         getInt(n, "players", 0),
                         n.has("local") && n.get("local").getAsBoolean(),
-                        getStr(n, "publicAddr", "")));
+                        getStr(n, "publicAddr", ""),
+                        getStr(n, "backend", "").trim()));
             }
         }
 
@@ -258,16 +300,21 @@ public final class Topology {
         }
 
         return new Topology(version, enabled, self, difficulty, slab, hyst,
-                nodes, areas, token, note);
+                nodes, areas, token, note, proxy);
     }
 
     private static Topology withNote(String note) {
         return new Topology(SUPPORTED_VERSION, false, "", "normal", 32, 2,
-                List.of(), List.of(), "", note);
+                List.of(), List.of(), "", note, false);
     }
 
     private static String getStr(JsonObject o, String k, String def) {
         return o.has(k) && !o.get(k).isJsonNull() ? o.get(k).getAsString() : def;
+    }
+
+    /** Eksik ya da null alan false'tur: eski koordinatörler "proxy" göndermez. */
+    private static boolean getBool(JsonObject o, String k) {
+        return o.has(k) && !o.get(k).isJsonNull() && o.get(k).getAsBoolean();
     }
 
     private static int getInt(JsonObject o, String k, int def) {

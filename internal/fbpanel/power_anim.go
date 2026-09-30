@@ -113,6 +113,12 @@ func (a *App) PlayPowerOutro(flip func() error, act Action) {
 		return
 	}
 
+	// Üç evre de kullanıcının hız ayarına uyuyor (bkz. animDur). Oranlar
+	// korunuyor: kapanış ekranının "bekleme" evresi de ölçekleniyor, yoksa
+	// hızlı kipte uzaklaşma biter ama ekran yine aynı süre asılı kalırdı.
+	inDur, holdDur, outDur := a.animDur(powerOutroIn), a.animDur(powerOutroHold),
+		a.animDur(powerOutroOut)
+
 	from := image.NewRGBA(b)
 	copy(from.Pix, canvas.Pix)
 	scratch := image.NewRGBA(b)
@@ -122,7 +128,7 @@ func (a *App) PlayPowerOutro(flip func() error, act Action) {
 	frame := 0
 	for {
 		el := time.Since(start)
-		t := float64(el) / float64(powerOutroIn)
+		t := float64(el) / float64(inDur)
 		if t >= 1 {
 			break
 		}
@@ -142,7 +148,7 @@ func (a *App) PlayPowerOutro(flip func() error, act Action) {
 
 	// ── 2. Kapanış ekranı beklerken döner ──────────────────────────────
 	hold := time.Now()
-	for time.Since(hold) < powerOutroHold {
+	for time.Since(hold) < holdDur {
 		a.drawPowerScreen(act, frame)
 		if err := flip(); err != nil {
 			return
@@ -157,7 +163,7 @@ func (a *App) PlayPowerOutro(flip func() error, act Action) {
 
 	start = time.Now()
 	for {
-		t := float64(time.Since(start)) / float64(powerOutroOut)
+		t := float64(time.Since(start)) / float64(outDur)
 		if t >= 1 {
 			break
 		}

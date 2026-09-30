@@ -9,6 +9,7 @@ import '../services/errors.dart';
 import '../services/rpc_client.dart';
 import '../services/store.dart';
 import '../theme/palette.dart';
+import 'connect_screen.dart';
 import 'dashboard_tab.dart';
 import 'servers_tab.dart';
 import 'settings_tab.dart';
@@ -72,9 +73,14 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void didUpdateWidget(covariant HomeScreen old) {
     super.didUpdateWidget(old);
+    // Port ve parmak izi de sayılıyor: QR ile yeniden eşleştirmede
+    // (MCOS yeniden kuruldu) yalnızca bunlar değişebilir; eski istemci eski
+    // parmak izini sabitlediği için her yoklamada "kimlik değişti" derdi.
     if (old.connection.id != widget.connection.id ||
         old.connection.host != widget.connection.host ||
-        old.connection.token != widget.connection.token) {
+        old.connection.port != widget.connection.port ||
+        old.connection.token != widget.connection.token ||
+        old.connection.fingerprint != widget.connection.fingerprint) {
       _client.close();
       _client = RpcClient(widget.connection);
       setState(() {
@@ -116,6 +122,22 @@ class _HomeScreenState extends State<HomeScreen> {
     } finally {
       _polling = false;
     }
+  }
+
+  /// Aynı kaydı QR ile yeniden eşleştirir (Düzenle + tarayıcı hemen açık).
+  Future<void> _repairWithQr() async {
+    final updated = await Navigator.of(context).push<Connection>(
+      MaterialPageRoute(
+        builder: (_) => ConnectScreen(
+          store: widget.store,
+          existing: widget.connection,
+          startWithQr: true,
+        ),
+      ),
+    );
+    if (updated == null) return;
+    widget.onThemeChanged(updated.theme);
+    await widget.onConnectionsChanged();
   }
 
   /// Bir eylemi çalıştırır, sonucu bildirir ve listeyi tazeler.
@@ -165,6 +187,7 @@ class _HomeScreenState extends State<HomeScreen> {
         loading: !_firstLoadDone,
         connection: widget.connection,
         onRefresh: _refresh,
+        onRepair: _repairWithQr,
       ),
       ServersTab(
         servers: _servers,

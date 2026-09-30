@@ -36,9 +36,12 @@ var (
 
 // player returns the process-wide sound player, honouring the current config.
 func (a *App) player() *sound.Player {
-	on := a.UIPrefs().Sounds
-	soundOnce.Do(func() { soundPlayer = sound.New(on) })
-	soundPlayer.SetEnabled(on)
+	ui := a.UIPrefs()
+	soundOnce.Do(func() { soundPlayer = sound.New(ui.Sounds) })
+	soundPlayer.SetEnabled(ui.Sounds)
+	// Bipçi izni de her çalmada okunuyor: Ayarlar'dan kapatıldığı anda bir
+	// sonraki ses artık bipçiden çıkmıyor.
+	soundPlayer.SetBeeper(ui.Beeper)
 	return soundPlayer
 }
 
@@ -65,6 +68,14 @@ func (a *App) SoundBackend() string {
 		return "denenmedi"
 	}
 	return soundPlayer.Backend()
+}
+
+// SoundOutput, çalan çıkışın okunur adı ("ALC892 Analog · analog"); yoksa "".
+func (a *App) SoundOutput() string {
+	if soundPlayer == nil {
+		return ""
+	}
+	return soundPlayer.Output()
 }
 
 // SetHeadless marks the app as a one-shot screenshot run (no sound, no

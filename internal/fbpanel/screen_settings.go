@@ -54,7 +54,7 @@ type settingsRow struct {
 var settingsRows = [settingCount]settingsRow{
 	setTheme:      {"Tema", "Arayüz vurgu rengini değiştir"},
 	setPointer:    {"Fare ve touchpad", "İmleç desteği, hassasiyet, dokunarak tıklama"},
-	setAnimations: {"Animasyonlar", "Ekran geçişleri ve açılış animasyonu"},
+	setAnimations: {"Animasyonlar", "Geçiş hızı: normal → hızlı → kapalı → yavaş (Enter)"},
 	setSounds:     {"Ses efektleri", "Geçişlerde kısa ses; hoparlör yoksa sessiz"},
 	setPassword:   {"Panel parolası", "İsteğe bağlı — paneli kilitler"},
 	setRemote:     {"Uzaktan kontrol", "Telefon uygulamasıyla bağlan (jeton burada)"},
@@ -202,10 +202,10 @@ func (a *App) settingValue(k settingKind, cfg *model.Config,
 			return "yalnızca touchpad", u.Pal.OK
 		}
 	case setAnimations:
-		if ui.Animations {
-			return "açık", u.Pal.OK
+		if !ui.Animations {
+			return "kapalı", u.Pal.TextFaint
 		}
-		return "kapalı", u.Pal.TextFaint
+		return animSpeedLabel(ui.AnimSpeed), u.Pal.OK
 	case setSounds:
 		if !ui.Sounds {
 			return "kapalı", u.Pal.TextFaint
@@ -277,7 +277,7 @@ func (a *App) activateSetting(idx int) {
 	case setPointer:
 		a.openPointerSettings()
 	case setAnimations:
-		a.toggleAnimations()
+		a.cycleAnimations()
 	case setSounds:
 		a.openSoundSettings()
 	case setPassword:
@@ -454,19 +454,65 @@ func (a *App) adjustPointerSpeed(delta int) {
 	})
 }
 
-// toggleAnimations flips transitions on/off.
-func (a *App) toggleAnimations() {
-	on := false
-	a.updateUI(func(u *model.UIConfig) {
-		u.Animations = !u.Animations
-		u.BootAnimation = u.Animations
-		on = u.Animations
-	})
-	if on {
-		a.Emit(fbui.EventOK, "Animasyonlar açıldı")
-	} else {
-		a.Emit(fbui.EventInfo, "Animasyonlar kapatıldı")
+// animSpeedLabel, hız kademesinin ekranda görünen adı.
+func animSpeedLabel(speed string) string {
+	switch speed {
+	case model.AnimSlow:
+		return "yavaş"
+	case model.AnimFast:
+		return "hızlı"
 	}
+	return "normal"
+}
+
+// nextAnimSpeed, Enter'a her basışta geçilecek kademe.
+//
+// ── Neden bu sıra: normal → hızlı → kapalı → yavaş → normal ─────────────────
+//
+// Kullanıcının isteği: "animasyon hızı ayarlanabilsin". Bu satır eskiden
+// yalnızca aç/kapa idi. Ayrı bir hız penceresi yerine aynı satırda kademe
+// DÖNDÜRÜLÜYOR: değer sağda zaten yazılı ve bir basışta sonuç görülüyor.
+//
+// Varsayılandan (normal) ilk basış HIZLI'ya gider: hız ayarına bakan
+// kullanıcının çoğu geçişleri kısaltmak ister. "Kapalı" ortada, çünkü yavaş
+// bir makinede aranan şey odur ve iki basışta ulaşılmalı.
+func nextAnimSpeed(ui model.UIConfig) (on bool, speed string) {
+	if !ui.Animations {
+		return true, model.AnimSlow
+	}
+	switch ui.AnimSpeed {
+	case model.AnimFast:
+		// Kapalı. Hız alanına dokunulmuyor; bir sonraki basış zaten
+		// yukarıdaki dal ile "yavaş"a geçiyor.
+		return false, ui.AnimSpeed
+	case model.AnimSlow:
+		return true, ""
+	}
+	return true, model.AnimFast
+}
+
+// cycleAnimations steps through the animation speeds (and off).
+func (a *App) cycleAnimations() {
+	var ui model.UIConfig
+	a.updateUI(func(u *model.UIConfig) {
+		on, speed := nextAnimSpeed(*u)
+		u.Animations = on
+		// Açılış animasyonu da aynı ayarı izliyor: "kapalı" diyen kullanıcı
+		// açılışta da beklemek istemiyor (eski aç/kapa ile aynı davranış).
+		u.BootAnimation = on
+		if on {
+			u.AnimSpeed = speed
+		}
+		ui = *u
+	})
+	if !ui.Animations {
+		a.Emit(fbui.EventInfo, "Animasyonlar kapatıldı — geçişler anında")
+		return
+	}
+	a.Emit(fbui.EventOK, "Animasyon hızı: "+animSpeedLabel(ui.AnimSpeed))
+	// Yeni hızı HEMEN göster: bir soluklaşma oynatmak, "yavaş" ile "hızlı"
+	// arasındaki farkı anlatmanın en kısa yolu.
+	a.beginTransition(transFade)
 }
 
 // ── Ses ayarları ────────────────────────────────────────────────────────────
@@ -476,6 +522,9 @@ type soundOption int
 
 const (
 	sndEnabled soundOption = iota
+	// sndBeeper: ses kartı yokken anakart bipçisine düşülsün mü. Varsayılan
+	// kapalı; kullanıcı efektlerin hoparlörden gelmesini istedi.
+	sndBeeper
 	sndTest
 	sndOptionCount
 )
@@ -504,7 +553,7 @@ func (m *soundModal) SetCursor(i int) {
 }
 
 func (m *soundModal) Title() string    { return "Ses efektleri" }
-func (m *soundModal) Size() (int, int) { return 54, 14 }
+func (m *soundModal) Size() (int, int) { return 58, 16 }
 
 func (m *soundModal) Draw(a *App, r image.Rectangle) {
 	u := a.ui
@@ -521,6 +570,7 @@ func (m *soundModal) Draw(a *App, r image.Rectangle) {
 		value string
 	}{
 		sndEnabled: {label: "Ses efektleri", check: true, on: ui.Sounds},
+		sndBeeper:  {label: "Ses kartı yoksa anakart bipçisi", check: true, on: ui.Beeper},
 		sndTest:    {label: "Sesi dene", value: "Enter"},
 	}
 
@@ -540,8 +590,8 @@ func (m *soundModal) Draw(a *App, r image.Rectangle) {
 		}
 		col := u.Pal.Text
 		switch {
-		case i == sndTest && !ui.Sounds:
-			col = u.Pal.TextFaint // ses kapalıyken deneme anlamsız
+		case (i == sndTest || i == sndBeeper) && !ui.Sounds:
+			col = u.Pal.TextFaint // ses kapalıyken deneme ve bipçi anlamsız
 		case int(i) == m.cursor:
 			col = u.Pal.Accent
 		}
@@ -561,12 +611,20 @@ func (m *soundModal) Draw(a *App, r image.Rectangle) {
 	switch a.SoundBackend() {
 	case "alsa":
 		backend, note, col = "ses kartı (ALSA)", "Hoparlör/kulaklık çıkışı.", u.Pal.OK
+		// Hangi çıkış: HDMI mi analog mu? "Ses kartı" demek, aynı makinede
+		// iki kart varken asıl soruyu ("hangisinden?") yanıtlamıyordu.
+		if o := a.SoundOutput(); o != "" {
+			note = o
+		}
 	case "pcspkr":
 		backend, note, col = "anakart bipçisi",
 			"Ses kartı bulunamadı; tek tonluk bip çalınır.", u.Pal.Warn
 	case "yok":
-		backend, note, col = "YOK",
-			"Sistem hiçbir ses aygıtı görmüyor.", u.Pal.Warn
+		backend, col = "YOK", u.Pal.Warn
+		note = "Sistem hiçbir ses kartı görmüyor."
+		if !ui.Beeper {
+			note = "Ses kartı bulunamadı (bipçi kapalı, sessiz)."
+		}
 	}
 	u.Text(r.Min.X, y, "ÇIKIŞ", u.Pal.TextFaint)
 	u.TextRight(r.Max.X-u.M.PadX, y, backend, col)
@@ -592,6 +650,8 @@ func (m *soundModal) Key(a *App, key string) bool {
 		switch soundOption(m.cursor) {
 		case sndEnabled:
 			a.toggleSounds()
+		case sndBeeper:
+			a.toggleBeeper()
 		case sndTest:
 			// Deneme sesi ONAY tonudur: en belirgin olanı.
 			a.playSound(sound.Confirm)
@@ -624,6 +684,20 @@ func (a *App) toggleSounds() {
 		a.Emit(fbui.EventOK, "Ses efektleri açıldı ("+a.SoundBackend()+")")
 	} else {
 		a.Emit(fbui.EventInfo, "Ses efektleri kapatıldı")
+	}
+}
+
+// toggleBeeper allows or forbids the motherboard-beeper fallback.
+func (a *App) toggleBeeper() {
+	on := false
+	a.updateUI(func(u *model.UIConfig) {
+		u.Beeper = !u.Beeper
+		on = u.Beeper
+	})
+	if on {
+		a.Emit(fbui.EventInfo, "Ses kartı yoksa anakart bipçisi kullanılacak")
+	} else {
+		a.Emit(fbui.EventInfo, "Anakart bipçisi kapatıldı — efektler yalnızca ses kartından")
 	}
 }
 

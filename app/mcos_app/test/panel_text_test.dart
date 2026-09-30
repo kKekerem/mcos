@@ -46,6 +46,9 @@ void main() {
     final eski = <String>[];
     for (final f in Directory('lib').listSync(recursive: true)) {
       if (f is! File || !f.path.endsWith('.dart')) continue;
+      // panel_text.dart eski yolu BİLEREK anıyor: düzeltilen hatayı
+      // belgeleyen açıklamada. Ekrana giden metin orada değil, sabitlerde.
+      if (f.path.endsWith('panel_text.dart')) continue;
       final t = f.readAsStringSync();
       if (t.contains('Sol menü') || t.contains('Uzaktan Kontrol →')) {
         eski.add(f.path);

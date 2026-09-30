@@ -108,3 +108,16 @@ viarewind|https://cdn.modrinth.com/data/TbHIxhx5/versions/FkS8Q0YI/ViaRewind-4.1
 # Lisans: playit-agent deposu açık kaynak; imajda dağıtılabilir.
 playitd|https://github.com/playit-cloud/playit-agent/releases/download/v1.0.10/playit-linux-amd64
 playit-cli|https://github.com/playit-cloud/playit-agent/releases/download/v1.0.10/playit-cli-linux-amd64
+
+# ── Velocity proxy (ortak dünyanın TEK adresi) ─────────────────────────────
+#
+# Kullanıcının isteği: "DonutSMP gibi yap, tek bir IP'den çıkış versin
+# hepsi, proxy olsun onları yöneten." Ortak dünya açıkken kurucu MCOS
+# Velocity'yi çalıştırır; oyuncular yalnızca ona bağlanır, PC'ler arası geçiş
+# bağlantı kopmadan proxy içinde olur (bkz. internal/proxy).
+#
+# URL internal/proxy/jar.go'daki OfflineURL ile AYNI olmak ZORUNDA (depo adı
+# URL özetinden türetilir). 4.2.0 Java 25 ister; yukarıdaki java25-jre onu
+# karşılar. İnternet varsa MCOS en yeni kararlı sürümü kendisi indirir.
+# Lisans: GPLv3.
+velocity|https://fill-data.papermc.io/v1/objects/35a5596a5468a035d8a32c8de5ebb0dc6b8d8f0cc3ff5169d514aca762af8aa8/velocity-4.2.0-30.jar

@@ -1,0 +1,7 @@
+# index-velocity.tsv — MCOS Link Velocity eklentisi (proxy tarafı).
+#
+# Minecraft sürümüne bağlı DEĞİL ("*"): eklenti oyun sunucusuna değil,
+# kurucudaki Velocity proxy'sine kurulur. Satır, imaja (post-build) ve düğüm
+# paketine (make node-jars) jar'ın taşınması için vardır; daemon eklentiyi
+# sabit adıyla arar (internal/daemon/proxy.go velocityPluginSource).
+velocity	*	mcos-link-velocity.jar	-

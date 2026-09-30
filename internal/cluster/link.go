@@ -100,6 +100,10 @@ type LinkCoordinator struct {
 	// modHealth: düğüm adı -> mod portu son yoklamada yanıt verdi mi
 	// (bkz. probeMods, model.LinkNode.ModReady).
 	modHealth map[string]bool
+
+	// proxySource, /link/proxy yanıtını üretir (daemon verir; bkz.
+	// SetProxySource). nil: bu makinede proxy yok (ör. mcos-node).
+	proxySource func() (ProxyList, bool)
 }
 
 // maxLinkEvents is how many recent link events are kept for the panel.
@@ -137,6 +141,7 @@ func (c *LinkCoordinator) Start() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/link/topology", c.handleTopology)
 	mux.HandleFunc("/link/event", c.handleEvent)
+	mux.HandleFunc("/link/proxy", c.handleProxy)
 	mux.HandleFunc("/link/health", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
@@ -198,6 +203,13 @@ type topology struct {
 	Areas      []model.Territory `json:"territories"`
 	Note       string            `json:"note,omitempty"`
 
+	// Proxy: oyuncular MCOS'un Velocity proxy'sinin arkasında. Mod sınırda
+	// transfer paketi YOLLAMAZ; proxy'ye BungeeCord "Connect <backend>"
+	// iletisi gönderir ve oyuncu bağlantısı kopmadan geçer (DonutSMP gibi
+	// ağların yaptığı). Eklemeli alan: eski mod bunu görmez, eskisi gibi
+	// transfer eder.
+	Proxy bool `json:"proxy,omitempty"`
+
 	// Token, düğümler arası kimlik doğrulama anahtarıdır.
 	//
 	// Mod bunu eşlere gönderdiği her istekte taşır. Anahtar OLMADAN, ağdaki
@@ -211,6 +223,77 @@ type topology struct {
 
 // TopologyVersion is the current contract version.
 const TopologyVersion = 1
+
+// ════════════════════════════════════════════════════════════════════════════
+// /link/proxy — Velocity eklentisinin arka uç listesi
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Kullanıcının isteği: "velocity eklentisini de yap herkes düşmesin".
+//
+// Eskiden arka uç listesi velocity.toml'a yazılıyordu ve liste her
+// değiştiğinde (yeni PC eşleşti, bir PC'nin IP'si/portu değişti, bir yerel
+// kopya açıldı/kapandı) Velocity YENİDEN BAŞLATILIYORDU: proxy'ye bağlı
+// herkes düşüyordu. Velocity yapılandırmayı canlı okumaz ama API'si çalışırken
+// sunucu eklemeye/çıkarmaya izin verir. mcos-link-velocity eklentisi bu uç
+// noktayı birkaç saniyede bir okur ve farkı proxy'ye kendisi uygular; oyuncu
+// bağlantısı hiç kopmaz.
+
+// ProxyServer is one backend in the /link/proxy answer.
+//
+// Alan adları eklentiyle SÖZLEŞMEDİR (mods/mcos-link-velocity); adlar
+// model.ProxyBackendName kuralıyla (küçük harf, [a-z0-9_-]) üretilir, mod da
+// topolojideki "backend" alanından aynı adı okur.
+type ProxyServer struct {
+	Name string `json:"name"`
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
+
+// ProxyList is the /link/proxy answer.
+type ProxyList struct {
+	Backends []ProxyServer `json:"backends"`
+	// Try, oyuncunun ilk gönderildiği (ve arka ucu düşünce döndüğü) sunucu:
+	// kurucunun kendi sunucusu.
+	Try string `json:"try"`
+	// MaxPlayers, sunucu listesinde görünen üst sınır. Eklenti ping
+	// yanıtına yazar: velocity.toml'daki değer arka uç sayısıyla değişseydi
+	// her yeni PC yine yeniden başlatma demek olurdu.
+	MaxPlayers int `json:"maxPlayers,omitempty"`
+}
+
+// SetProxySource wires the /link/proxy answer (daemon, proxy.go).
+//
+// Arayüz yerine işlev: LinkHost'a yöntem eklemek mcos-node dahil her
+// uygulayıcıyı değiştirmeyi gerektirirdi; proxy yalnızca MCOS kutusunda var.
+func (c *LinkCoordinator) SetProxySource(f func() (ProxyList, bool)) {
+	c.mu.Lock()
+	c.proxySource = f
+	c.mu.Unlock()
+}
+
+// handleProxy answers the Velocity plugin's poll.
+//
+// Proxy kapalıysa 503: eklenti o turu ATLAR ve elindeki listeyi korur. Boş
+// bir liste dönseydik geçici bir aksaklıkta (topoloji henüz hesaplanmadı)
+// eklenti bütün arka uçları siler, geçiş yapan oyuncular boşluğa düşerdi.
+func (c *LinkCoordinator) handleProxy(w http.ResponseWriter, r *http.Request) {
+	c.mu.RLock()
+	f := c.proxySource
+	c.mu.RUnlock()
+	var pl ProxyList
+	ok := false
+	if f != nil {
+		pl, ok = f()
+	}
+	if pl.Backends == nil {
+		pl.Backends = []ProxyServer{} // "null" değil "[]": Java tarafı dizi bekler
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if !ok {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}
+	_ = json.NewEncoder(w).Encode(pl)
+}
 
 // handleTopology answers the mod's topology poll.
 func (c *LinkCoordinator) handleTopology(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +340,7 @@ func (c *LinkCoordinator) Topology() topology {
 	}
 
 	t.Enabled = true
+	t.Proxy = spec.ProxySecret != ""
 	t.Token = c.mgr.Secret()
 	t.Difficulty = string(spec.Difficulty)
 	if t.Difficulty == "" {
@@ -482,6 +566,15 @@ func (c *LinkCoordinator) linkNodesFrom(members []model.LinkMember) []model.Link
 			n.LastSeen = time.Now()
 		}
 		out = append(out, n)
+	}
+	// Proxy'deki sunucu adları: kurucunun Velocity yapılandırması da bu
+	// alanı okur, böylece mod ile proxy aynı adı kullanır.
+	names := make([]string, len(out))
+	for i := range out {
+		names[i] = out[i].Name
+	}
+	for i, b := range model.ProxyBackendNames(names) {
+		out[i].Backend = b
 	}
 	return out
 }

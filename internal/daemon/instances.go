@@ -159,6 +159,12 @@ func syncSibling(main, sib *model.Server, rules *model.LinkRules) {
 	// açtığı için kardeş de kendi tünelini alır.
 	sib.WAN.Enabled = main.WAN.Enabled
 	linkPort := sib.Link.LinkPort
+	// Ana sunucu Velocity arkasındaysa kardeş de arka uçtur (aynı anahtar);
+	// genel port YALNIZCA anadadır (proxy'yi o çalıştırır).
+	var px *model.LinkProxy
+	if main.Link.BehindProxy() {
+		px = &model.LinkProxy{Secret: main.Link.Proxy.Secret, OnlineMode: main.Link.Proxy.OnlineMode}
+	}
 	sib.Link = model.LinkConfig{
 		Mode:       model.LinkSharedWorld,
 		Difficulty: main.Link.Difficulty,
@@ -168,6 +174,7 @@ func syncSibling(main, sib *model.Server, rules *model.LinkRules) {
 		// Kurallar ana sunucunun server.properties'inden: kardeşin
 		// server.properties'ine her açılışta yazılır (WriteLinkProperties).
 		Rules: rules,
+		Proxy: px,
 	}
 	sib.UpdatedAt = time.Now()
 }
@@ -181,6 +188,8 @@ func (d *Daemon) ensureSplitLink(main *model.Server, count int) error {
 	if count <= 1 {
 		if main.Link.Auto && main.Link.Mode == model.LinkSharedWorld {
 			main.Link.Mode, main.Link.Auto = model.LinkOff, false
+			// Bölme bitti: proxy de kalkar, sunucu genel portuna döner.
+			restoreFromProxy(main)
 			return d.store.SaveServer(main)
 		}
 		return nil
@@ -233,6 +242,18 @@ func (d *Daemon) ensureInstances(main *model.Server) ([]*model.Server, error) {
 	count := d.instanceCount(main)
 	if err := d.ensureSplitLink(main, count); err != nil {
 		return nil, err
+	}
+	// Tek adres: ortak dünyanın kurucusu Velocity arkasına alınır (bölünmüş
+	// dünyada da, PC'lerle paylaşılanda da). AÇILMADAN önce: port taşıması
+	// ancak açılışta etkili olur. Başarısızsa eski transfer yolu çalışır.
+	// Süre sınırı: internet yoksa ya da yavaşsa sunucunun açılışı Velocity
+	// indirmesini dakikalarca beklemesin.
+	pctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	_, perr := d.ensureOriginProxy(pctx, main)
+	cancel()
+	if err := perr; err != nil {
+		d.log.Warnf("proxy: %s tek adrese alınamadı, eski aktarım kullanılıyor: %v", main.Name, err)
+		d.setProxyProblem("tek adres (proxy) açılamadı: " + err.Error())
 	}
 	if count <= 1 {
 		return nil, nil

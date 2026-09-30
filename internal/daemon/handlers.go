@@ -540,12 +540,18 @@ func (d *Daemon) launchServer(ctx context.Context, srv *model.Server) error {
 		// cekirdege hapsolmus halde "turbo" calisiyordu.
 		srv.CPUAffinity = nil
 	}
+	// Velocity arka ucu Fabric ise FabricProxy-Lite şart (bkz. proxy.go).
+	if err := d.ensureProxyMod(ctx, srv); err != nil {
+		d.log.Warnf("proxy: %v", err)
+	}
 	if err := d.servers.Start(ctx, srv); err != nil {
 		// Kullanıcıya Türkçe, eyleme dönüştürülebilir mesaj; teknik ayrıntı
 		// günlüğe. Eskiden ham Go hatası panele düşüyordu.
 		d.log.Errorf("daemon: %s başlatılamadı: %v", srv.ID, err)
 		return &ipc.Error{Code: ipc.CodeConflict, Message: server.UserMessage(err)}
 	}
+	// Ortak dünya proxy'si 10 sn'lik turu beklemeden sunucunun önüne geçsin.
+	go d.reconcileProxy()
 
 	// WAN açık sunucunun genel adresi artık playit'ten gelir: playit arka
 	// plan işçisi WAN açık her çalışan sunucu için tünel açar (bkz.

@@ -126,7 +126,17 @@ func (h *nodeHost) LinkSpec() (model.LinkSpec, bool) {
 		// Kurucu MCOS'tur: bu alan dolu olduğu sürece koordinatör kurulumu
 		// geri yaymaz (bkz. cluster.LinkCoordinator.isOrigin).
 		OriginID: srv.Link.OriginID,
+		// Kurucunun Velocity proxy'si: doluysa bu PC'nin topolojisi de
+		// "proxy": true der ve mod oyuncuyu proxy içinden geçirir.
+		ProxySecret: nodeProxySecret(srv),
 	}.Normalize(), true
+}
+
+func nodeProxySecret(srv *model.Server) string {
+	if srv.Link.BehindProxy() {
+		return srv.Link.Proxy.Secret
+	}
+	return ""
 }
 
 // PlayersOnline reports how many players are on the local half.
@@ -234,6 +244,15 @@ func (h *nodeHost) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 	srv.RAMMB, srv.CPUQuota = h.clamp(spec.RAMMB, srv.CPUQuota)
 	// Kural değiştiyse çalışan sunucu yeniden başlamalı (properties açılışta okunur).
 	rulesChanged := !created && spec.Rules != nil && !srv.Link.Rules.Equal(spec.Rules)
+	// Tek adres: kurucu (MCOS) Velocity proxy'si çalıştırıyorsa bu PC'nin
+	// sunucusu onun arka ucudur — oyuncular bu PC'ye doğrudan değil, proxy
+	// üzerinden gelir (DonutSMP gibi; bkz. internal/proxy). Anahtar değişince
+	// sunucu yeniden başlamalı: paper-global.yml / FabricProxy-Lite açılışta
+	// okunur.
+	px := spec.BackendProxy(srv.Software)
+	if !created && !srv.Link.Proxy.Equal(px) {
+		rulesChanged = true
+	}
 	srv.Link = model.LinkConfig{
 		Mode:       model.LinkSharedWorld,
 		Difficulty: spec.Difficulty,
@@ -242,6 +261,7 @@ func (h *nodeHost) ApplyLinkSpec(spec model.LinkSpec) (string, int, error) {
 		LinkPort:   spec.LinkPort,
 		OriginID:   spec.OriginID,
 		Rules:      spec.Rules,
+		Proxy:      px,
 	}
 	// Kurucunun oyun kuralları (online-mode, kip, PvP...): uyuşmazlıkta
 	// aktarılan oyuncu bu PC'nin sunucusundan atılıyordu (bkz. model.LinkRules).
@@ -333,6 +353,34 @@ func (h *nodeHost) stopAndWait(id string) {
 	}
 }
 
+// fetchNodeFabricProxy installs FabricProxy-Lite (değişken: sınamalar ağa
+// çıkmamalı).
+var fetchNodeFabricProxy = func(mc, modsDir string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	return catalog.New().InstallByID(ctx, "fabricproxy-lite", "fabric", mc, modsDir)
+}
+
+// ensureNodeProxyMod puts FabricProxy-Lite on a Fabric backend behind the
+// MCOS proxy (MCOS kutusundaki daemon.ensureProxyMod'un aynısı). Ayar dosyası
+// her açılışta server.WriteProxyBackend ile yazılır.
+func ensureNodeProxyMod(srv *model.Server, dir string) error {
+	if srv.Software != model.SoftwareFabric || !srv.Link.BehindProxy() {
+		return nil
+	}
+	mods := filepath.Join(dir, "mods")
+	if server.HasFabricProxy(mods) {
+		return nil
+	}
+	if err := os.MkdirAll(mods, 0o755); err != nil {
+		return err
+	}
+	if _, err := fetchNodeFabricProxy(srv.MCVersion, mods); err != nil {
+		return fmt.Errorf("FabricProxy-Lite (Fabric %s) kurulamadı: %w", srv.MCVersion, err)
+	}
+	return nil
+}
+
 // installAndStart downloads the server, installs the mod and starts it.
 func (h *nodeHost) installAndStart(srv *model.Server) {
 	// Kurulumlar SIRAYLA: açılışta restorePrevious sunucuyu başlatırken
@@ -370,6 +418,12 @@ func (h *nodeHost) installAndStart(srv *model.Server) {
 		// açardı; açıkça söylüyoruz.
 		h.note("UYARI: ortak dünya modu kurulamadı — " + err.Error())
 		h.log.Warnf("node: mod kurulamadı (%s): %v", srv.Name, err)
+	}
+	if err := ensureNodeProxyMod(srv, h.dataDir(srv)); err != nil {
+		// FabricProxy-Lite olmadan Fabric sunucusu proxy'den gelen oyuncuyu
+		// tanımaz: bu yarıya kimse giremez. Açıkça söylüyoruz.
+		h.note("UYARI: " + err.Error())
+		h.log.Warnf("node: %v", err)
 	}
 
 	if h.isRunning(srv.ID) {

@@ -74,6 +74,19 @@ func sanitizeName(s string) string {
 	return out
 }
 
+// CachedFile returns the offline-store copy of url, if there is one.
+//
+// Dışa açık: Velocity proxy'si (internal/proxy) de imajla gelen jar'ı aynı
+// adlandırmayla (URL özeti + ad) arıyor; kural iki yerde yazılsaydı
+// fetch-offline-bundle.sh ile ayrışabilirdi.
+func CachedFile(url string) (string, bool) {
+	p := cachePath(url)
+	if fi, err := os.Stat(p); err == nil && fi.Size() > 0 {
+		return p, true
+	}
+	return "", false
+}
+
 // cacheLookup copies a cached artifact to dst. Returns false if not cached.
 func cacheLookup(url, dst string) bool {
 	src := cachePath(url)

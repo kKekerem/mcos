@@ -32,6 +32,10 @@ public final class McosLink implements DedicatedServerModInitializer {
 
     @Override
     public void onInitializeServer() {
+        // Vekil (Velocity) üzerinden sessiz geçiş için "bungeecord:main"
+        // yükü. Kayıt BAŞTA yapılır: ilk oyuncu bağlanmadan kodek hazır
+        // olmalı, yoksa ilk geçişte vekile boş bir mesaj giderdi.
+        BungeePayload.register();
         ServerLifecycleEvents.SERVER_STARTED.register(server ->
                 core.started(new YarnGame(server)));
         ServerLifecycleEvents.SERVER_STOPPING.register(server -> core.stopping());
